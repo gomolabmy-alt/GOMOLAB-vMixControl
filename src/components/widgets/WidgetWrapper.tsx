@@ -1,0 +1,143 @@
+import { useRef, useState, useEffect } from 'react';
+import { useCanvasStore } from '../../stores/canvasStore';
+import type { CanvasWidget } from '../../types/canvas';
+import { WIDGET_TYPE_ICONS, WIDGET_TYPE_LABELS } from '../../types/canvas';
+
+interface Props {
+  widget: CanvasWidget;
+  children: React.ReactNode;
+}
+
+export function WidgetWrapper({ widget, children }: Props) {
+  const { editMode, selectedWidgetId, pages, activePageId, moveWidget, resizeWidget, selectWidget, deleteWidget, transferWidgetToPage } = useCanvasStore();
+  const [showPageMenu, setShowPageMenu] = useState(false);
+  const pageMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showPageMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (pageMenuRef.current && !pageMenuRef.current.contains(e.target as Node)) setShowPageMenu(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showPageMenu]);
+  const isSelected = selectedWidgetId === widget.id;
+
+  const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const resizeRef = useRef<{ sx: number; sy: number; ow: number; oh: number } | null>(null);
+
+  // ── Drag ────────────────────────────────────────────────────────────────────
+  const onDragDown = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    selectWidget(widget.id);
+    dragRef.current = { sx: e.clientX, sy: e.clientY, ox: widget.x, oy: widget.y };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+
+  const onDragMove = (e: React.PointerEvent) => {
+    if (!dragRef.current) return;
+    const { sx, sy, ox, oy } = dragRef.current;
+    const x = Math.max(0, Math.round((ox + (e.clientX - sx)) / 10) * 10);
+    const y = Math.max(0, Math.round((oy + (e.clientY - sy)) / 10) * 10);
+    moveWidget(widget.id, x, y);
+  };
+
+  const onDragUp = () => { dragRef.current = null; };
+
+  // ── Resize ──────────────────────────────────────────────────────────────────
+  const onResizeDown = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    resizeRef.current = { sx: e.clientX, sy: e.clientY, ow: widget.w, oh: widget.h };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+
+  const onResizeMove = (e: React.PointerEvent) => {
+    if (!resizeRef.current) return;
+    const { sx, sy, ow, oh } = resizeRef.current;
+    const w = Math.max(60, Math.round((ow + (e.clientX - sx)) / 10) * 10);
+    const h = Math.max(40, Math.round((oh + (e.clientY - sy)) / 10) * 10);
+    resizeWidget(widget.id, w, h);
+  };
+
+  const onResizeUp = () => { resizeRef.current = null; };
+
+  return (
+    <div
+      className={[
+        'cw',
+        editMode ? 'cw--edit' : '',
+        isSelected ? 'cw--selected' : '',
+      ].filter(Boolean).join(' ')}
+      style={{ left: widget.x, top: widget.y, width: widget.w, height: widget.h }}
+      onClick={editMode ? (e) => { e.stopPropagation(); selectWidget(widget.id); } : undefined}
+    >
+      {editMode && (
+        <div
+          className="cw-drag"
+          onPointerDown={onDragDown}
+          onPointerMove={onDragMove}
+          onPointerUp={onDragUp}
+        >
+          <span className="cw-type-badge">
+            {WIDGET_TYPE_ICONS[widget.type]}&nbsp;{WIDGET_TYPE_LABELS[widget.type]}
+          </span>
+          <div className="cw-page-menu-wrap" ref={pageMenuRef} onPointerDown={(e) => e.stopPropagation()}>
+            <button
+              className="cw-page-btn"
+              onClick={(e) => { e.stopPropagation(); setShowPageMenu((v) => !v); }}
+              title="Move / copy to page"
+            >
+              ⇄
+            </button>
+            {showPageMenu && (
+              <div className="cw-page-dropdown">
+                {pages.filter((p) => p.id !== activePageId).map((p) => (
+                  <div key={p.id} className="cw-page-row">
+                    <span className="cw-page-row-name">{p.name}</span>
+                    <button
+                      className="cw-page-action"
+                      onClick={(e) => { e.stopPropagation(); transferWidgetToPage(widget.id, p.id, false); setShowPageMenu(false); }}
+                    >Move</button>
+                    <button
+                      className="cw-page-action"
+                      onClick={(e) => { e.stopPropagation(); transferWidgetToPage(widget.id, p.id, true); setShowPageMenu(false); }}
+                    >Copy</button>
+                  </div>
+                ))}
+                {pages.filter((p) => p.id !== activePageId).length === 0 && (
+                  <div className="cw-page-empty">No other pages</div>
+                )}
+              </div>
+            )}
+          </div>
+          <button
+            className="cw-del"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); deleteWidget(widget.id); }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      <div className={`cw-body ${editMode ? 'cw-body--locked' : ''}`}>
+        {children}
+      </div>
+
+      {widget.label && (
+        <div className="cw-label">{widget.label}</div>
+      )}
+
+      {editMode && (
+        <div
+          className="cw-resize"
+          onPointerDown={onResizeDown}
+          onPointerMove={onResizeMove}
+          onPointerUp={onResizeUp}
+        />
+      )}
+    </div>
+  );
+}

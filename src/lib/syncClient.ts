@@ -1,0 +1,125 @@
+const SYNC_PORT = 9877;
+const READONLY_PORT = 9878;
+
+export type SyncAction = {
+  type: 'ACTION';
+  store: 'canvas' | 'tournament';
+  fn: string;
+  args: any[];
+};
+
+export type SyncFullState = {
+  type: 'FULL_STATE';
+  canvas?: { pages: any[]; activePageId: string };
+  tournament?: { tournaments: any[]; activeTournamentId: string };
+};
+
+export type SyncRequestState = { type: 'REQUEST_STATE' };
+
+export type SyncMessage = SyncAction | SyncFullState | SyncRequestState;
+
+type MessageListener = (msg: SyncMessage) => void;
+type StatusListener = (status: 'connecting' | 'connected' | 'disconnected') => void;
+
+class SyncClient {
+  private ws: WebSocket | null = null;
+  private listeners: MessageListener[] = [];
+  private statusListeners: StatusListener[] = [];
+  private _applying = false;
+  private _url = '';
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _getFullState: (() => SyncFullState) | null = null;
+  private _status: 'connecting' | 'connected' | 'disconnected' = 'disconnected';
+
+  get status() { return this._status; }
+
+  private _setStatus(s: 'connecting' | 'connected' | 'disconnected') {
+    if (this._status === s) return;
+    this._status = s;
+    for (const l of this.statusListeners) l(s);
+  }
+
+  onStatus(listener: StatusListener): () => void {
+    this.statusListeners.push(listener);
+    return () => { this.statusListeners = this.statusListeners.filter(l => l !== listener); };
+  }
+
+  get isReadOnly(): boolean {
+    return parseInt(window.location.port || '80', 10) === READONLY_PORT;
+  }
+
+  connect(getFullState?: () => SyncFullState) {
+    this._getFullState = getFullState ?? null;
+    const host = window.location.hostname || 'localhost';
+    const pagePort = parseInt(window.location.port || '80', 10);
+    const wsPort = pagePort === READONLY_PORT ? READONLY_PORT : SYNC_PORT;
+    this._url = `ws://${host}:${wsPort}`;
+    this._open();
+  }
+
+  private _open() {
+    this._setStatus('connecting');
+    try {
+      this.ws = new WebSocket(this._url);
+
+      this.ws.onopen = () => {
+        if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+        this._setStatus('connected');
+        if (this._getFullState) {
+          // Host: push our full state so server can cache it for new joiners
+          this._sendRaw(JSON.stringify(this._getFullState()));
+        } else {
+          // Remote client: ask host for current state
+          this._sendRaw(JSON.stringify({ type: 'REQUEST_STATE' } satisfies SyncRequestState));
+        }
+      };
+
+      this.ws.onmessage = (e) => {
+        try {
+          const msg: SyncMessage = JSON.parse(e.data);
+          this._applying = true;
+          for (const l of this.listeners) l(msg);
+          this._applying = false;
+        } catch { /* ignore malformed */ }
+      };
+
+      this.ws.onclose = () => {
+        this._setStatus('disconnected');
+        this._reconnectTimer = setTimeout(() => this._open(), 2000);
+      };
+
+      this.ws.onerror = () => {
+        this.ws?.close();
+      };
+    } catch {
+      this._setStatus('disconnected');
+      this._reconnectTimer = setTimeout(() => this._open(), 2000);
+    }
+  }
+
+  private _sendRaw(json: string) {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(json);
+  }
+
+  /** Send an action — no-op while applying a received message (prevents echo loops) */
+  send(msg: SyncMessage) {
+    if (this._applying) return;
+    this._sendRaw(JSON.stringify(msg));
+  }
+
+  /** Send full state unconditionally — used to respond to REQUEST_STATE */
+  sendFullState() {
+    if (this._getFullState) this._sendRaw(JSON.stringify(this._getFullState()));
+  }
+
+  /** Register a handler; returns an unsubscribe function */
+  onMessage(listener: MessageListener): () => void {
+    this.listeners.push(listener);
+    return () => { this.listeners = this.listeners.filter(l => l !== listener); };
+  }
+
+  /** True while dispatching a received message */
+  get applying() { return this._applying; }
+}
+
+export const syncClient = new SyncClient();

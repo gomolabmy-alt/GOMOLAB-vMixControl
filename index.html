@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#1a1a2e" />
+    <title>GOMOLAB vMix Control</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="boot-fallback" style="position:fixed;inset:0;background:#0e0e16;color:#aaa;font-family:monospace;font-size:13px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:9999;pointer-events:none;">
+      <div style="font-size:24px;opacity:0.3">GOMOLAB vMix Control</div>
+      <div id="boot-msg" style="opacity:0.5">Loading…</div>
+    </div>
+    <script>
+      window.addEventListener('error', function(e) {
+        document.getElementById('boot-msg').textContent = 'JS Error: ' + (e.message || e) + ' (' + (e.filename || '') + ':' + e.lineno + ')';
+        document.getElementById('boot-fallback').style.pointerEvents = 'auto';
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        document.getElementById('boot-msg').textContent = 'Unhandled: ' + (e.reason?.message || e.reason || e);
+        document.getElementById('boot-fallback').style.pointerEvents = 'auto';
+      });
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

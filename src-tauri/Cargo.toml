@@ -1,0 +1,29 @@
+[package]
+name = "gomolab-vmix-control"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+name = "gomolab_vmix_control_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "macros", "multipart"] }
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+tower = { version = "0.4", features = ["util"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+once_cell = "1"
+rfd = "0.15"
+include_dir = "0.7"
+mime_guess = "2"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
