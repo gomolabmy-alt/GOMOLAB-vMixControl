@@ -15,6 +15,8 @@ function VmixConnectDropdown({
   const [host, setHost] = useState('');
   const [port, setPort] = useState('8088');
   const [name, setName] = useState('');
+  const [diagResult, setDiagResult] = useState<string | null>(null);
+  const [diagRunning, setDiagRunning] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -24,6 +26,23 @@ function VmixConnectDropdown({
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [onClose]);
+
+  const handleDiagnose = async () => {
+    if (!host.trim()) return;
+    setDiagRunning(true);
+    setDiagResult(null);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const result = await invoke<string>('diagnose_vmix', {
+        host: host.trim(),
+        port: parseInt(port, 10) || 8088,
+      });
+      setDiagResult(result);
+    } catch (e) {
+      setDiagResult(String(e));
+    }
+    setDiagRunning(false);
+  };
 
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -72,7 +91,25 @@ function VmixConnectDropdown({
         <button className="titlebar-dropdown-btn" type="submit" disabled={!host.trim()}>
           Connect
         </button>
+        <button
+          className="titlebar-dropdown-btn"
+          type="button"
+          style={{ marginLeft: 4, background: '#444' }}
+          disabled={!host.trim() || diagRunning}
+          onClick={handleDiagnose}
+        >
+          {diagRunning ? '…' : 'Test'}
+        </button>
       </form>
+      {diagResult && (
+        <pre style={{
+          margin: '6px 0 0', padding: '6px 8px', background: '#111',
+          color: '#ccc', fontSize: 10, borderRadius: 4,
+          maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+        }}>
+          {diagResult}
+        </pre>
+      )}
       {mode === 'new' && (
         <input
           className="titlebar-dropdown-host"
@@ -171,6 +208,7 @@ export function TitleBar() {
   const [syncFlash, setSyncFlash] = useState(false);
   const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
+  const [buildNumber, setBuildNumber] = useState<string>('');
   const [syncInfo, setSyncInfo] = useState<{
     url: string; readonlyUrl: string;
     interactiveEnabled: boolean; readonlyEnabled: boolean;
@@ -184,6 +222,13 @@ export function TitleBar() {
   }, [isTauri]);
 
   useEffect(() => { refreshServerInfo(); }, [refreshServerInfo]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    import('@tauri-apps/api/core').then(({ invoke }) =>
+      invoke<string>('get_build_number').then(setBuildNumber).catch(() => {})
+    );
+  }, [isTauri]);
 
   const toggleInteractive = useCallback(async () => {
     if (!isTauri) return;
@@ -219,7 +264,9 @@ export function TitleBar() {
       {/* Center — drag region */}
       <div className="titlebar-center" data-tauri-drag-region>
         {isTauri && (
-          <span className="titlebar-app-name">GOMOLAB vMix Control</span>
+          <span className="titlebar-app-name">
+            GOMOLAB vMix Control{buildNumber ? ` #${buildNumber}` : ''}
+          </span>
         )}
       </div>
 

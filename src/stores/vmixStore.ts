@@ -247,8 +247,9 @@ export const useVmixStore = create<VmixStore>()(
         set({ connections: newConnections, connectionStatus: 'connecting', connectionError: null });
 
         const client = new VmixApiClient(config.host, config.port);
+        let initialState;
         try {
-          await client.fetchState();
+          initialState = await client.fetchState();
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
           const errEntry = { ...entry, status: 'error' as ConnectionStatus, error: `Cannot reach ${config.host}:${config.port} — ${detail}` };
@@ -258,8 +259,16 @@ export const useVmixStore = create<VmixStore>()(
           });
           return;
         }
+        // Mark connected immediately using the initial HTTP state — don't wait
+        // for the first TCP push (which may never arrive if TCP is blocked).
         const newClients = { ...get().clients, [id]: client };
-        set({ clients: newClients, client, activeConnection: config, connectionStatus: 'connected' });
+        const connectedEntry = { ...entry, status: 'connected' as ConnectionStatus, error: null, vmixState: initialState, lastUpdated: Date.now() };
+        set({
+          connections: get().connections.map((c) => c.id === id ? connectedEntry : c),
+          clients: newClients, client, activeConnection: config,
+          connectionStatus: 'connected', connectionError: null,
+          vmixState: initialState, lastUpdated: Date.now(),
+        });
 
         client.startPolling(
           (state) => {

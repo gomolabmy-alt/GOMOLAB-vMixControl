@@ -66,23 +66,22 @@ pub fn run() {
             });
 
             // Trigger the macOS Local Network permission dialog at startup.
-            // Without this, the dialog only appears on the first outbound connection
-            // attempt — which may fail silently before the user can grant permission.
             tauri::async_runtime::spawn(async {
                 use tokio::net::UdpSocket;
                 if let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await {
                     let _ = sock.set_broadcast(true);
-                    // Send a harmless zero-byte UDP to the limited broadcast address.
-                    // This is the canonical way to surface the macOS permission dialog.
                     let _ = sock.send_to(b"\x00", "255.255.255.255:9").await;
                 }
             });
 
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_build_number,
             commands::http_get,
             commands::tcp_test,
+            commands::diagnose_vmix,
             commands::get_server_info,
             commands::toggle_interactive,
             commands::toggle_readonly,

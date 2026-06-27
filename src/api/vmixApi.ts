@@ -23,11 +23,10 @@ async function httpGet(url: string): Promise<string> {
     const response = await CapacitorHttp.get({ url, headers: {} });
     return typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
   }
-  // In Tauri, route through Rust backend — no browser network restrictions.
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-    const { invoke } = await import('@tauri-apps/api/core');
-    return invoke<string>('http_get', { url });
-  }
+  // Use WKWebView fetch() — same networking stack as Safari/browser mode.
+  // Rust TCP is blocked by macOS network extensions on this machine, but
+  // WKWebView's networking process is not (browser mode confirms vMix is reachable).
+  // vMix sends Access-Control-Allow-Origin: * so CORS is not an issue.
   const response = await fetch(url);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.text();
@@ -444,7 +443,7 @@ export class VmixApiClient {
     // Listen for full XML state pushes from vMix (fires immediately on subscribe,
     // then on every state change, and on each explicit XML\r\n request).
     this._tcpUnlisten = await listen<string>(xmlEvent, (event) => {
-      try { this.onStateUpdate?.(parseXmlState(event.payload)); } catch { /* ignore parse errors */ }
+      try { this.onStateUpdate?.(parseXmlState(event.payload)); } catch (e) { console.warn('vMix XML parse:', e); }
     });
 
     // Listen for disconnect: bridge with HTTP polling during the 3 s reconnect gap.

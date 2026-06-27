@@ -2,20 +2,92 @@ use crate::AppState;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{Emitter, State};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
+// ── TCP socket that bypasses VPN packet tunnels (macOS) ─────────────────────
+// On macOS, VPN Network Extensions (e.g. Speedify) intercept TCP connections
+// from GUI apps and route them through the tunnel, causing EHOSTUNREACH for
+// LAN addresses that the tunnel cannot reach.  Setting IP_BOUND_IF on the
+// socket forces it to use a specific physical interface, bypassing the tunnel.
+#[cfg(target_os = "macos")]
+fn set_bound_if_en(socket: &tokio::net::TcpSocket) {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    // Walk the physical interfaces (en0, en1, …) and bind to the first one
+    // that has an IPv4 address (i.e. is up and connected).
+    for iface in ["en0", "en1", "en2"] {
+        let name = match CString::new(iface) { Ok(n) => n, Err(_) => continue };
+        let idx = unsafe { libc::if_nametoindex(name.as_ptr()) };
+        if idx == 0 { continue; }
+        let idx = idx as libc::c_int;
+        let ret = unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::IPPROTO_IP,
+                25, // IP_BOUND_IF — binds socket to a specific interface index
+                &idx as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if ret == 0 { return; }
+    }
+}
+
+async fn tcp_connect_direct(addr: &str) -> Result<tokio::net::TcpStream, String> {
+    use tokio::net::TcpSocket;
+    let dest: SocketAddr = addr.parse().map_err(|e| format!("addr parse: {e}"))?;
+    let socket = TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
+    #[cfg(target_os = "macos")]
+    set_bound_if_en(&socket);
+    socket.connect(dest).await.map_err(|e| format!("connect {addr}: {e}"))
+}
+
 // ── Raw HTTP/1.1 GET over plain TCP ─────────────────────────────────────────
-// Using tokio directly (no reqwest) so the same socket stack that handles
-// our TCP subscription also drives HTTP — no TLS-library initialisation,
-// no connection-pool state, nothing to interfere with plain-HTTP LAN traffic.
 
 async fn http_get_inner(url: &str) -> Result<String, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+    // On macOS, spawn system curl as a subprocess. curl is a separate Apple
+    // binary with its own process identity — Speedify's NEAppProxyProvider
+    // per-app filter does not match it, and CORS is irrelevant outside a
+    // browser context.  Fallback to raw TCP on other platforms (Windows).
+    #[cfg(target_os = "macos")]
+    return http_get_curl(url).await;
+
+    #[cfg(not(target_os = "macos"))]
+    return http_get_tcp(url).await;
+}
+
+#[cfg(target_os = "macos")]
+async fn http_get_curl(url: &str) -> Result<String, String> {
+    let out = tokio::process::Command::new("/usr/bin/curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--max-time", "10",
+            "--connect-timeout", "5",
+            "--location",
+            url,
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("curl spawn: {e}"))?;
+
+    if !out.status.success() {
+        let msg = String::from_utf8_lossy(&out.stderr);
+        let code = out.status.code().unwrap_or(-1);
+        return Err(format!("curl({code}): {msg}"));
+    }
+
+    String::from_utf8(out.stdout).map_err(|e| format!("curl output encoding: {e}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn http_get_tcp(url: &str) -> Result<String, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::time::{timeout, Duration};
 
     let rest = url
@@ -26,67 +98,93 @@ async fn http_get_inner(url: &str) -> Result<String, String> {
         Some(i) => (&rest[..i], &rest[i..]),
         None    => (rest, "/"),
     };
-    // Ensure there is a port; default HTTP is 80
     let addr = if host_port.contains(':') {
         host_port.to_string()
     } else {
         format!("{host_port}:80")
     };
 
-    let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(&addr))
+    let stream = timeout(Duration::from_secs(5), tcp_connect_direct(&addr))
         .await
         .map_err(|_| format!("connect timeout ({addr})"))?
-        .map_err(|e| format!("connect {addr}: {e}"))?;
+        .map_err(|e| e)?;
 
-    // HTTP/1.1 + Connection:close so the server terminates the body by closing,
-    // which lets read_to_end work regardless of whether chunked encoding is used.
+    // Use buffered reader so we can read headers line-by-line efficiently.
+    // vMix responds with Connection: Keep-Alive, so we MUST use Content-Length
+    // to know when the body ends — read_to_end would block until timeout.
+    let (reader_half, mut writer_half) = stream.into_split();
+    let mut reader = BufReader::new(reader_half);
+
     let req = format!(
         "GET {path} HTTP/1.1\r\nHost: {host_port}\r\nAccept: */*\r\nConnection: close\r\n\r\n"
     );
-    timeout(Duration::from_secs(5), stream.write_all(req.as_bytes()))
+    timeout(Duration::from_secs(5), writer_half.write_all(req.as_bytes()))
         .await
         .map_err(|_| "write timeout".to_string())?
         .map_err(|e| format!("write: {e}"))?;
 
-    let mut raw: Vec<u8> = Vec::with_capacity(131_072);
-    timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
+    // Read status line + headers
+    let mut status_line = String::new();
+    timeout(Duration::from_secs(5), reader.read_line(&mut status_line))
         .await
-        .map_err(|_| "read timeout".to_string())?
-        .map_err(|e| format!("read: {e}"))?;
+        .map_err(|_| "header read timeout".to_string())?
+        .map_err(|e| format!("header read: {e}"))?;
 
-    // Split header / body at \r\n\r\n (or \n\n as fallback)
-    let (hdr_end, body_start) = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| (i, i + 4))
-        .or_else(|| raw.windows(2).position(|w| w == b"\n\n").map(|i| (i, i + 2)))
-        .ok_or("no HTTP header terminator in response")?;
-
-    let hdr = std::str::from_utf8(&raw[..hdr_end]).unwrap_or("");
-
-    // HTTP status check
-    let status: u16 = hdr
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
+    let status: u16 = status_line.split_whitespace().nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
     if status >= 400 {
         return Err(format!("HTTP {status}"));
     }
 
-    let body_raw = &raw[body_start..];
+    let mut content_length: Option<usize> = None;
+    let mut chunked = false;
+    loop {
+        let mut hdr_line = String::new();
+        timeout(Duration::from_secs(5), reader.read_line(&mut hdr_line))
+            .await
+            .map_err(|_| "header read timeout".to_string())?
+            .map_err(|e| format!("header read: {e}"))?;
+        let trimmed = hdr_line.trim();
+        if trimmed.is_empty() { break; } // blank line = end of headers
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some(val) = lower.strip_prefix("content-length:") {
+            content_length = val.trim().parse().ok();
+        }
+        if lower.contains("transfer-encoding") && lower.contains("chunked") {
+            chunked = true;
+        }
+    }
 
-    // Decode chunked transfer encoding when the server uses it
-    let body = if hdr.to_ascii_lowercase().contains("transfer-encoding: chunked") {
-        decode_chunked(body_raw)
+    // Read body using Content-Length when available (vMix uses Keep-Alive so
+    // we cannot rely on EOF — read_exact with the known length is required).
+    let body = if let Some(len) = content_length {
+        let mut buf = vec![0u8; len];
+        timeout(Duration::from_secs(10), reader.read_exact(&mut buf))
+            .await
+            .map_err(|_| "body read timeout".to_string())?
+            .map_err(|e| format!("body read: {e}"))?;
+        String::from_utf8_lossy(&buf).into_owned()
+    } else if chunked {
+        let mut raw: Vec<u8> = Vec::with_capacity(131_072);
+        timeout(Duration::from_secs(10), reader.read_to_end(&mut raw))
+            .await
+            .map_err(|_| "body read timeout".to_string())?
+            .map_err(|e| format!("body read: {e}"))?;
+        decode_chunked(&raw)
     } else {
-        String::from_utf8_lossy(body_raw).into_owned()
+        let mut raw: Vec<u8> = Vec::with_capacity(131_072);
+        timeout(Duration::from_secs(10), reader.read_to_end(&mut raw))
+            .await
+            .map_err(|_| "body read timeout".to_string())?
+            .map_err(|e| format!("body read: {e}"))?;
+        String::from_utf8_lossy(&raw).into_owned()
     };
 
     Ok(body)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn decode_chunked(data: &[u8]) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(data.len());
     let mut i = 0;
@@ -134,7 +232,6 @@ static TCP_TASKS: Lazy<AsyncMutex<HashMap<String, TcpEntry>>> =
 #[tauri::command]
 pub async fn vmix_tcp_connect(handle: tauri::AppHandle, host: String, tcp_port: u16) -> Result<(), String> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::TcpStream;
 
     let addr = format!("{host}:{tcp_port}");
 
@@ -143,7 +240,7 @@ pub async fn vmix_tcp_connect(handle: tauri::AppHandle, host: String, tcp_port: 
         let _ = entry.cancel.send(());
     }
 
-    let stream = TcpStream::connect(&addr)
+    let stream = tcp_connect_direct(&addr)
         .await
         .map_err(|e| format!("TCP connect to {addr}: {e}"))?;
 
@@ -253,6 +350,13 @@ pub struct ImageInfo {
     pub url: String,
 }
 
+// ── Build info ───────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_build_number() -> &'static str {
+    env!("BUILD_NUMBER")
+}
+
 // ── vMix HTTP proxy ──────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -273,6 +377,82 @@ pub async fn tcp_test(host: String, port: u16) -> String {
         Ok(Err(e)) => format!("FAIL: {e} (addr={addr})"),
         Err(_) => format!("TIMEOUT after 5s (addr={addr})"),
     }
+}
+
+// ── Connection diagnostic ────────────────────────────────────────────────────
+// Tries every available connection method and returns a plaintext report.
+// Called from the "Test" button in the connect dialog so the user can see
+// exactly which method works and what error each failing method returns.
+
+#[tauri::command]
+pub async fn diagnose_vmix(host: String, port: u16) -> String {
+    use tokio::time::{timeout, Duration};
+
+    let mut out: Vec<String> = Vec::new();
+    let http_url = format!("http://{}:{}/api/", host, port);
+
+    // ── Method 1: curl subprocess ─────────────────────────────────────────
+    #[cfg(target_os = "macos")]
+    {
+        out.push(format!("[1] curl → {http_url}"));
+        match http_get_curl(&http_url).await {
+            Ok(body) => {
+                let snippet: String = body.chars().take(100).collect();
+                out.push(format!("    OK  {} bytes | {}", body.len(), snippet.replace('\n', " ")));
+            }
+            Err(e) => out.push(format!("    ERR {}", e.trim())),
+        }
+    }
+
+    // ── Method 2: raw TCP with IP_BOUND_IF to HTTP port ───────────────────
+    let addr_http = format!("{}:{}", host, port);
+    out.push(format!("[2] tcp+boundif → {addr_http}"));
+    match timeout(Duration::from_secs(5), tcp_connect_direct(&addr_http)).await {
+        Ok(Ok(_))  => out.push("    OK".to_string()),
+        Ok(Err(e)) => out.push(format!("    ERR {e}")),
+        Err(_)     => out.push("    TIMEOUT".to_string()),
+    }
+
+    // ── Method 3: raw plain TCP to HTTP port ──────────────────────────────
+    out.push(format!("[3] tcp plain → {addr_http}"));
+    match timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(&addr_http)).await {
+        Ok(Ok(_))  => out.push("    OK".to_string()),
+        Ok(Err(e)) => out.push(format!("    ERR {e}")),
+        Err(_)     => out.push("    TIMEOUT".to_string()),
+    }
+
+    // ── Method 4: raw plain TCP to vMix TCP port 8099 ─────────────────────
+    let addr_tcp = format!("{}:8099", host);
+    out.push(format!("[4] tcp plain → {addr_tcp}"));
+    match timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(&addr_tcp)).await {
+        Ok(Ok(_))  => out.push("    OK".to_string()),
+        Ok(Err(e)) => out.push(format!("    ERR {e}")),
+        Err(_)     => out.push("    TIMEOUT".to_string()),
+    }
+
+    // ── Method 5: curl to TCP port (proves curl subprocess can reach LAN) ─
+    #[cfg(target_os = "macos")]
+    {
+        let tcp_check_url = format!("http://{}:8099/", host);
+        out.push(format!("[5] curl → {tcp_check_url} (expect fail on protocol, not network)"));
+        let res = tokio::process::Command::new("/usr/bin/curl")
+            .args(["--silent", "--connect-timeout", "5", "--max-time", "6",
+                   "--write-out", "%{http_code}", "--output", "/dev/null",
+                   &tcp_check_url])
+            .output()
+            .await;
+        match res {
+            Ok(o) => {
+                let code = o.status.code().unwrap_or(-1);
+                let http_code = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                out.push(format!("    exit={code} http={http_code} err={stderr}"));
+            }
+            Err(e) => out.push(format!("    spawn ERR {e}")),
+        }
+    }
+
+    out.join("\n")
 }
 
 // ── Sync server info & toggles ───────────────────────────────────────────────
