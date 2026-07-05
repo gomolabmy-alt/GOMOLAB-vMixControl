@@ -6,12 +6,6 @@ import { useVmixStore } from './vmixStore';
 import { syncClient } from '../lib/syncClient';
 import TimerWorkerClass from '../workers/timerWorker?worker&inline';
 
-// Tracks when this client last received a timer tick from another client.
-// The interval callback backs off if a remote tick arrived recently, so only
-// one client drives the timer at a time. If the primary disconnects the
-// backup takes over automatically when no tick arrives for > 0.8 * tickMs.
-const lastRemoteTicks: Record<string, number> = {};
-
 // Web Worker — used only in browser mode (not Tauri).
 // In browsers setInterval in a worker is not throttled by tab visibility.
 const timerWorker: Worker = new TimerWorkerClass();
@@ -125,8 +119,7 @@ function computeTimerPeriodLabel(cfg: Record<string, any>): string {
   return `P${currentPeriod}/${periods}`;
 }
 
-function timerSendAll(client: any, cfg: Record<string, any>, value: string) {
-  if (!client) return;
+function timerSendAll(primaryClient: any, cfg: Record<string, any>, value: string) {
   const targets: Array<{ inputKey: string; fieldName?: string; fieldTimerName?: string; fieldPeriodLabel?: string; fieldPeriodImage?: string }> = cfg.vmixInputs?.length
     ? cfg.vmixInputs
     : cfg.vmixInputKey
@@ -137,12 +130,13 @@ function timerSendAll(client: any, cfg: Record<string, any>, value: string) {
   const autoLabel = computeTimerPeriodLabel(cfg);
   const periodText = override?.customText ?? autoLabel;
   const periodImage = override?.imagePath ?? '';
+  if (!primaryClient) return;
   for (const t of targets) {
     if (!t.inputKey) continue;
-    if (t.fieldName) client.setTextField(t.inputKey, t.fieldName, value);
-    if (t.fieldTimerName && cfg.name) client.setTextField(t.inputKey, t.fieldTimerName, cfg.name);
-    if (t.fieldPeriodLabel && periodText) client.setTextField(t.inputKey, t.fieldPeriodLabel, periodText);
-    if (t.fieldPeriodImage && periodImage) client.setTextField(t.inputKey, t.fieldPeriodImage, periodImage);
+    if (t.fieldName) primaryClient.setTextField(t.inputKey, t.fieldName, value);
+    if (t.fieldTimerName && cfg.name) primaryClient.setTextField(t.inputKey, t.fieldTimerName, cfg.name);
+    if (t.fieldPeriodLabel && periodText) primaryClient.setTextField(t.inputKey, t.fieldPeriodLabel, periodText);
+    if (t.fieldPeriodImage && periodImage) primaryClient.setTextField(t.inputKey, t.fieldPeriodImage, periodImage);
   }
 }
 
@@ -175,11 +169,14 @@ function fireFinalPlayEndTrigger(cfg: Record<string, any>, client: any) {
 }
 
 function sendOverrunColor(cfg: Record<string, any>, client: any, active: boolean) {
-  if (!client || !cfg.overrunColorEnabled || !cfg.vmixInputKey) return;
+  if (!client || !cfg.overrunColorEnabled) return;
+  // Support both the newer vmixInputs[] array and the legacy vmixInputKey scalar
+  const inputKey = cfg.vmixInputs?.[0]?.inputKey ?? cfg.vmixInputKey;
+  if (!inputKey) return;
   const field = cfg.overrunColorField || cfg.fieldName;
   if (!field) return;
   const color = hexToVmixColor(active ? (cfg.overrunColor || '#ff0000') : (cfg.normalColor || '#ffffff'));
-  client.setColor(cfg.vmixInputKey, field, color);
+  client.setColor(inputKey, field, color);
 }
 
 function formatTime(ms: number, fmt: string): string {
@@ -211,6 +208,33 @@ interface CanvasStore {
   matchDataSnapshot: Record<string, Record<string, any>> | null;
   // true once the desktop app is running OR a browser has received FULL_STATE
   syncReady: boolean;
+
+  // ── Commentator canvas (separate from main canvas) ──────────────────
+  commentatorPages: CanvasPage[];
+  commentatorActivePageId: string;
+  commentatorSelectedWidgetId: string | null;
+
+  // Commentator pages
+  addCommentatorPage: () => void;
+  deleteCommentatorPage: (id: string) => void;
+  renameCommentatorPage: (id: string, name: string) => void;
+  setCommentatorActivePage: (id: string) => void;
+
+  // Commentator widget selection
+  selectCommentatorWidget: (id: string | null) => void;
+
+  // Commentator widgets
+  addCommentatorWidget: (type: WidgetType) => void;
+  deleteCommentatorWidget: (widgetId: string) => void;
+  moveCommentatorWidget: (widgetId: string, x: number, y: number) => void;
+  resizeCommentatorWidget: (widgetId: string, w: number, h: number) => void;
+  updateCommentatorWidget: (widgetId: string, patch: Partial<CanvasWidget>) => void;
+  updateCommentatorWidgetConfig: (widgetId: string, patch: Record<string, any>) => void;
+  duplicateCommentatorWidget: (widgetId: string) => void;
+  transferCommentatorWidgetToPage: (widgetId: string, targetPageId: string, copy: boolean) => void;
+
+  // Restore commentator canvas from incoming sync
+  restoreCommentatorCanvas: (pages: unknown[], activePageId: string) => void;
 
   // Pages
   addPage: () => void;
@@ -322,6 +346,18 @@ export const useCanvasStore = create<CanvasStore>()(
         syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'updateWidgetConfig', args: [widgetId, patch] });
       };
 
+      const initialCommentatorPage = makePage('Page 1');
+
+      // Helper: send full commentator canvas state to the server so commentator
+      // clients receive the update. Only the desktop host sends this.
+      function sendCommentatorFullState() {
+        const { commentatorPages, commentatorActivePageId } = get();
+        syncClient.send({
+          type: 'COMMENTATOR_FULL_STATE' as const,
+          canvas: { pages: commentatorPages, activePageId: commentatorActivePageId },
+        });
+      }
+
       return {
         pages: [initialPage],
         activePageId: initialPage.id,
@@ -331,6 +367,165 @@ export const useCanvasStore = create<CanvasStore>()(
         matchDataSnapshot: null,
         // Desktop app is always ready; browsers wait until FULL_STATE arrives from the app
         syncReady: typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window,
+
+        // ── Commentator canvas ──────────────────────────────────────────────
+        commentatorPages: [initialCommentatorPage],
+        commentatorActivePageId: initialCommentatorPage.id,
+        commentatorSelectedWidgetId: null,
+
+        addCommentatorPage: () => {
+          const page = makePage(`Page ${get().commentatorPages.length + 1}`);
+          set({ commentatorPages: [...get().commentatorPages, page], commentatorActivePageId: page.id });
+          sendCommentatorFullState();
+        },
+
+        deleteCommentatorPage: (id) => {
+          const pages = get().commentatorPages.filter((p) => p.id !== id);
+          if (pages.length === 0) {
+            const page = makePage('Page 1');
+            set({ commentatorPages: [page], commentatorActivePageId: page.id });
+          } else {
+            const stillActive = pages.some((p) => p.id === get().commentatorActivePageId);
+            set({ commentatorPages: pages, commentatorActivePageId: stillActive ? get().commentatorActivePageId : pages[0].id });
+          }
+          sendCommentatorFullState();
+        },
+
+        renameCommentatorPage: (id, name) => {
+          set({ commentatorPages: get().commentatorPages.map((p) => p.id === id ? { ...p, name } : p) });
+          sendCommentatorFullState();
+        },
+
+        setCommentatorActivePage: (id) => {
+          set({ commentatorActivePageId: id, commentatorSelectedWidgetId: null });
+          sendCommentatorFullState();
+        },
+
+        selectCommentatorWidget: (id) => set({ commentatorSelectedWidgetId: id }),
+
+        addCommentatorWidget: (type) => {
+          const def = WIDGET_DEFAULTS[type];
+          const widget: CanvasWidget = {
+            id: crypto.randomUUID(),
+            type,
+            x: snap(Math.random() * (CANVAS_W / 2)),
+            y: snap(Math.random() * 200 + 20),
+            w: def.w,
+            h: def.h,
+            config: { ...def.config },
+          };
+          const pageId = get().commentatorActivePageId;
+          set({
+            commentatorPages: get().commentatorPages.map((p) =>
+              p.id === pageId ? { ...p, widgets: [...p.widgets, widget] } : p
+            ),
+            commentatorSelectedWidgetId: widget.id,
+          });
+          sendCommentatorFullState();
+        },
+
+        deleteCommentatorWidget: (widgetId) => {
+          set({
+            commentatorPages: get().commentatorPages.map((p) => ({
+              ...p,
+              widgets: p.widgets.filter((w) => w.id !== widgetId),
+            })),
+            commentatorSelectedWidgetId: null,
+          });
+          sendCommentatorFullState();
+        },
+
+        moveCommentatorWidget: (widgetId, x, y) => {
+          set({
+            commentatorPages: get().commentatorPages.map((p) => ({
+              ...p,
+              widgets: p.widgets.map((w) =>
+                w.id === widgetId
+                  ? { ...w, x: Math.max(0, Math.min(x, CANVAS_W - w.w)), y: Math.max(0, Math.min(y, CANVAS_H - w.h)) }
+                  : w
+              ),
+            })),
+          });
+          sendCommentatorFullState();
+        },
+
+        resizeCommentatorWidget: (widgetId, w, h) => {
+          set({
+            commentatorPages: get().commentatorPages.map((p) => ({
+              ...p,
+              widgets: p.widgets.map((ww) =>
+                ww.id === widgetId ? { ...ww, w: Math.max(60, w), h: Math.max(40, h) } : ww
+              ),
+            })),
+          });
+          sendCommentatorFullState();
+        },
+
+        updateCommentatorWidget: (widgetId, patch) => {
+          set({
+            commentatorPages: get().commentatorPages.map((p) => ({
+              ...p,
+              widgets: p.widgets.map((w) => w.id === widgetId ? { ...w, ...patch } : w),
+            })),
+          });
+          sendCommentatorFullState();
+        },
+
+        updateCommentatorWidgetConfig: (widgetId, patch) => {
+          set({
+            commentatorPages: get().commentatorPages.map((p) => ({
+              ...p,
+              widgets: p.widgets.map((w) =>
+                w.id === widgetId ? { ...w, config: { ...w.config, ...patch } } : w
+              ),
+            })),
+          });
+          sendCommentatorFullState();
+        },
+
+        duplicateCommentatorWidget: (widgetId) => {
+          const pageId = get().commentatorActivePageId;
+          let cloned: CanvasWidget | null = null;
+          for (const page of get().commentatorPages) {
+            const found = page.widgets.find((w) => w.id === widgetId);
+            if (found) { cloned = { ...found, id: crypto.randomUUID(), x: found.x + 20, y: found.y + 20 }; break; }
+          }
+          if (!cloned) return;
+          set({
+            commentatorPages: get().commentatorPages.map((p) =>
+              p.id === pageId ? { ...p, widgets: [...p.widgets, cloned!] } : p
+            ),
+            commentatorSelectedWidgetId: cloned.id,
+          });
+          sendCommentatorFullState();
+        },
+
+        transferCommentatorWidgetToPage: (widgetId, targetPageId, copy) => {
+          let widget: CanvasWidget | null = null;
+          const pages = get().commentatorPages.map((p) => {
+            const idx = p.widgets.findIndex((w) => w.id === widgetId);
+            if (idx === -1) return p;
+            widget = p.widgets[idx];
+            return copy ? p : { ...p, widgets: p.widgets.filter((_, i) => i !== idx) };
+          });
+          if (!widget) return;
+          const w = widget as CanvasWidget;
+          const cloned: CanvasWidget = copy ? { ...w, id: crypto.randomUUID() } : w;
+          const final = pages.map((p) =>
+            p.id === targetPageId ? { ...p, widgets: [...p.widgets, cloned] } : p
+          );
+          set({ commentatorPages: final, commentatorActivePageId: targetPageId, commentatorSelectedWidgetId: cloned.id });
+          sendCommentatorFullState();
+        },
+
+        restoreCommentatorCanvas: (pages, activePageId) => {
+          const newPages = pages as CanvasPage[];
+          const currentId = get().commentatorActivePageId;
+          const resolvedId = newPages.some((p) => p.id === currentId)
+            ? currentId
+            : activePageId as string;
+          set({ commentatorPages: newPages, commentatorActivePageId: resolvedId });
+        },
 
         // ── Pages ──────────────────────────────────────────────────────────
 
@@ -360,7 +555,6 @@ export const useCanvasStore = create<CanvasStore>()(
 
         setActivePage: (id) => {
           set({ activePageId: id, selectedWidgetId: null });
-          syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'setActivePage', args: [id] });
         },
 
         // ── Edit mode ──────────────────────────────────────────────────────
@@ -640,6 +834,10 @@ export const useCanvasStore = create<CanvasStore>()(
             if (currentPeriod < periods) {
               const breakMs = cfg.breakDurationMs ?? 0;
               if (cfg.finalPlayEnabled) {
+                // Reset wall-clock anchors so the FP tick computes from 0, not from
+                // the period's running time (same re-anchor done for the last period below).
+                _runWallStart[widgetId] = Date.now();
+                _runGameMs[widgetId] = 0;
                 // Keep interval running for Final Play; store break/next-period details for after
                 updateWidgetConfig(widgetId, {
                   currentMs: periodEndMs,
@@ -680,7 +878,11 @@ export const useCanvasStore = create<CanvasStore>()(
               const { client } = useVmixStore.getState();
               timerSendAll(client, cfg, formatTime(finalMs, cfg.format));
               if (cfg.finalPlayEnabled) {
-                // Keep worker running for Final Play count-up
+                // Keep worker running for Final Play count-up; re-anchor
+                // wall-clock so the Final Play counter starts from 0, not
+                // from the game period's anchor.
+                _runWallStart[widgetId] = Date.now();
+                _runGameMs[widgetId] = 0;
                 updateWidgetConfig(widgetId, {
                   currentMs: finalMs, running: true,
                   currentPeriod: periods + 1,
@@ -696,12 +898,14 @@ export const useCanvasStore = create<CanvasStore>()(
             }
           }
 
+          // Only the host machine actually drives the tick loop and sends to vMix.
+          // Other connected controllers (remote devices/tabs) broadcast start/pause/adjust
+          // actions above but must not independently re-drive the same timer — running a
+          // tick loop on every peer caused competing sends and skipped vMix updates.
+          if (syncClient.isHost) {
           timerTickHandlers[widgetId] = () => {
             const cfg = findWidgetConfig(widgetId);
             if (!cfg || !cfg.running) return;
-            // Back off if another connected client ticked recently (prevents double-counting)
-            const last = lastRemoteTicks[widgetId];
-            if (last && Date.now() - last < tickMs * 0.8) return;
             const { client } = useVmixStore.getState();
 
             // ── Extra Time tick ─────────────────────────────────────────────
@@ -737,9 +941,25 @@ export const useCanvasStore = create<CanvasStore>()(
               }
 
               const etPeriodStart = cfg.etPeriodStartMs ?? 0;
+
+              // Wall-clock accurate ET position — mirrors normal timer approach
+              const etWallStart = _runWallStart[widgetId];
+              const etGameStart = _runGameMs[widgetId];
+              let next: number;
+              if (etWallStart !== undefined && etGameStart !== undefined) {
+                const elapsed = Date.now() - etWallStart;
+                next = cfg.mode === 'countdown'
+                  ? Math.max(0, etGameStart - elapsed)
+                  : etGameStart + elapsed;
+              } else {
+                next = cfg.mode === 'countdown'
+                  ? Math.max(0, (cfg.etCurrentMs ?? 0) - tickMs)
+                  : (cfg.etCurrentMs ?? 0) + tickMs;
+              }
+
               const etDoneCondition = cfg.mode === 'countdown'
-                ? Math.max(0, (cfg.etCurrentMs ?? 0) - tickMs) <= 0
-                : etDurationMs > 0 && (cfg.etCurrentMs ?? 0) + tickMs >= etPeriodStart + etDurationMs;
+                ? next <= 0
+                : etDurationMs > 0 && next >= etPeriodStart + etDurationMs;
 
               if (etDoneCondition) {
                 if (cfg.overrun) {
@@ -778,9 +998,6 @@ export const useCanvasStore = create<CanvasStore>()(
                 return;
               }
 
-              const next = cfg.mode === 'countdown'
-                ? Math.max(0, (cfg.etCurrentMs ?? 0) - tickMs)
-                : (cfg.etCurrentMs ?? 0) + tickMs;
               updateWidgetConfig(widgetId, { etCurrentMs: next });
               timerSendAll(client, cfg, formatTime(next, cfg.format));
               sendMiniTimer(client, cfg, next);
@@ -841,7 +1058,11 @@ export const useCanvasStore = create<CanvasStore>()(
 
             // ── Final Play tick ──────────────────────────────────────────────
             if (cfg.inFinalPlay) {
-              const next = (cfg.finalPlayMs ?? 0) + tickMs;
+              const fpWallStart = _runWallStart[widgetId];
+              const fpGameStart = _runGameMs[widgetId];
+              const next = (fpWallStart !== undefined && fpGameStart !== undefined)
+                ? fpGameStart + (Date.now() - fpWallStart)
+                : (cfg.finalPlayMs ?? 0) + tickMs;
               const fpDur = cfg.finalPlayDurationMs ?? 0;
               if (fpDur > 0 && next >= fpDur) {
                 // Auto-end Final Play when duration expires
@@ -878,7 +1099,11 @@ export const useCanvasStore = create<CanvasStore>()(
 
             // ── Normal tick ─────────────────────────────────────────────────
             if (cfg.inBreak) {
-              const nextBreak = Math.max(0, (cfg.breakCurrentMs ?? 0) - tickMs);
+              const bWallStart = _runWallStart[widgetId];
+              const bGameStart = _runGameMs[widgetId];
+              const nextBreak = (bWallStart !== undefined && bGameStart !== undefined)
+                ? Math.max(0, bGameStart - (Date.now() - bWallStart))
+                : Math.max(0, (cfg.breakCurrentMs ?? 0) - tickMs);
               if (nextBreak <= 0) {
                 stopInterval();
                 const nextPeriod = (cfg.currentPeriod ?? 1) + 1;
@@ -963,10 +1188,20 @@ export const useCanvasStore = create<CanvasStore>()(
           if (_isTauriApp) {
             // Rust 100ms ticks drive this timer; set wall-clock anchor so the
             // tick handler can compute accurate game time even after sleep.
-            const startMs = (config.resumeMs !== undefined && config.resumeMs !== null
-              && !config.inBreak && !config.inFinalPlay)
-              ? config.resumeMs
-              : config.currentMs;
+            // Break and Final Play each need their own counter anchored to their
+            // own starting value, not the game clock.
+            let startMs: number;
+            if (config.inBreak) {
+              startMs = config.breakCurrentMs ?? 0;
+            } else if (config.inFinalPlay) {
+              startMs = config.finalPlayMs ?? 0;
+            } else if (config.inExtraTime) {
+              startMs = config.etCurrentMs ?? 0;
+            } else if (config.resumeMs !== undefined && config.resumeMs !== null) {
+              startMs = config.resumeMs;
+            } else {
+              startMs = config.currentMs;
+            }
             _runWallStart[widgetId] = Date.now();
             _runGameMs[widgetId] = startMs;
             _lastTickAt[widgetId] = Date.now();
@@ -974,6 +1209,7 @@ export const useCanvasStore = create<CanvasStore>()(
             // Browser mode: keep using Web Worker
             timerWorker.postMessage({ type: 'start', widgetId, tickMs });
           }
+          } // end syncClient.isHost
           const newInts = { ...get().timerIntervals, [widgetId]: true };
           set({ timerIntervals: newInts });
           syncSleepBlock(newInts);
@@ -1038,10 +1274,41 @@ export const useCanvasStore = create<CanvasStore>()(
         adjustWidgetTimer: (widgetId, deltaMs) => {
           const config = findWidgetConfig(widgetId);
           if (!config) return;
-          if (config.inExtraTime) {
-            updateWidgetConfig(widgetId, { etCurrentMs: Math.max(0, (config.etCurrentMs ?? 0) + deltaMs) });
+
+          // Re-anchor the wall-clock so the next Tauri tick doesn't overwrite the jump
+          const reanchor = (next: number) => {
+            if (config.running && _isTauriApp) {
+              _runGameMs[widgetId] = next;
+              _runWallStart[widgetId] = Date.now();
+            }
+          };
+
+          if (config.inFinalPlay) {
+            const next = Math.max(0, (config.finalPlayMs ?? 0) + deltaMs);
+            updateWidgetConfig(widgetId, { finalPlayMs: next });
+            reanchor(next);
+          } else if (config.inAfterEt) {
+            const next = Math.max(0, (config.afterEtCurrentMs ?? 0) + deltaMs);
+            updateWidgetConfig(widgetId, { afterEtCurrentMs: next });
+            reanchor(next);
+          } else if (config.inExtraTime) {
+            if (config.etInBreak) {
+              const next = Math.max(0, (config.etBreakCurrentMs ?? 0) + deltaMs);
+              updateWidgetConfig(widgetId, { etBreakCurrentMs: next });
+              reanchor(next);
+            } else {
+              const next = Math.max(0, (config.etCurrentMs ?? 0) + deltaMs);
+              updateWidgetConfig(widgetId, { etCurrentMs: next });
+              reanchor(next);
+            }
+          } else if (config.inBreak) {
+            const next = Math.max(0, (config.breakCurrentMs ?? 0) + deltaMs);
+            updateWidgetConfig(widgetId, { breakCurrentMs: next });
+            reanchor(next);
           } else {
-            updateWidgetConfig(widgetId, { currentMs: Math.max(0, config.currentMs + deltaMs) });
+            const next = Math.max(0, config.currentMs + deltaMs);
+            updateWidgetConfig(widgetId, { currentMs: next });
+            reanchor(next);
           }
         },
 
@@ -1310,8 +1577,8 @@ export const useCanvasStore = create<CanvasStore>()(
             [field]: next,
             scoreLog: [logEntry, ...(config.scoreLog ?? [])],
           });
-          const { client } = useVmixStore.getState();
-          if (client) {
+          {
+            const { client } = useVmixStore.getState();
             const targets = config.vmixInputs?.length
               ? config.vmixInputs
               : config.vmixInputKey
@@ -1319,7 +1586,7 @@ export const useCanvasStore = create<CanvasStore>()(
                 : [];
             for (const t of targets) {
               const f = team === 'A' ? t.fieldScoreA : t.fieldScoreB;
-              if (t.inputKey && f) await client.setTextField(t.inputKey, f, String(next));
+              if (t.inputKey && f && client) await client.setTextField(t.inputKey, f, String(next));
             }
           }
         },
@@ -1328,16 +1595,16 @@ export const useCanvasStore = create<CanvasStore>()(
           const config = findWidgetConfig(widgetId);
           if (!config) return;
           updateWidgetConfig(widgetId, { scoreA: 0, scoreB: 0 });
-          const { client } = useVmixStore.getState();
-          if (client) {
+          {
+            const { client } = useVmixStore.getState();
             const targets = config.vmixInputs?.length
               ? config.vmixInputs
               : config.vmixInputKey
                 ? [{ inputKey: config.vmixInputKey, fieldScoreA: config.fieldScoreA, fieldScoreB: config.fieldScoreB }]
                 : [];
             await Promise.all(targets.flatMap((t: { inputKey: string; fieldScoreA?: string; fieldScoreB?: string }) => [
-              t.inputKey && t.fieldScoreA && client.setTextField(t.inputKey, t.fieldScoreA, '0'),
-              t.inputKey && t.fieldScoreB && client.setTextField(t.inputKey, t.fieldScoreB, '0'),
+              t.inputKey && t.fieldScoreA && client && client.setTextField(t.inputKey, t.fieldScoreA, '0'),
+              t.inputKey && t.fieldScoreB && client && client.setTextField(t.inputKey, t.fieldScoreB, '0'),
             ].filter(Boolean)));
           }
         },
@@ -1426,8 +1693,8 @@ export const useCanvasStore = create<CanvasStore>()(
               sendOverrunColor(cfg, client, cfg.overrunning ?? false);
             }
 
-            if (w.type === 'scoreboard') {
-              const targets = cfg.vmixInputs?.length
+            if (w.type === 'scoreboard' && !cfg.linkedScoreboardSourceId) {
+              const targets: any[] = cfg.vmixInputs?.length
                 ? cfg.vmixInputs
                 : cfg.vmixInputKey
                   ? [{
@@ -1435,9 +1702,11 @@ export const useCanvasStore = create<CanvasStore>()(
                       fieldScoreA: cfg.fieldScoreA, fieldScoreB: cfg.fieldScoreB,
                       fieldTeamA: cfg.fieldTeamA, fieldTeamB: cfg.fieldTeamB,
                       fieldShortA: cfg.fieldShortA, fieldShortB: cfg.fieldShortB,
+                      fieldLogoA: cfg.fieldLogoA, fieldLogoB: cfg.fieldLogoB,
+                      fieldCompetition: cfg.fieldCompetition, fieldRound: cfg.fieldRound,
                     }]
                   : [];
-              for (const t of (targets as any[])) {
+              for (const t of targets) {
                 if (!t.inputKey) continue;
                 if (t.fieldScoreA) client.setTextField(t.inputKey, t.fieldScoreA, String(cfg.scoreA ?? 0));
                 if (t.fieldScoreB) client.setTextField(t.inputKey, t.fieldScoreB, String(cfg.scoreB ?? 0));
@@ -1445,6 +1714,10 @@ export const useCanvasStore = create<CanvasStore>()(
                 if (t.fieldTeamB && cfg.teamBName) client.setTextField(t.inputKey, t.fieldTeamB, cfg.teamBName);
                 if (t.fieldShortA && cfg.teamAShortName) client.setTextField(t.inputKey, t.fieldShortA, cfg.teamAShortName);
                 if (t.fieldShortB && cfg.teamBShortName) client.setTextField(t.inputKey, t.fieldShortB, cfg.teamBShortName);
+                if (t.fieldLogoA && cfg.teamALogo) client.setImageField(t.inputKey, t.fieldLogoA, cfg.teamALogo);
+                if (t.fieldLogoB && cfg.teamBLogo) client.setImageField(t.inputKey, t.fieldLogoB, cfg.teamBLogo);
+                if (t.fieldCompetition && cfg.competition) client.setTextField(t.inputKey, t.fieldCompetition, cfg.competition);
+                if (t.fieldRound && cfg.subtitle) client.setTextField(t.inputKey, t.fieldRound, cfg.subtitle);
               }
             }
           }
@@ -1513,7 +1786,15 @@ export const useCanvasStore = create<CanvasStore>()(
           set({ matchDataSnapshot: null });
         },
 
-        restoreCanvas: (pages, activePageId) => set({ pages: pages as CanvasPage[], activePageId: activePageId as string }),
+        restoreCanvas: (pages, activePageId) => {
+          const newPages = pages as CanvasPage[];
+          const currentId = get().activePageId;
+          // Preserve the client's current page if it still exists; otherwise fall back to server's page
+          const resolvedId = newPages.some((p) => p.id === currentId)
+            ? currentId
+            : activePageId as string;
+          set({ pages: newPages, activePageId: resolvedId });
+        },
 
         setSyncReady: () => set({ syncReady: true }),
       };
@@ -1570,6 +1851,8 @@ export const useCanvasStore = create<CanvasStore>()(
             ),
           })),
           activePageId: s.activePageId,
+          commentatorPages: s.commentatorPages,
+          commentatorActivePageId: s.commentatorActivePageId,
         };
       },
     }
@@ -1606,8 +1889,6 @@ export function initCanvasSync() {
     switch (msg.fn) {
       case 'updateWidgetConfig': {
         const [wid, patch] = msg.args as [string, Record<string, any>];
-        // Track when timer ticks arrive from other clients
-        if (patch && typeof patch.currentMs === 'number') lastRemoteTicks[wid] = Date.now();
         store.updateWidgetConfig(wid, patch);
         break;
       }
@@ -1663,10 +1944,7 @@ export function initCanvasSync() {
       }
       case 'addPage': {
         const [page] = msg.args as [CanvasPage];
-        useCanvasStore.setState((s) => ({
-          pages: [...s.pages, page],
-          activePageId: page.id,
-        }));
+        useCanvasStore.setState((s) => ({ pages: [...s.pages, page] }));
         break;
       }
       case 'deletePage':
@@ -1677,9 +1955,29 @@ export function initCanvasSync() {
         store.renamePage(pid, name);
         break;
       }
-      case 'setActivePage':
-        store.setActivePage(msg.args[0] as string);
-        break;
     }
   });
+}
+
+export function initCommentatorSync() {
+  syncClient.onMessage((msg) => {
+    if (msg.type !== 'COMMENTATOR_FULL_STATE') return;
+    const store = useCanvasStore.getState();
+    store.restoreCommentatorCanvas(msg.canvas.pages, msg.canvas.activePageId);
+  });
+
+  // Commentator browser clients push their canvas state back whenever it changes
+  if (syncClient.isCommentator) {
+    let _lastPages: unknown = null;
+    useCanvasStore.subscribe((state) => {
+      if (syncClient.applying) return;
+      // Only sync when widget content changes, not when the client navigates pages
+      if (state.commentatorPages === _lastPages) return;
+      _lastPages = state.commentatorPages;
+      syncClient.send({
+        type: 'COMMENTATOR_FULL_STATE' as const,
+        canvas: { pages: state.commentatorPages, activePageId: state.commentatorActivePageId },
+      });
+    });
+  }
 }

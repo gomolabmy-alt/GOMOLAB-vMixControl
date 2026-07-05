@@ -12,7 +12,7 @@ interface Props {
 
 export function PlayerLowerThirdWidget({ config }: Props) {
   const { pages } = useCanvasStore();
-  const { getClientById, vmixState, overlayIn, overlayOut } = useVmixStore();
+  const { getClient, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
 
   const name         = config.highlightedName         ?? '';
   const jersey       = config.highlightedJersey       ?? '';
@@ -50,7 +50,7 @@ export function PlayerLowerThirdWidget({ config }: Props) {
   const hasInput = !!config.vmixInputKey;
 
   const sendToVmix = () => {
-    const c = getClientById(config.vmixClientId);
+    const c = getClient();
     if (!c || !hasInput || !hasPlayer) return;
     const key = config.vmixInputKey;
     if (config.fieldName         && name)         c.setTextField(key, config.fieldName,         name);
@@ -62,25 +62,38 @@ export function PlayerLowerThirdWidget({ config }: Props) {
 
   const lastIdRef = useRef<string | null>(null);
   const prevSummaryRef = useRef<string>('');
+  // Independent per-effect version trackers — each effect must detect a
+  // reconnect (vmixSyncVersion bump) on its own; sharing one ref would let
+  // whichever effect runs first silently consume the bump for both.
+  const idSyncVersionRef = useRef(vmixSyncVersion);
+  const summarySyncVersionRef = useRef(vmixSyncVersion);
   useEffect(() => {
     if (config.autoSend === false || !hasPlayer) return;
     const pid = config.highlightedPlayerId;
-    if (!pid || pid === lastIdRef.current) return;
+    if (!pid) return;
+    // Re-send the current player on a reconnect (vmixSyncVersion bump) even
+    // though the highlighted player itself hasn't changed — otherwise vMix
+    // stays stale until the next actual player swap.
+    const resyncing = vmixSyncVersion !== idSyncVersionRef.current;
+    idSyncVersionRef.current = vmixSyncVersion;
+    if (pid === lastIdRef.current && !resyncing) return;
     lastIdRef.current = pid;
     prevSummaryRef.current = scoreSummary;
     sendToVmix();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.highlightedPlayerId, config.autoSend]);
+  }, [config.highlightedPlayerId, config.autoSend, vmixSyncVersion]);
 
   useEffect(() => {
     if (config.autoSend === false || !hasPlayer || !scoreSummary) return;
-    if (scoreSummary === prevSummaryRef.current) return;
+    const resyncing = vmixSyncVersion !== summarySyncVersionRef.current;
+    summarySyncVersionRef.current = vmixSyncVersion;
+    if (scoreSummary === prevSummaryRef.current && !resyncing) return;
     prevSummaryRef.current = scoreSummary;
-    const c = getClientById(config.vmixClientId);
+    const c = getClient();
     if (!c || !config.vmixInputKey || !config.fieldScoreSummary) return;
     c.setTextField(config.vmixInputKey, config.fieldScoreSummary, scoreSummary);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scoreSummary]);
+  }, [scoreSummary, vmixSyncVersion]);
 
   return (
     <div className="wgt-slt">
@@ -113,7 +126,7 @@ export function PlayerLowerThirdWidget({ config }: Props) {
         <button
           className="wgt-slt-btn wgt-slt-btn--send"
           onClick={sendToVmix}
-          disabled={!getClientById(config.vmixClientId) || !hasInput || !hasPlayer}
+          disabled={!getClient() || !hasInput || !hasPlayer}
           title="Send player data to vMix title"
         >
           ↑ Send

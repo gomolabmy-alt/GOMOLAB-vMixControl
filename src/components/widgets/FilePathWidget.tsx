@@ -1,6 +1,7 @@
-import { useRef } from 'react';
+import { useRef, useContext, useEffect } from 'react';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useCanvasStore } from '../../stores/canvasStore';
+import { CanvasActionContext } from '../../lib/canvasContext';
 
 interface Props {
   widgetId: string;
@@ -10,11 +11,11 @@ interface Props {
 }
 
 export function FilePathWidget({ widgetId, config }: Props) {
-  const { getClientById, vmixState, connections } = useVmixStore();
-  const connVmixState = config.vmixClientId
-    ? connections.find(c => c.id === config.vmixClientId)?.vmixState ?? vmixState
-    : vmixState;
-  const { updateWidgetConfig } = useCanvasStore();
+  const { getClient, vmixState, vmixSyncVersion } = useVmixStore();
+  const connVmixState = vmixState;
+  const store = useCanvasStore();
+  const ctx = useContext(CanvasActionContext);
+  const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const currentPath: string = config.currentPath ?? '';
@@ -22,8 +23,16 @@ export function FilePathWidget({ widgetId, config }: Props) {
 
   const send = (path: string) => {
     if (!configured || !path) return;
-    getClientById(config.vmixClientId)?.setTextField(config.inputKey, config.fieldName, path);
+    getClient()?.setTextField(config.inputKey, config.fieldName, path);
   };
+
+  // Re-send the currently-selected path on reconnect (vmixSyncVersion bump) —
+  // otherwise vMix stays on whatever it last had until the operator picks a
+  // new file, even though the app already shows a different path as current.
+  useEffect(() => {
+    if (config.autoSend && currentPath) send(currentPath);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vmixSyncVersion]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

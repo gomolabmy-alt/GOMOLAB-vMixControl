@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useContext } from 'react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
+import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import type { TimelineEvent, TimelineEventType } from '../../types/canvas';
 
@@ -168,7 +169,10 @@ interface EditDraft {
 }
 
 export function TimelineWidget({ widgetId, config }: Props) {
-  const { pages, addTimelineEvent, deleteTimelineEvent, updateWidgetConfig } = useCanvasStore();
+  const store = useCanvasStore();
+  const ctx = useContext(CanvasActionContext);
+  const { pages, addTimelineEvent, deleteTimelineEvent } = store;
+  const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { tournaments } = useTournamentStore();
 
   const [adding, setAdding] = useState(false);

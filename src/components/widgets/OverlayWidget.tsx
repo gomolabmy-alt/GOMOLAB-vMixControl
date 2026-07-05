@@ -8,11 +8,9 @@ interface Props {
 }
 
 export function OverlayWidget({ config }: Props) {
-  const { getClientById, vmixState, connections } = useVmixStore();
-  const connVmixState = config.vmixClientId
-    ? connections.find(c => c.id === config.vmixClientId)?.vmixState ?? vmixState
-    : vmixState;
-  const c = getClientById(config.vmixClientId);
+  const { getClient, vmixState } = useVmixStore();
+  const connVmixState = vmixState;
+  const c = getClient();
   const [selectedKey, setSelectedKey] = useState('');
 
   const ch = config.channel ?? 1;

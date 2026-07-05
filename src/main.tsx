@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client';
 import './index.css';
 import { App } from './App';
 import { syncClient } from './lib/syncClient';
-import { useCanvasStore, initCanvasSync } from './stores/canvasStore';
+import { useCanvasStore, initCanvasSync, initCommentatorSync } from './stores/canvasStore';
 import { useTournamentStore, initTournamentSync } from './stores/tournamentStore';
 
 class RootErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
@@ -38,9 +38,14 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, { error: stri
 // Wire store handlers so incoming WS messages update local state
 initCanvasSync();
 initTournamentSync();
+initCommentatorSync();
 
 // Connect to sync server; desktop host sends full state on connect for new joiners
-const isDesktopHost = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+// Also treat localhost in Vite dev mode as host so UI preview works without the Tauri app
+const isDesktopHost = typeof window !== 'undefined' && (
+  '__TAURI_INTERNALS__' in window ||
+  ((import.meta as any).env?.DEV && window.location.hostname === 'localhost')
+);
 syncClient.connect(isDesktopHost ? () => ({
   type: 'FULL_STATE' as const,
   canvas: (() => {
@@ -53,11 +58,24 @@ syncClient.connect(isDesktopHost ? () => ({
   })(),
 }) : undefined);
 
+function sendCommentatorHeartbeat() {
+  if (!isDesktopHost) return;
+  const s = useCanvasStore.getState();
+  syncClient.send({
+    type: 'COMMENTATOR_FULL_STATE' as const,
+    canvas: { pages: s.commentatorPages, activePageId: s.commentatorActivePageId },
+  });
+}
+
 // Heartbeat: re-push FULL_STATE every 5 seconds so the Rust server's cache
 // never gets stale. Without this, browsers that connect after a score change or
 // timer update receive the original on-connect snapshot and miss those changes.
+// Also push COMMENTATOR_FULL_STATE so new commentator clients get fresh state.
 if (isDesktopHost) {
-  setInterval(() => syncClient.sendFullState(), 5000);
+  setInterval(() => {
+    syncClient.sendFullState();
+    sendCommentatorHeartbeat();
+  }, 5000);
 }
 
 const rootEl = document.getElementById('root')!;

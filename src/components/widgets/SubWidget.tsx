@@ -1,5 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useContext } from 'react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
+import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import type { Player } from '../../types/tournament';
@@ -22,9 +23,12 @@ function wallClock(): string {
 }
 
 export function SubWidget({ widgetId, config: cfg }: Props) {
-  const { pages, updateWidgetConfig, addTimelineEvent } = useCanvasStore();
+  const store = useCanvasStore();
+  const ctx = useContext(CanvasActionContext);
+  const { pages, addTimelineEvent } = store;
+  const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { tournaments } = useTournamentStore();
-  const { getClientById } = useVmixStore();
+  const { getClient } = useVmixStore();
 
   const [selOut, setSelOut] = useState<string | null>(null);
   const [selIn, setSelIn] = useState<string | null>(null);
@@ -101,15 +105,15 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
     if (!outgoing || !incoming) return;
 
     // Send names to vMix (all linked inputs)
-    const subTargets: Array<{inputKey:string;clientId?:string;vmixFieldOut?:string;vmixFieldIn?:string}> = cfg.vmixInputs?.length
+    const subTargets: Array<{inputKey:string;vmixFieldOut?:string;vmixFieldIn?:string}> = cfg.vmixInputs?.length
       ? cfg.vmixInputs
       : cfg.vmixInputKey
         ? [{ inputKey: cfg.vmixInputKey, vmixFieldOut: cfg.vmixFieldOut, vmixFieldIn: cfg.vmixFieldIn }]
         : [];
     for (const t of subTargets) {
       if (!t.inputKey) continue;
-      getClientById(t.clientId)?.setTextField(t.inputKey, t.vmixFieldOut || 'PlayerOff.Text', nameOut);
-      getClientById(t.clientId)?.setTextField(t.inputKey, t.vmixFieldIn  || 'PlayerOn.Text',  nameIn);
+      getClient()?.setTextField(t.inputKey, t.vmixFieldOut || 'PlayerOff.Text', nameOut);
+      getClient()?.setTextField(t.inputKey, t.vmixFieldIn  || 'PlayerOn.Text',  nameIn);
     }
 
     const timePlayed = (accumulated[outId] ?? 0) +

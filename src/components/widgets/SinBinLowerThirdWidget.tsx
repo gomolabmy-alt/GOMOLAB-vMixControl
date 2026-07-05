@@ -23,7 +23,7 @@ interface SinBinPlayer {
 export function SinBinLowerThirdWidget({ config }: Props) {
   const { pages, returnPlayerFromSinBin } = useCanvasStore();
   const { tournaments } = useTournamentStore();
-  const { client, vmixState, overlayIn, overlayOut } = useVmixStore();
+  const { client, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
 
   const allWidgets = pages.flatMap(p => p.widgets);
   const plw = allWidgets.find(w => w.id === config.linkedPlayerListId);
@@ -141,6 +141,13 @@ export function SinBinLowerThirdWidget({ config }: Props) {
     sendToVmix(selected);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.playerId, config.autoSend]);
+
+  // Re-push on reconnect
+  useEffect(() => {
+    if (!config.autoSend || !selected) return;
+    sendToVmix(selected);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vmixSyncVersion]);
 
   // Auto-send timer field on every tick
   useEffect(() => {

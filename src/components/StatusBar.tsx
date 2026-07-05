@@ -1,25 +1,45 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useVmixStore } from '../stores/vmixStore';
 import { useCanvasStore } from '../stores/canvasStore';
+import { useAppSettings } from '../stores/appSettingsStore';
 import { ProjectMenu } from './ProjectMenu';
 import { TournamentManager } from './TournamentManager';
 import { AppSettingsModal } from './AppSettingsModal';
+import { VmixStatsPanel } from './VmixStatsPanel';
 import { syncClient } from '../lib/syncClient';
 
 export function StatusBar() {
   const {
     vmixState,
     lastUpdated,
+    connection,
+    connectionLog,
+    resyncAll,
+    remoteVmixConnections,
+    browserClients,
   } = useVmixStore();
+  // Kept as a 0-or-1-element array so the rest of this component (built for
+  // a connection list) doesn't need to change shape.
+  const connections = connection ? [connection] : [];
 
   const { resetMatchData, restoreMatchData, matchDataSnapshot, editMode, setEditMode } = useCanvasStore();
+  const { theme, setTheme } = useAppSettings();
   const isReadOnly = syncClient.isReadOnly;
   const [showTournamentDb, setShowTournamentDb] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [showStats, setShowStats] = useState(false);
+  const [syncFlash, setSyncFlash] = useState(false);
+  const statsAnchorRef = useRef<HTMLButtonElement>(null);
+
+  const handleSyncNow = () => {
+    resyncAll();
+    setSyncFlash(true);
+    setTimeout(() => setSyncFlash(false), 800);
+  };
 
   const secondsAgo = lastUpdated ? Math.floor((Date.now() - lastUpdated) / 1000) : null;
-  const isStale = secondsAgo !== null && secondsAgo > 3;
+  const isStale = secondsAgo !== null && secondsAgo > 10;
 
   const midTrunc = (name: string, max = 22) => {
     if (name.length <= max) return name;
@@ -27,15 +47,83 @@ export function StatusBar() {
     return `${name.slice(0, half)}…${name.slice(-half)}`;
   };
 
+  const isBrowserClient = !syncClient.isHost;
+
+  // On browser clients, show connections from the host via VMIX_STATUS broadcast
+  const displayConns = isBrowserClient ? remoteVmixConnections : connections;
+  const connectedCount = displayConns.filter(c => c.status === 'connected').length;
+  const errorCount = displayConns.filter(c => c.status === 'error').length;
+  const hasNewErrors = !isBrowserClient && connectionLog.some(e => e.event === 'error');
+
+  const overallDot =
+    errorCount > 0 ? 'error' :
+    connectedCount > 0 ? 'connected' :
+    displayConns.some(c => c.status === 'connecting') ? 'connecting' :
+    'disconnected';
+
   return (
     <header className="status-bar" style={{ position: 'relative' }}>
       <div className="status-bar-left">
-        {vmixState && (
+        {isBrowserClient ? (
+          // Browser client: non-interactive chip showing remote vMix connections with host IP
+          <div
+            className="vmix-conn-chip"
+            title={remoteVmixConnections.map(c => `${c.name}  ${c.host}:${c.port}  ${c.status}${c.edition ? `  (${c.edition})` : ''}`).join('\n') || 'No vMix connection on host'}
+          >
+            <span className={`status-dot status-dot--${overallDot}`} />
+            <span className="vmix-conn-label">vMix</span>
+            {remoteVmixConnections.length > 0 && (
+              <span className="vmix-conn-count">{connectedCount}/{remoteVmixConnections.length}</span>
+            )}
+            {remoteVmixConnections.map(c => (
+              <span key={c.id} className="vmix-stats-chip vmix-stats-chip--host" title={`${c.name}: ${c.host}:${c.port}`}>
+                {c.host}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <>
+            <button
+              ref={statsAnchorRef}
+              className={`vmix-conn-chip${showStats ? ' vmix-conn-chip--open' : ''}`}
+              onClick={() => setShowStats(v => !v)}
+              title="vMix connection stats & log"
+            >
+              <span className={`status-dot status-dot--${overallDot}`} />
+              <span className="vmix-conn-label">vMix</span>
+              {connections.length > 0 && (
+                <span className="vmix-conn-count">{connectedCount}/{connections.length}</span>
+              )}
+              {hasNewErrors && <span className="vmix-conn-alert">!</span>}
+            </button>
+            {browserClients.length > 0 && (
+              <div
+                className="vmix-conn-chip vmix-browser-clients"
+                title={browserClients.map(c => `${c.ip}  (${c.kind})`).join('\n')}
+              >
+                <span className="status-dot status-dot--connected" />
+                <span className="vmix-conn-label">Clients</span>
+                <span className="vmix-conn-count">{browserClients.length}</span>
+                <span className="vmix-browser-ips">
+                  {[...new Set(browserClients.map(c => c.ip))].join(', ')}
+                </span>
+              </div>
+            )}
+          </>
+        )}
+        {!isBrowserClient && connections.some(c => c.status === 'connected') && (
+          <button
+            className={`vmix-sync-btn${syncFlash ? ' vmix-sync-btn--flash' : ''}`}
+            onClick={handleSyncNow}
+            title="Force push all app data to vMix now"
+          >⟳ Sync</button>
+        )}
+        {!isBrowserClient && vmixState && (
           <span className="status-edition" title={`vMix ${vmixState.version}`}>
             {vmixState.edition}
           </span>
         )}
-        {isStale && <span className="status-stale">⚠ stale</span>}
+        {!isBrowserClient && isStale && <span className="status-stale">⚠ stale</span>}
       </div>
 
       <div className="status-bar-center">
@@ -101,6 +189,11 @@ export function StatusBar() {
         )}
         <ProjectMenu />
         <button
+          className={`status-btn status-btn--theme`}
+          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        >{theme === 'dark' ? '☀' : '🌙'}</button>
+        <button
           className="status-btn status-btn--settings"
           onClick={() => setShowSettings(true)}
           title="App settings"
@@ -120,6 +213,12 @@ export function StatusBar() {
 
       {showTournamentDb && <TournamentManager onClose={() => setShowTournamentDb(false)} />}
       {showSettings && <AppSettingsModal onClose={() => setShowSettings(false)} />}
+      {!isBrowserClient && showStats && (
+        <VmixStatsPanel
+          anchorRef={statsAnchorRef}
+          onClose={() => setShowStats(false)}
+        />
+      )}
     </header>
   );
 }

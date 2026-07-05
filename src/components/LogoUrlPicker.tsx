@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useTournamentStore } from '../stores/tournamentStore';
+import { resolveImageUrl } from '../lib/imageUrl';
 
 const isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -111,7 +112,7 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact }: Props) 
           {images.map(img => (
             <div key={img.name} className="logo-library-item" style={{ cursor: 'pointer' }} title={img.name}
               onClick={() => { onChange(img.url); setShowLibrary(false); }}>
-              <img src={img.url} alt={img.name} className="logo-library-thumb" />
+              <img src={resolveImageUrl(img.url)} alt={img.name} className="logo-library-thumb" />
             </div>
           ))}
         </div>
@@ -131,7 +132,7 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact }: Props) 
           title={value ? 'Change logo' : 'Pick logo'}
         >
           {value
-            ? <img src={value} alt="logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+            ? <img src={resolveImageUrl(value)} alt="logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
             : <span style={{ fontSize: 18, opacity: 0.4 }}>🖼</span>
           }
         </div>
@@ -148,7 +149,7 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact }: Props) 
     <div ref={anchorRef} style={{ position: 'relative' }}>
       <div className="logo-url-row">
         {value && (
-          <img src={value} alt="" style={{ width: 32, height: 24, objectFit: 'contain', borderRadius: 3,
+          <img src={resolveImageUrl(value)} alt="" style={{ width: 32, height: 24, objectFit: 'contain', borderRadius: 3,
             border: '1px solid var(--border)', background: '#111', flexShrink: 0 }} />
         )}
         <input
@@ -212,7 +213,7 @@ export function LogoDbPicker({ value, onChange, quickUrls = [] }: DbPickerProps)
     <div ref={anchorRef} style={{ position: 'relative' }}>
       <div className="logo-url-row">
         {value && (
-          <img src={value} alt="" style={{ width: 32, height: 24, objectFit: 'contain', borderRadius: 3,
+          <img src={resolveImageUrl(value)} alt="" style={{ width: 32, height: 24, objectFit: 'contain', borderRadius: 3,
             border: '1px solid var(--border)', background: '#111', flexShrink: 0 }} />
         )}
         <input className="input" type="text" placeholder="Pick from teams or type URL"
@@ -236,7 +237,7 @@ export function LogoDbPicker({ value, onChange, quickUrls = [] }: DbPickerProps)
                 style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
                   cursor: 'pointer', borderBottom: '1px solid var(--border)' }}
                 className="logo-db-option">
-                <img src={opt.url} alt="" style={{ width: 32, height: 24, objectFit: 'contain',
+                <img src={resolveImageUrl(opt.url)} alt="" style={{ width: 32, height: 24, objectFit: 'contain',
                   border: '1px solid var(--border)', borderRadius: 3, background: '#111', flexShrink: 0 }} />
                 <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{opt.label}</span>
               </div>

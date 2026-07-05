@@ -22,7 +22,9 @@ export type WidgetType =
   | 'panel'
   | 'vmix-titles'
   | 'rugby-lineup'
-  | 'card-lower-third';
+  | 'card-lower-third'
+  | 'pomodoro'
+  | 'image-display';
 
 export type TimelineEventType = 'score' | 'yellow-card' | 'orange-card' | 'red-card' | 'substitution' | 'period' | 'custom';
 
@@ -89,6 +91,7 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       style: 'basic', teamAName: 'Team A', teamBName: 'Team B',
       teamAShortName: '', teamBShortName: '',
       teamATextField: '', teamBTextField: '',
+      competition: '', subtitle: '',
       teamAColor: '#e74c3c', teamBColor: '#3498db', scoreA: 0, scoreB: 0,
       increments: [1, 2, 5, 10], vmixInputKey: '',
       fieldScoreA: 'ScoreA.Text', fieldScoreB: 'ScoreB.Text',
@@ -318,6 +321,14 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       ],
     },
   },
+  pomodoro: {
+    w: 360, h: 200,
+    config: { focusMins: 25, breakMins: 5, totalCycles: 4 },
+  },
+  'image-display': {
+    w: 240, h: 160,
+    config: { imageUrl: '', objectFit: 'contain', bgColor: 'transparent' },
+  },
 };
 
 export const WIDGET_TYPE_LABELS: Record<WidgetType, string> = {
@@ -334,6 +345,8 @@ export const WIDGET_TYPE_LABELS: Record<WidgetType, string> = {
   'vmix-titles': 'vMix Titles',
   'rugby-lineup': 'Rugby Lineup',
   'card-lower-third': 'Card LT',
+  pomodoro: 'Pomodoro',
+  'image-display': 'Image',
 };
 
 export const WIDGET_TYPE_ICONS: Record<WidgetType, string> = {
@@ -350,4 +363,6 @@ export const WIDGET_TYPE_ICONS: Record<WidgetType, string> = {
   'vmix-titles': 'Aa',
   'rugby-lineup': '🏉',
   'card-lower-third': '🟨',
+  pomodoro: '🍅',
+  'image-display': '🖼',
 };

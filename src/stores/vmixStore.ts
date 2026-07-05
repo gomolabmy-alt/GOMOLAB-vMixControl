@@ -1,12 +1,15 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { VmixApiClient } from '../api/vmixApi';
+import type { FieldStat } from '../api/vmixApi';
 import type {
   VmixState, ConnectionConfig, ConnectionStatus,
   SavedConnection, Shortcut, Scoreboard, VmixTimer,
   DataBinding, GlobalVariable, ScoreboardStyle,
-  VmixConnectionEntry,
+  VmixConnectionEntry, ConnectionLogEntry, ConnectionLogEvent,
 } from '../types/vmix';
+import { syncClient } from '../lib/syncClient';
+import type { RemoteVmixConnection, BrowserClient } from '../lib/syncClient';
 
 // ─── Default data ──────────────────────────────────────────────────────────
 
@@ -46,15 +49,10 @@ const makeTimer = (): VmixTimer => ({
 // ─── Store interface ───────────────────────────────────────────────────────
 
 interface VmixStore {
-  // Multi-connection
-  connections: VmixConnectionEntry[];
-  clients: Record<string, VmixApiClient>; // id → client (not persisted)
-  connectNew: (config: ConnectionConfig, name?: string) => Promise<void>;
-  disconnectById: (id: string) => void;
-  getClientById: (id?: string) => VmixApiClient | null;
-  updateConnectionName: (id: string, name: string) => void;
+  // Connection (single vMix instance)
+  connection: VmixConnectionEntry | null;
+  getClient: () => VmixApiClient | null;
 
-  // Connection (primary — mirrors connections[0])
   connectionStatus: ConnectionStatus;
   connectionError: string | null;
   activeConnection: ConnectionConfig | null;
@@ -64,6 +62,27 @@ interface VmixStore {
   // vMix state
   vmixState: VmixState | null;
   lastUpdated: number | null;
+
+  // Connection event log
+  connectionLog: ConnectionLogEntry[];
+  pushConnectionLog: (entry: Omit<ConnectionLogEntry, 'id'>) => void;
+  clearConnectionLog: () => void;
+
+  // Force-push all registered field values to vMix
+  resyncAll: () => void;
+  // Incremented on every reconnect and on manual resyncAll — widgets subscribe
+  // to this so their push effects re-fire with current state automatically
+  vmixSyncVersion: number;
+
+  // Live per-field delivery status
+  vmixFieldStats: FieldStat[];
+  refreshFieldStats: () => void;
+
+  // vMix status received from the host (populated on browser clients)
+  remoteVmixConnections: RemoteVmixConnection[];
+
+  // Browser clients connected to this host's sync server (populated on host)
+  browserClients: BrowserClient[];
 
   // UI navigation
   activeTab: number;
@@ -202,14 +221,39 @@ function resolveJsonPath(obj: unknown, path: string): string {
   return cur == null ? '' : String(cur);
 }
 
+// ─── Remote proxy ─────────────────────────────────────────────────────────
+// On browser clients vMix is not directly reachable. This proxy intercepts
+// calls that widgets make on a VmixApiClient and forwards them as
+// VMIX_COMMAND messages to the host via the sync WebSocket, where they are
+// executed against the host's single real connection.
+class RemoteVmixProxy {
+  setTextField(inputKey: string, fieldName: string, value: string) {
+    syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setTextField', args: [inputKey, fieldName, value] });
+  }
+  setImageField(inputKey: string, fieldName: string, filePath: string) {
+    syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setImageField', args: [inputKey, fieldName, filePath] });
+  }
+  sendFunction(fn: string, params: Record<string, string> = {}) {
+    syncClient.send({ type: 'VMIX_COMMAND', cmd: 'sendFunction', args: [fn, params] });
+  }
+  setTBar(value: number) {
+    syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setTBar', args: [value] });
+  }
+  overlayIn(ch: number, key?: string) {
+    syncClient.send({ type: 'VMIX_COMMAND', cmd: 'overlayIn', args: [ch, key] });
+  }
+  overlayOut(ch: number) {
+    syncClient.send({ type: 'VMIX_COMMAND', cmd: 'overlayOut', args: [ch] });
+  }
+}
+
 // ─── Store ─────────────────────────────────────────────────────────────────
 
 export const useVmixStore = create<VmixStore>()(
   persist(
     (set, get) => ({
       // ── Init ──
-      connections: [],
-      clients: {},
+      connection: null,
       connectionStatus: 'disconnected',
       connectionError: null,
       activeConnection: null,
@@ -217,6 +261,30 @@ export const useVmixStore = create<VmixStore>()(
       client: null,
       vmixState: null,
       lastUpdated: null,
+      connectionLog: [],
+      pushConnectionLog: (entry) => set((s) => ({
+        connectionLog: [
+          { ...entry, id: crypto.randomUUID() },
+          ...s.connectionLog,
+        ].slice(0, 200),
+      })),
+      clearConnectionLog: () => set({ connectionLog: [] }),
+      remoteVmixConnections: [],
+      browserClients: [],
+      vmixSyncVersion: 0,
+      vmixFieldStats: [],
+      refreshFieldStats: () => {
+        set({ vmixFieldStats: get().client?.getFieldStats() ?? [] });
+      },
+      resyncAll: () => {
+        get().client?.resync();
+        // Push full current state — dynamic import avoids circular dep with canvasStore
+        import('../stores/canvasStore').then(({ useCanvasStore }) => {
+          useCanvasStore.getState().syncAllToVmix();
+        });
+        // Increment so widget useEffect hooks re-fire and push any remaining fields
+        set(s => ({ vmixSyncVersion: s.vmixSyncVersion + 1 }));
+      },
       activeTab: 0,
       selectedInputKey: null,
       tBarValue: 0,
@@ -230,136 +298,88 @@ export const useVmixStore = create<VmixStore>()(
       // ── Connection ────────────────────────────────────────────────────────
 
       connect: async (config) => {
-        // Replaces the primary (first) connection
-        const { connections, clients } = get();
-        const primaryId = connections[0]?.id;
-        if (primaryId && clients[primaryId]) clients[primaryId].stopPolling();
+        get().client?.stopPolling();
 
-        const id = primaryId ?? crypto.randomUUID();
+        const id = get().connection?.id ?? crypto.randomUUID();
         const entry: VmixConnectionEntry = {
           id, name: `${config.host}:${config.port}`,
           host: config.host, port: config.port,
           status: 'connecting', error: null, vmixState: null, lastUpdated: null,
         };
-        const newConnections = primaryId
-          ? connections.map((c, i) => (i === 0 ? entry : c))
-          : [entry, ...connections];
-        set({ connections: newConnections, connectionStatus: 'connecting', connectionError: null });
+        set({ connection: entry, connectionStatus: 'connecting', connectionError: null });
 
         const client = new VmixApiClient(config.host, config.port);
-        let initialState;
+        wireClientLogger(client, entry.name);
+        let initialState: VmixState | null = null;
         try {
           initialState = await client.fetchState();
         } catch (err) {
+          // Don't give up — register the client and start polling anyway.
+          // Its HTTP loop retries forever, so once vMix becomes reachable the
+          // startPolling() state callback below flips this to 'connected'
+          // automatically (same self-healing path as a mid-session drop).
           const detail = err instanceof Error ? err.message : String(err);
           const errEntry = { ...entry, status: 'error' as ConnectionStatus, error: `Cannot reach ${config.host}:${config.port} — ${detail}` };
+          set({ connection: errEntry, connectionStatus: 'error', connectionError: errEntry.error! });
+          get().pushConnectionLog({ time: Date.now(), connectionName: `${config.host}:${config.port}`, event: 'error', detail });
+        }
+
+        if (initialState) {
+          // Mark connected immediately using the initial HTTP state — don't wait
+          // for the first TCP push (which may never arrive if TCP is blocked).
+          const connectedEntry = { ...entry, status: 'connected' as ConnectionStatus, error: null, vmixState: initialState, lastUpdated: Date.now() };
           set({
-            connections: get().connections.map((c) => c.id === id ? errEntry : c),
-            connectionStatus: 'error', connectionError: errEntry.error!, client: null,
+            connection: connectedEntry, client, activeConnection: config,
+            connectionStatus: 'connected', connectionError: null,
+            vmixState: initialState, lastUpdated: Date.now(),
           });
-          return;
+          get().pushConnectionLog({ time: Date.now(), connectionName: `${config.host}:${config.port}`, event: 'connected' });
+        } else {
+          set({ client, activeConnection: config });
         }
-        // Mark connected immediately using the initial HTTP state — don't wait
-        // for the first TCP push (which may never arrive if TCP is blocked).
-        const newClients = { ...get().clients, [id]: client };
-        const connectedEntry = { ...entry, status: 'connected' as ConnectionStatus, error: null, vmixState: initialState, lastUpdated: Date.now() };
-        set({
-          connections: get().connections.map((c) => c.id === id ? connectedEntry : c),
-          clients: newClients, client, activeConnection: config,
-          connectionStatus: 'connected', connectionError: null,
-          vmixState: initialState, lastUpdated: Date.now(),
-        });
 
         client.startPolling(
           (state) => {
-            const connEntry = { ...get().connections.find(c => c.id === id)!, vmixState: state, lastUpdated: Date.now(), status: 'connected' as ConnectionStatus };
+            const existing = get().connection;
+            const wasConnected = existing?.status === 'connected';
+            const connEntry = { ...existing!, vmixState: state, lastUpdated: Date.now(), status: 'connected' as ConnectionStatus, error: null };
             set({
-              connections: get().connections.map((c) => c.id === id ? connEntry : c),
-              ...(get().connections[0]?.id === id ? { vmixState: state, lastUpdated: Date.now() } : {}),
+              connection: connEntry,
+              vmixState: state, lastUpdated: Date.now(),
+              connectionStatus: 'connected' as ConnectionStatus, connectionError: null,
             });
+            // On transition from error/connecting to connected, push all registered
+            // fields so vMix stays in sync without needing the manual Sync button.
+            if (!wasConnected) setTimeout(() => useVmixStore.getState().resyncAll(), 500);
           },
           (error) => {
-            const errEntry = { ...get().connections.find(c => c.id === id)!, status: 'error' as ConnectionStatus, error };
-            set({
-              connections: get().connections.map((c) => c.id === id ? errEntry : c),
-              ...(get().connections[0]?.id === id ? { connectionStatus: 'error', connectionError: error } : {}),
-            });
-            client.stopPolling();
+            const errEntry = { ...get().connection!, status: 'error' as ConnectionStatus, error };
+            set({ connection: errEntry, connectionStatus: 'error', connectionError: error });
+            get().pushConnectionLog({ time: Date.now(), connectionName: `${config.host}:${config.port}`, event: 'error', detail: error });
+            // Do NOT call stopPolling() — let TCP reconnect and HTTP bridge continue
+            // automatically so the connection self-heals when vMix comes back.
           },
         );
       },
 
-      connectNew: async (config, name) => {
-        const id = crypto.randomUUID();
-        const entry: VmixConnectionEntry = {
-          id, name: name ?? `${config.host}:${config.port}`,
-          host: config.host, port: config.port,
-          status: 'connecting', error: null, vmixState: null, lastUpdated: null,
-        };
-        set({ connections: [...get().connections, entry] });
-
-        const client = new VmixApiClient(config.host, config.port);
-        try {
-          await client.fetchState();
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          const errEntry = { ...entry, status: 'error' as ConnectionStatus, error: `Cannot reach ${config.host}:${config.port} — ${detail}` };
-          set({ connections: get().connections.map((c) => c.id === id ? errEntry : c) });
-          return;
+      getClient: () => {
+        const { client, remoteVmixConnections } = get();
+        if (!syncClient.isHost) {
+          // Remote browser client: vMix isn't directly reachable. Return a
+          // proxy if the host's connection is known to be connected (based on
+          // VMIX_STATUS broadcasts from the host).
+          const rc = remoteVmixConnections.find(c => c.status === 'connected');
+          if (!rc) return null;
+          return new RemoteVmixProxy() as unknown as VmixApiClient;
         }
-        set({ clients: { ...get().clients, [id]: client } });
-
-        client.startPolling(
-          (state) => {
-            const connEntry = { ...get().connections.find(c => c.id === id)!, vmixState: state, lastUpdated: Date.now(), status: 'connected' as ConnectionStatus };
-            set({ connections: get().connections.map((c) => c.id === id ? connEntry : c) });
-          },
-          (error) => {
-            const errEntry = { ...get().connections.find(c => c.id === id)!, status: 'error' as ConnectionStatus, error };
-            set({ connections: get().connections.map((c) => c.id === id ? errEntry : c) });
-            client.stopPolling();
-          },
-        );
+        return client;
       },
-
-      disconnectById: (id) => {
-        const { connections, clients } = get();
-        clients[id]?.stopPolling();
-        const newClients = { ...clients };
-        delete newClients[id];
-        const newConnections = connections.filter(c => c.id !== id);
-        const isPrimary = connections[0]?.id === id;
-        set({
-          connections: newConnections,
-          clients: newClients,
-          ...(isPrimary ? {
-            client: newConnections[0]?.id ? newClients[newConnections[0].id] ?? null : null,
-            connectionStatus: newConnections[0]?.status ?? 'disconnected',
-            connectionError: newConnections[0]?.error ?? null,
-            activeConnection: newConnections[0] ? { host: newConnections[0].host, port: newConnections[0].port } : null,
-            vmixState: newConnections[0]?.vmixState ?? null,
-          } : {}),
-        });
-      },
-
-      getClientById: (id) => {
-        const { clients, connections } = get();
-        if (id && clients[id]) return clients[id];
-        const primaryId = connections[0]?.id;
-        return primaryId ? (clients[primaryId] ?? null) : null;
-      },
-
-      updateConnectionName: (id, name) =>
-        set({ connections: get().connections.map(c => c.id === id ? { ...c, name } : c) }),
 
       disconnect: () => {
-        const { clients } = get();
-        Object.values(clients).forEach(c => c.stopPolling());
-        // Stop all timers
+        get().client?.stopPolling();
         Object.values(get().timerIntervals).forEach(clearInterval);
         set({
-          connections: [],
-          clients: {},
+          connection: null,
           client: null, connectionStatus: 'disconnected', connectionError: null,
           activeConnection: null, vmixState: null, selectedInputKey: null,
           timerIntervals: {},
@@ -386,59 +406,151 @@ export const useVmixStore = create<VmixStore>()(
 
       // ── vMix passthrough ──────────────────────────────────────────────────
 
-      sendFunction: async (fn, params = {}) => { await get().client?.sendFunction(fn, params); },
-      setTextField: async (k, f, v) => { await get().client?.setTextField(k, f, v); },
-      setPreview:   async (k) => { await get().client?.setPreview(k); },
-      setActive:    async (k) => { await get().client?.setActive(k); },
-      toggleRecord:      async () => { await get().client?.toggleRecord(); },
-      toggleStream:      async () => { await get().client?.toggleStream(); },
-      toggleFadeToBlack: async () => { await get().client?.toggleFadeToBlack(); },
-      toggleExternal:    async () => { await get().client?.toggleExternal(); },
-      toggleMultiCorder: async () => { await get().client?.toggleMultiCorder(); },
-      toggleFullscreen:  async () => { await get().client?.toggleFullscreen(); },
+      sendFunction: async (fn, params = {}) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'sendFunction', args: [fn, params] }); return; }
+        await get().client?.sendFunction(fn, params);
+      },
+      setTextField: async (k, f, v) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setTextField', args: [k, f, v] }); return; }
+        await get().client?.setTextField(k, f, v);
+      },
+      setPreview: async (k) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setPreview', args: [k] }); return; }
+        await get().client?.setPreview(k);
+      },
+      setActive: async (k) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setActive', args: [k] }); return; }
+        await get().client?.setActive(k);
+      },
+      toggleRecord: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'toggleRecord', args: [] }); return; }
+        await get().client?.toggleRecord();
+      },
+      toggleStream: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'toggleStream', args: [] }); return; }
+        await get().client?.toggleStream();
+      },
+      toggleFadeToBlack: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'toggleFadeToBlack', args: [] }); return; }
+        await get().client?.toggleFadeToBlack();
+      },
+      toggleExternal: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'toggleExternal', args: [] }); return; }
+        await get().client?.toggleExternal();
+      },
+      toggleMultiCorder: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'toggleMultiCorder', args: [] }); return; }
+        await get().client?.toggleMultiCorder();
+      },
+      toggleFullscreen: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'toggleFullscreen', args: [] }); return; }
+        await get().client?.toggleFullscreen();
+      },
 
       // ── T-Bar ────────────────────────────────────────────────────────────
 
       setTBar: async (value) => {
         set({ tBarValue: value });
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setTBar', args: [value] }); return; }
         await get().client?.setTBar(value);
       },
 
       // ── Audio ─────────────────────────────────────────────────────────────
 
-      setMasterVolume:  async (v) => { await get().client?.setMasterVolume(v); },
-      toggleMasterMute: async ()  => { await get().client?.toggleMasterMute(); },
-      setHeadphones:    async (v) => { await get().client?.setHeadphones(v); },
-      setInputVolume:   async (k, v) => { await get().client?.setInputVolume(k, v); },
-      muteInput:   async (k) => { await get().client?.muteInput(k); },
-      unmuteInput: async (k) => { await get().client?.unmuteInput(k); },
-      soloInput:   async (k) => { await get().client?.soloInput(k); },
-      setBusVolume: async (bus, v) => { await get().client?.setBusVolume(bus, v); },
-      muteBus:      async (bus) => { await get().client?.muteBus(bus); },
+      setMasterVolume: async (v) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setMasterVolume', args: [v] }); return; }
+        await get().client?.setMasterVolume(v);
+      },
+      toggleMasterMute: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'toggleMasterMute', args: [] }); return; }
+        await get().client?.toggleMasterMute();
+      },
+      setHeadphones: async (v) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setHeadphones', args: [v] }); return; }
+        await get().client?.setHeadphones(v);
+      },
+      setInputVolume: async (k, v) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setInputVolume', args: [k, v] }); return; }
+        await get().client?.setInputVolume(k, v);
+      },
+      muteInput: async (k) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'muteInput', args: [k] }); return; }
+        await get().client?.muteInput(k);
+      },
+      unmuteInput: async (k) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'unmuteInput', args: [k] }); return; }
+        await get().client?.unmuteInput(k);
+      },
+      soloInput: async (k) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'soloInput', args: [k] }); return; }
+        await get().client?.soloInput(k);
+      },
+      setBusVolume: async (bus, v) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setBusVolume', args: [bus, v] }); return; }
+        await get().client?.setBusVolume(bus, v);
+      },
+      muteBus: async (bus) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'muteBus', args: [bus] }); return; }
+        await get().client?.muteBus(bus);
+      },
       setBusRouting: async (inputKey, bus, on) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: on ? 'setBusOn' : 'setBusOff', args: [inputKey, bus] }); return; }
         if (on) await get().client?.setBusOn(inputKey, bus);
         else    await get().client?.setBusOff(inputKey, bus);
       },
 
       // ── Overlays ──────────────────────────────────────────────────────────
 
-      overlayIn:  async (ch, key) => { await get().client?.overlayIn(ch, key); },
-      overlayOut: async (ch)      => { await get().client?.overlayOut(ch); },
+      overlayIn: async (ch, key) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'overlayIn', args: [ch, key] }); return; }
+        await get().client?.overlayIn(ch, key);
+      },
+      overlayOut: async (ch) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'overlayOut', args: [ch] }); return; }
+        await get().client?.overlayOut(ch);
+      },
 
       // ── Replay ───────────────────────────────────────────────────────────
 
-      replayMarkIn:  async () => { await get().client?.replayMarkIn(); },
-      replayMarkOut: async () => { await get().client?.replayMarkOut(); },
-      replayPlay:    async () => { await get().client?.replayPlay(); },
-      replayPause:   async () => { await get().client?.replayPause(); },
-      replayNow:     async () => { await get().client?.replayNow(); },
-      replayLive:    async () => { await get().client?.replayLive(); },
+      replayMarkIn: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'replayMarkIn', args: [] }); return; }
+        await get().client?.replayMarkIn();
+      },
+      replayMarkOut: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'replayMarkOut', args: [] }); return; }
+        await get().client?.replayMarkOut();
+      },
+      replayPlay: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'replayPlay', args: [] }); return; }
+        await get().client?.replayPlay();
+      },
+      replayPause: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'replayPause', args: [] }); return; }
+        await get().client?.replayPause();
+      },
+      replayNow: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'replayNow', args: [] }); return; }
+        await get().client?.replayNow();
+      },
+      replayLive: async () => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'replayLive', args: [] }); return; }
+        await get().client?.replayLive();
+      },
 
       // ── Playlist/DDR ─────────────────────────────────────────────────────
 
-      playInput:  async (k) => { await get().client?.playInput(k); },
-      pauseInput: async (k) => { await get().client?.pauseInput(k); },
-      stopInput:  async (k) => { await get().client?.stopInput(k); },
+      playInput: async (k) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'playInput', args: [k] }); return; }
+        await get().client?.playInput(k);
+      },
+      pauseInput: async (k) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'pauseInput', args: [k] }); return; }
+        await get().client?.pauseInput(k);
+      },
+      stopInput: async (k) => {
+        if (!syncClient.isHost) { syncClient.send({ type: 'VMIX_COMMAND', cmd: 'stopInput', args: [k] }); return; }
+        await get().client?.stopInput(k);
+      },
 
       // ── Shortcuts ─────────────────────────────────────────────────────────
 
@@ -651,11 +763,145 @@ export const useVmixStore = create<VmixStore>()(
         dataBindings: s.dataBindings,
         globalVariables: s.globalVariables,
         activeTab: s.activeTab,
-        // connections and clients are runtime-only, not persisted
+        // connection/client are runtime-only, not persisted
       }),
     },
   ),
 );
+
+// ── Stale monitor ─────────────────────────────────────────────────────────
+// Runs every 2s; logs 'stale' when the connection stops updating, and
+// 'recovered' when updates resume.
+let _wasStale = false;
+setInterval(() => {
+  const { connection, pushConnectionLog } = useVmixStore.getState();
+  if (!connection || connection.status !== 'connected' || connection.lastUpdated === null) {
+    _wasStale = false;
+    return;
+  }
+  const now = Date.now();
+  const isStale = now - connection.lastUpdated > 10000;
+  if (isStale && !_wasStale) {
+    _wasStale = true;
+    pushConnectionLog({
+      time: now, connectionName: connection.name, event: 'stale',
+      detail: `No update for ${Math.round((now - connection.lastUpdated) / 1000)}s`,
+    });
+  } else if (!isStale && _wasStale) {
+    _wasStale = false;
+    pushConnectionLog({ time: now, connectionName: connection.name, event: 'recovered' });
+  }
+}, 2000);
+
+// ── Periodic resync ────────────────────────────────────────────────────────
+// Every 5 seconds, re-push all registered field values to vMix so the app
+// is always the source of truth (e.g. if someone edits vMix directly, the
+// app overrides it within 5 seconds).
+setInterval(() => {
+  useVmixStore.getState().resyncAll();
+}, 5_000);
+
+// ── Logger + stats wiring helper ──────────────────────────────────────────
+// Called after creating a VmixApiClient so events flow into the log and field
+// status changes update the vmixFieldStats reactive slice.
+function wireClientLogger(client: VmixApiClient, connectionName: string) {
+  client.setConnectionName(connectionName);
+  client.setLogger((event: string, detail?: string) => {
+    useVmixStore.getState().pushConnectionLog({
+      time: Date.now(),
+      connectionName,
+      event: event as ConnectionLogEvent,
+      detail,
+    });
+  });
+  client.setStatsChangeHandler(() => {
+    useVmixStore.getState().refreshFieldStats();
+  });
+}
+
+// ── vMix status broadcast ──────────────────────────────────────────────────
+// Host: push connection status to all sync clients whenever it changes.
+// Client: receive VMIX_STATUS and store it in remoteVmixConnections.
+useVmixStore.subscribe((state) => {
+  if (!syncClient.isHost) return;
+  const c = state.connection;
+  const conns: RemoteVmixConnection[] = c ? [{
+    id: c.id,
+    name: c.name,
+    host: c.host,
+    port: c.port,
+    status: c.status,
+    error: c.error,
+    edition: c.vmixState?.edition,
+    version: c.vmixState?.version,
+    inputCount: c.vmixState?.inputs?.length,
+  }] : [];
+  syncClient.send({ type: 'VMIX_STATUS', connections: conns });
+});
+
+// ── vMix live state broadcast ──────────────────────────────────────────────
+// Host: push the full VmixState object whenever it changes so browser clients
+// share the same inputs/tally/preview/program data.
+let _lastBroadcastVmixState: VmixState | null = null;
+useVmixStore.subscribe((state) => {
+  if (!syncClient.isHost) return;
+  if (state.vmixState === _lastBroadcastVmixState) return;
+  _lastBroadcastVmixState = state.vmixState;
+  syncClient.send({ type: 'VMIX_STATE', state: state.vmixState });
+});
+
+syncClient.onMessage((msg) => {
+  if (msg.type === 'VMIX_STATUS') {
+    useVmixStore.setState({ remoteVmixConnections: msg.connections });
+  } else if (msg.type === 'CLIENT_LIST') {
+    useVmixStore.setState({ browserClients: msg.clients });
+  } else if (msg.type === 'VMIX_STATE') {
+    useVmixStore.setState({
+      vmixState: msg.state,
+      lastUpdated: msg.state ? Date.now() : null,
+    });
+  } else if (msg.type === 'VMIX_COMMAND' && syncClient.isHost) {
+    const c = useVmixStore.getState().client;
+    if (!c) return;
+    const { cmd, args } = msg;
+    switch (cmd) {
+      case 'sendFunction':    c.sendFunction(args[0], args[1]); break;
+      case 'setTextField':    c.setTextField(args[0], args[1], args[2]); break;
+      case 'setImageField':   c.setImageField(args[0], args[1], args[2]); break;
+      case 'setPreview':      c.setPreview(args[0]); break;
+      case 'setActive':       c.setActive(args[0]); break;
+      case 'toggleRecord':    c.toggleRecord(); break;
+      case 'toggleStream':    c.toggleStream(); break;
+      case 'toggleFadeToBlack': c.toggleFadeToBlack(); break;
+      case 'toggleExternal':  c.toggleExternal(); break;
+      case 'toggleMultiCorder': c.toggleMultiCorder(); break;
+      case 'toggleFullscreen': c.toggleFullscreen(); break;
+      case 'setTBar':         c.setTBar(args[0]); break;
+      case 'setMasterVolume': c.setMasterVolume(args[0]); break;
+      case 'toggleMasterMute': c.toggleMasterMute(); break;
+      case 'setHeadphones':   c.setHeadphones(args[0]); break;
+      case 'setInputVolume':  c.setInputVolume(args[0], args[1]); break;
+      case 'muteInput':       c.muteInput(args[0]); break;
+      case 'unmuteInput':     c.unmuteInput(args[0]); break;
+      case 'soloInput':       c.soloInput(args[0]); break;
+      case 'setBusVolume':    c.setBusVolume(args[0], args[1]); break;
+      case 'muteBus':         c.muteBus(args[0]); break;
+      case 'setBusOn':        c.setBusOn(args[0], args[1]); break;
+      case 'setBusOff':       c.setBusOff(args[0], args[1]); break;
+      case 'overlayIn':       c.overlayIn(args[0], args[1]); break;
+      case 'overlayOut':      c.overlayOut(args[0]); break;
+      case 'replayMarkIn':    c.replayMarkIn(); break;
+      case 'replayMarkOut':   c.replayMarkOut(); break;
+      case 'replayPlay':      c.replayPlay(); break;
+      case 'replayPause':     c.replayPause(); break;
+      case 'replayNow':       c.replayNow(); break;
+      case 'replayLive':      c.replayLive(); break;
+      case 'playInput':       c.playInput(args[0]); break;
+      case 'pauseInput':      c.pauseInput(args[0]); break;
+      case 'stopInput':       c.stopInput(args[0]); break;
+    }
+  }
+});
 
 // Exported helper so components can format timer display
 export { formatTime };

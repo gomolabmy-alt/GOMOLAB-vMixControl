@@ -6,13 +6,39 @@ import { WidgetPalette } from './WidgetPalette';
 import { WidgetConfigPanel } from './WidgetConfigPanel';
 import { NotificationOverlay } from './NotificationOverlay';
 import { syncClient } from '../lib/syncClient';
+import { CanvasActionContext } from '../lib/canvasContext';
 
-export function Canvas() {
+export function Canvas({ mode = 'main' }: { mode?: 'main' | 'commentator' }) {
   const {
-    pages, activePageId, editMode, selectedWidgetId,
-    addPage, deletePage, renamePage, setActivePage,
-    setEditMode, selectWidget, syncReady,
+    pages: mainPages, activePageId: mainActivePageId,
+    editMode, selectedWidgetId: mainSelectedWidgetId,
+    addPage: addMainPage, deletePage: deleteMainPage,
+    renamePage: renameMainPage, setActivePage: setMainActivePage,
+    setEditMode, selectWidget: selectMainWidget, syncReady,
+
+    commentatorPages, commentatorActivePageId,
+    commentatorSelectedWidgetId,
+    addCommentatorPage, deleteCommentatorPage,
+    renameCommentatorPage, setCommentatorActivePage,
+    selectCommentatorWidget,
+    addCommentatorWidget, deleteCommentatorWidget,
+    moveCommentatorWidget, resizeCommentatorWidget,
+    updateCommentatorWidget, updateCommentatorWidgetConfig,
+    duplicateCommentatorWidget,
+    transferWidgetToPage,
+    transferCommentatorWidgetToPage,
   } = useCanvasStore();
+
+  const isCommentatorMode = mode === 'commentator';
+
+  const pages = isCommentatorMode ? commentatorPages : mainPages;
+  const activePageId = isCommentatorMode ? commentatorActivePageId : mainActivePageId;
+  const selectedWidgetId = isCommentatorMode ? commentatorSelectedWidgetId : mainSelectedWidgetId;
+  const addPage = isCommentatorMode ? addCommentatorPage : addMainPage;
+  const deletePage = isCommentatorMode ? deleteCommentatorPage : deleteMainPage;
+  const renamePage = isCommentatorMode ? renameCommentatorPage : renameMainPage;
+  const setActivePage = isCommentatorMode ? setCommentatorActivePage : setMainActivePage;
+  const selectWidget = isCommentatorMode ? selectCommentatorWidget : selectMainWidget;
 
   const { canvasWidth, canvasHeight, canvasScale, setCanvasScale } = useAppSettings();
 
@@ -22,8 +48,11 @@ export function Canvas() {
   const [syncStatus, setSyncStatus] = useState(syncClient.status);
   const canvasRef = useRef<HTMLDivElement>(null);
 
-  const isClientMode = !(typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window);
+  const isDesktopHost = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  const isClientMode = !isDesktopHost;
+  // Commentator clients (port 9879) are read-only; read-only port (9878) clients are also read-only
   const isReadOnly = syncClient.isReadOnly;
+  const canEdit = editMode && !isReadOnly;
 
   // Auto-dismiss the loading overlay after 5 s even if FULL_STATE never arrives,
   // so the browser never shows a permanently blank page.
@@ -95,6 +124,18 @@ export function Canvas() {
     setCanvasScale(canvasScale + delta);
   };
 
+  const ctxValue = isCommentatorMode ? {
+    pages: commentatorPages,
+    activePageId: commentatorActivePageId,
+    selectedWidgetId: commentatorSelectedWidgetId,
+    moveWidget: moveCommentatorWidget,
+    resizeWidget: resizeCommentatorWidget,
+    selectWidget: selectCommentatorWidget,
+    deleteWidget: deleteCommentatorWidget,
+    transferWidgetToPage: transferCommentatorWidgetToPage,
+    updateWidgetConfig: updateCommentatorWidgetConfig,
+  } : null;
+
   return (
     <div className="canvas-page">
       {/* ── Page Tab Bar ──────────────────────────────────────────────── */}
@@ -123,7 +164,7 @@ export function Canvas() {
             ) : (
               page.name
             )}
-            {editMode && pages.length > 1 && (
+            {canEdit && pages.length > 1 && (
               <button
                 className="canvas-tab-del"
                 onClick={(e) => { e.stopPropagation(); deletePage(page.id); }}
@@ -133,8 +174,17 @@ export function Canvas() {
           </div>
         ))}
 
-        {editMode && (
+        {canEdit && (
           <button className="canvas-tab canvas-tab--add" onClick={addPage} title="Add page">+</button>
+        )}
+
+        {/* ── Edit toggle for commentator browser clients ──────────── */}
+        {syncClient.isCommentator && (
+          <button
+            className={`status-btn status-btn--edit ${editMode ? 'status-btn--edit-active' : ''}`}
+            style={{ marginLeft: 'auto', marginRight: 8, alignSelf: 'center' }}
+            onClick={() => setEditMode(!editMode)}
+          >{editMode ? '✓ Done' : '✏ Edit'}</button>
         )}
 
         {/* ── Zoom controls ────────────────────────────────────────── */}
@@ -161,7 +211,7 @@ export function Canvas() {
       {/* ── Canvas Area ───────────────────────────────────────────────── */}
       <div
         ref={canvasRef}
-        className={`canvas-area ${editMode ? 'canvas-area--edit' : ''}`}
+        className={`canvas-area ${canEdit ? 'canvas-area--edit' : ''}`}
         onClick={handleCanvasClick}
         onWheel={handlePointerZoom}
       >
@@ -173,7 +223,7 @@ export function Canvas() {
           position: 'relative',
         }}>
           <div
-            className={`canvas-surface ${editMode ? 'canvas-surface--edit' : ''}`}
+            className={`canvas-surface ${canEdit ? 'canvas-surface--edit' : ''}`}
             style={{
               width: canvasWidth,
               height: canvasHeight,
@@ -182,11 +232,13 @@ export function Canvas() {
             }}
           >
             {isReadOnly && <div className="canvas-readonly-overlay" />}
-            {activePage?.widgets.map((widget) => (
-              <WidgetRenderer key={widget.id} widget={widget} />
-            ))}
+            <CanvasActionContext.Provider value={ctxValue}>
+              {activePage?.widgets.map((widget) => (
+                <WidgetRenderer key={widget.id} widget={widget} />
+              ))}
+            </CanvasActionContext.Provider>
 
-            {activePage?.widgets.length === 0 && !editMode && (
+            {activePage?.widgets.length === 0 && !canEdit && (
               <div className="canvas-empty">
                 {isClientMode ? (
                   <>
@@ -216,18 +268,34 @@ export function Canvas() {
       </div>
 
       {/* ── Add Widget FAB (edit mode) ────────────────────────────────── */}
-      {editMode && (
+      {canEdit && (
         <button className="canvas-fab" onClick={() => setShowPalette(true)} title="Add widget">
           +
         </button>
       )}
 
       {/* ── Widget Palette ────────────────────────────────────────────── */}
-      {showPalette && <WidgetPalette onClose={() => setShowPalette(false)} />}
+      {showPalette && (
+        <WidgetPalette
+          onClose={() => setShowPalette(false)}
+          addWidgetOverride={isCommentatorMode ? addCommentatorWidget : undefined}
+        />
+      )}
 
       {/* ── Config Panel ──────────────────────────────────────────────── */}
-      {editMode && selectedWidget && (
-        <WidgetConfigPanel widget={selectedWidget} onClose={() => selectWidget(null)} />
+      {canEdit && selectedWidget && (
+        <WidgetConfigPanel
+          widget={selectedWidget}
+          onClose={() => selectWidget(null)}
+          pagesOverride={isCommentatorMode ? commentatorPages : undefined}
+          actionsOverride={isCommentatorMode ? {
+            updateWidgetConfig: updateCommentatorWidgetConfig,
+            updateWidget: updateCommentatorWidget,
+            deleteWidget: deleteCommentatorWidget,
+            duplicateWidget: duplicateCommentatorWidget,
+            selectWidget: selectCommentatorWidget,
+          } : undefined}
+        />
       )}
 
       {/* ── Read-only Notification Overlay ───────────────────────────── */}

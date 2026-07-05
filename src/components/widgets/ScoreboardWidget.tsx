@@ -1,7 +1,9 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useContext } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
+import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import { useVmixStore } from '../../stores/vmixStore';
+import { resolveImageUrl } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -17,6 +19,26 @@ function resolveInc(inc: Increment): { label: string; value: number } {
   return { label: inc.label || `+${inc.value}`, value: inc.value };
 }
 
+const SCORE_ABBREVS: Record<string, string> = {
+  'try': 'TRY', 'tries': 'TRY',
+  'conversion': 'CONV', 'conv': 'CONV',
+  'penalty try': 'P.TRY', 'pen try': 'P.TRY', 'ptry': 'P.TRY', 'p.try': 'P.TRY',
+  'drop kick': 'DROP', 'drop goal': 'DROP', 'dropkick': 'DROP', 'dkick': 'DROP', 'd.kick': 'DROP', 'drop': 'DROP',
+  'penalty': 'PEN', 'penalty goal': 'PEN', 'penalty kick': 'PEN', 'pen': 'PEN',
+  'goal': 'GOAL', 'field goal': 'FG', 'fg': 'FG',
+  'touchdown': 'TD', 'td': 'TD',
+  'point after': 'PAT', 'pat': 'PAT',
+  'extra point': 'XP', 'xp': 'XP',
+  'free kick': 'FREE', 'behind': 'BEHIND',
+};
+
+function simpleLabel(label: string): string {
+  // Strip leading +/- number prefix: "+5 Try" → "Try", "+5" → "5"
+  const word = label.replace(/^[+-]?\d+\s*/, '').trim();
+  const base = word || label.replace(/^[+-]/, '');
+  return SCORE_ABBREVS[base.toLowerCase()] ?? base;
+}
+
 interface Pending { team: 'A' | 'B'; value: number; label: string; }
 
 const DEC_AMOUNTS = [7, 5, 3, 1];
@@ -27,42 +49,40 @@ interface ScoreButtonsProps {
   onScore: (team: 'A' | 'B', value: number, label: string) => void;
   onDec: (team: 'A' | 'B', amount: number) => void;
   buttonSize?: number;
+  teamColor?: string;
 }
 
-function ScoreButtons({ team, increments, onScore, onDec, buttonSize = 1 }: ScoreButtonsProps) {
-  const incStyle = {
-    minHeight: Math.round(48 * buttonSize),
-    fontSize: Math.round(17 * buttonSize),
-    padding: `${Math.round(8 * buttonSize)}px 4px`,
-  };
-  const decStyle = {
-    minHeight: Math.round(36 * buttonSize),
-    fontSize: Math.round(13 * buttonSize),
-    padding: `${Math.round(5 * buttonSize)}px 2px`,
-  };
+function ScoreButtons({ team, increments, onScore, onDec, buttonSize = 1, teamColor }: ScoreButtonsProps) {
+  const sz = Math.round(34 * buttonSize);
+  const dsz = Math.round(22 * buttonSize);
   return (
     <div className="wgt-score-btns">
       {increments.map((inc, i) => {
         const { label, value } = resolveInc(inc);
-        const lastOdd = i === increments.length - 1 && increments.length % 2 === 1;
+        const word = simpleLabel(label);
         return (
           <button
             key={i}
             className="wgt-score-inc"
-            style={{ ...incStyle, ...(lastOdd ? { gridColumn: '1 / -1' } : {}) }}
+            style={{
+              fontSize: sz * 0.38,
+              height: sz,
+              ...(teamColor ? { background: teamColor, boxShadow: `0 3px 10px ${teamColor}55` } : {}),
+            }}
             onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); onScore(team, value, label); }}
             onClick={(e) => e.stopPropagation()}
           >
-            {label}
+            <span className="wgt-score-inc-circle">{value}</span>
+            <span className="wgt-score-inc-lbl">{word}</span>
           </button>
         );
       })}
-      <div className="wgt-score-dec-group" style={{ gridColumn: '1 / -1' }}>
+      <div className="wgt-score-dec-group">
         {DEC_AMOUNTS.map(n => (
           <button
             key={n}
             className="wgt-score-dec"
-            style={decStyle}
+            style={{ width: dsz, height: dsz }}
             onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); onDec(team, n); }}
             onClick={(e) => e.stopPropagation()}
           >–{n}</button>
@@ -73,9 +93,12 @@ function ScoreButtons({ team, increments, onScore, onDec, buttonSize = 1 }: Scor
 }
 
 export function ScoreboardWidget({ widgetId, config }: Props) {
-  const { pages, scoreWidgetAction, resetWidgetScore, updateWidgetConfig } = useCanvasStore();
+  const store = useCanvasStore();
+  const ctx = useContext(CanvasActionContext);
+  const { pages, scoreWidgetAction, resetWidgetScore } = store;
+  const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { tournaments, updateTeam } = useTournamentStore();
-  const { client, getClientById } = useVmixStore();
+  const { client, vmixSyncVersion } = useVmixStore();
 
   // When linked, mirror the source scoreboard's display state
   const allWidgets = useMemo(() => pages.flatMap(p => p.widgets), [pages]);
@@ -121,7 +144,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
             : [];
         for (const t of targets) {
           if (!t.inputKey) continue;
-          const c = getClientById(t.clientId);
+          const c = client;
           if (!c) continue;
           if (t.fieldTeamA) c.setTextField(t.inputKey, t.fieldTeamA, teamA.name);
           if (t.fieldTeamB) c.setTextField(t.inputKey, t.fieldTeamB, teamB.name);
@@ -136,53 +159,77 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
 
   // Send short name + text field to vMix when values change
   useEffect(() => {
-    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [config] : [];
+    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
     for (const t of targets) {
       if (!t.inputKey) continue;
-      const c = getClientById(t.clientId);
+      const c = client;
       if (!c) continue;
       if (t.fieldShortA && config.teamAShortName != null) c.setTextField(t.inputKey, t.fieldShortA, config.teamAShortName);
       if (t.fieldShortB && config.teamBShortName != null) c.setTextField(t.inputKey, t.fieldShortB, config.teamBShortName);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.teamAShortName, config.teamBShortName]);
+  }, [config.teamAShortName, config.teamBShortName, vmixSyncVersion]);
 
   useEffect(() => {
-    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [config] : [];
+    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
     for (const t of targets) {
       if (!t.inputKey) continue;
-      const c = getClientById(t.clientId);
+      const c = client;
       if (!c) continue;
       if (t.fieldTextA && config.teamATextField != null) c.setTextField(t.inputKey, t.fieldTextA, config.teamATextField);
       if (t.fieldTextB && config.teamBTextField != null) c.setTextField(t.inputKey, t.fieldTextB, config.teamBTextField);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.teamATextField, config.teamBTextField]);
+  }, [config.teamATextField, config.teamBTextField, vmixSyncVersion]);
 
   useEffect(() => {
-    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [config] : [];
+    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
     for (const t of targets) {
       if (!t.inputKey) continue;
-      const c = getClientById(t.clientId);
+      const c = client;
       if (!c) continue;
       if (t.fieldTeamA && config.teamAName != null) c.setTextField(t.inputKey, t.fieldTeamA, config.teamAName);
       if (t.fieldTeamB && config.teamBName != null) c.setTextField(t.inputKey, t.fieldTeamB, config.teamBName);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.teamAName, config.teamBName]);
+  }, [config.teamAName, config.teamBName, vmixSyncVersion]);
 
   useEffect(() => {
-    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [config] : [];
+    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
     for (const t of targets) {
       if (!t.inputKey) continue;
-      const c = getClientById(t.clientId);
+      const c = client;
       if (!c) continue;
       if (t.fieldLogoA && config.teamALogo) c.setImageField(t.inputKey, t.fieldLogoA, config.teamALogo);
       if (t.fieldLogoB && config.teamBLogo) c.setImageField(t.inputKey, t.fieldLogoB, config.teamBLogo);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.teamALogo, config.teamBLogo]);
+  }, [config.teamALogo, config.teamBLogo, vmixSyncVersion]);
 
+  useEffect(() => {
+    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
+    for (const t of targets) {
+      if (!t.inputKey) continue;
+      const c = client;
+      if (!c) continue;
+      if (t.fieldCompetition && config.competition != null) c.setTextField(t.inputKey, t.fieldCompetition, config.competition);
+      if (t.fieldRound && config.subtitle != null) c.setTextField(t.inputKey, t.fieldRound, config.subtitle);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config.competition, config.subtitle, vmixSyncVersion]);
+
+  useEffect(() => {
+    if (isLinked) return;
+    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
+    for (const t of targets) {
+      if (!t.inputKey) continue;
+      const c = client;
+      if (!c) continue;
+      if (t.fieldScoreA != null && t.fieldScoreA !== '') c.setTextField(t.inputKey, t.fieldScoreA, String(config.scoreA ?? 0));
+      if (t.fieldScoreB != null && t.fieldScoreB !== '') c.setTextField(t.inputKey, t.fieldScoreB, String(config.scoreB ?? 0));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config.scoreA, config.scoreB, vmixSyncVersion]);
 
   const pointCounts = useMemo(() => {
     const log: any[] = dc.scoreLog ?? [];
@@ -305,146 +352,160 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
         </div>
       )}
 
+      {/* ── Header: LIVE pill + competition ──────────────────────── */}
+      <div className="wgt-score-top">
+        <div className="wgt-score-live-pill">
+          <span className="wgt-score-live-dot" />
+          LIVE
+        </div>
+        {isLinked ? (
+          <>
+            {dc.competition && <span className="wgt-score-comp-name">{dc.competition}</span>}
+            {dc.subtitle    && <span className="wgt-score-comp-sub">{dc.subtitle}</span>}
+          </>
+        ) : (
+          <>
+            <input
+              className="wgt-score-comp-name"
+              value={config.competition ?? ''}
+              placeholder="Competition"
+              onChange={e => updateWidgetConfig(widgetId, { competition: e.target.value })}
+              onClick={e => e.stopPropagation()}
+            />
+            <input
+              className="wgt-score-comp-sub"
+              value={config.subtitle ?? ''}
+              placeholder="Round / week"
+              onChange={e => updateWidgetConfig(widgetId, { subtitle: e.target.value })}
+              onClick={e => e.stopPropagation()}
+            />
+          </>
+        )}
+      </div>
 
-      {/* ── Scoreboard ───────────────────────────────────────────── */}
-      <div className="wgt-score-teams">
+      {/* ── Matchup: Team A | Score | Team B ─────────────────────── */}
+      <div className="wgt-score-matchup">
         {/* Team A */}
-        <div className="wgt-score-team">
-          <div className="wgt-score-identity">
-            {dc.teamALogo && (
-              <img className="wgt-score-logo" src={dc.teamALogo} alt="" />
-            )}
-            {isLinked ? (
-              <span className="wgt-score-color-dot" style={{ background: teamAColor }} />
-            ) : (
+        <div className="wgt-score-mteam">
+          <div className="wgt-score-mlogo-wrap">
+            {dc.teamALogo
+              ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamALogo)} alt="" />
+              : <div className="wgt-score-mlogo-ph" style={{ background: teamAColor }} />
+            }
+            {!isLinked && (
               <input
                 type="color"
-                className="wgt-score-color-swatch"
+                className="wgt-score-mcolor"
                 value={teamAColor}
-                title="Team color"
+                title="Team A color"
                 onChange={e => handleColorChange('A', e.target.value)}
                 onClick={e => e.stopPropagation()}
               />
             )}
-            {isLinked ? (
-              <span className="wgt-score-name wgt-score-name--ro" style={{ color: teamAColor, fontSize: config.nameFontSize ?? 16 }}>{dc.teamAName ?? 'Team A'}</span>
-            ) : (
-              <input
-                className="wgt-score-name"
-                value={config.teamAName ?? ''}
-                placeholder="Team A"
-                style={{ color: teamAColor, fontSize: config.nameFontSize ?? 16 }}
-                onChange={e => updateWidgetConfig(widgetId, { teamAName: e.target.value })}
-                onClick={e => e.stopPropagation()}
-              />
-            )}
-            {isLinked ? (
-              dc.teamAShortName ? <span className="wgt-score-shortname wgt-score-shortname--ro" style={{ color: teamAColor, fontSize: config.shortNameFontSize ?? 14 }}>{dc.teamAShortName}</span> : null
-            ) : (
-              <input
-                className="wgt-score-shortname"
-                value={config.teamAShortName ?? ''}
-                placeholder="Short"
-                style={{ color: teamAColor, fontSize: config.shortNameFontSize ?? 14 }}
-                onChange={e => updateWidgetConfig(widgetId, { teamAShortName: e.target.value })}
-                onClick={e => e.stopPropagation()}
-              />
-            )}
-            {!isLinked && (
-              <input
-                className="wgt-score-textfield"
-                value={config.teamATextField ?? ''}
-                placeholder="Text field"
-                style={{ fontSize: config.textFieldFontSize ?? 11 }}
-                onChange={e => updateWidgetConfig(widgetId, { teamATextField: e.target.value })}
-                onClick={e => e.stopPropagation()}
-              />
-            )}
           </div>
-          <div className="wgt-score-num" style={{ fontSize: config.scoreFontSize ?? 36 }}>{dc.scoreA ?? 0}</div>
+          {isLinked ? (
+            <span className="wgt-score-mname" style={{ color: teamAColor, fontSize: config.nameFontSize ?? 14 }}>
+              {dc.teamAName ?? 'Team A'}
+            </span>
+          ) : (
+            <input
+              className="wgt-score-mname"
+              value={config.teamAName ?? ''}
+              placeholder="Team A"
+              style={{ color: teamAColor, fontSize: config.nameFontSize ?? 14 }}
+              onChange={e => updateWidgetConfig(widgetId, { teamAName: e.target.value })}
+              onClick={e => e.stopPropagation()}
+            />
+          )}
+          {isLinked
+            ? (dc.teamAShortName ? <span className="wgt-score-mshort" style={{ color: teamAColor }}>{dc.teamAShortName}</span> : null)
+            : <input className="wgt-score-mshort" value={config.teamAShortName ?? ''} placeholder="Short"
+                style={{ color: teamAColor }}
+                onChange={e => updateWidgetConfig(widgetId, { teamAShortName: e.target.value })}
+                onClick={e => e.stopPropagation()} />
+          }
         </div>
 
-        {/* Divider */}
-        <div className="wgt-score-divider">
-          <span className="wgt-score-colon">:</span>
-          {pointCounts.length > 0 && (
-            <div className="wgt-score-counts">
-              {pointCounts.map(({ key, label, A, B }) => (  // eslint-disable-line @typescript-eslint/no-unused-vars
-                <div key={key} className="wgt-score-count-row">
-                  <span className="wgt-score-count-val" style={{ color: teamAColor }}>{A}</span>
-                  <span className="wgt-score-count-type">{label}</span>
-                  <span className="wgt-score-count-val" style={{ color: teamBColor }}>{B}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          {!isLinked && (
-            <button className="wgt-score-rst" onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); resetWidgetScore(widgetId); }} onClick={(e) => e.stopPropagation()}>RST</button>
-          )}
+        {/* Score center */}
+        <div className="wgt-score-mcenter">
+          <div className="wgt-score-mnums">
+            <span className="wgt-score-mnum" style={{ color: teamAColor, fontSize: config.scoreFontSize ?? 52 }}>{dc.scoreA ?? 0}</span>
+            <span className="wgt-score-mcolon" style={{ fontSize: config.scoreFontSize ?? 52 }}>:</span>
+            <span className="wgt-score-mnum" style={{ color: teamBColor, fontSize: config.scoreFontSize ?? 52 }}>{dc.scoreB ?? 0}</span>
+          </div>
         </div>
 
         {/* Team B */}
-        <div className="wgt-score-team">
-          <div className="wgt-score-identity">
-            {dc.teamBLogo && (
-              <img className="wgt-score-logo" src={dc.teamBLogo} alt="" />
-            )}
-            {isLinked ? (
-              <span className="wgt-score-color-dot" style={{ background: teamBColor }} />
-            ) : (
+        <div className="wgt-score-mteam wgt-score-mteam--b">
+          <div className="wgt-score-mlogo-wrap">
+            {dc.teamBLogo
+              ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamBLogo)} alt="" />
+              : <div className="wgt-score-mlogo-ph" style={{ background: teamBColor }} />
+            }
+            {!isLinked && (
               <input
                 type="color"
-                className="wgt-score-color-swatch"
+                className="wgt-score-mcolor"
                 value={teamBColor}
-                title="Team color"
+                title="Team B color"
                 onChange={e => handleColorChange('B', e.target.value)}
                 onClick={e => e.stopPropagation()}
               />
             )}
-            {isLinked ? (
-              <span className="wgt-score-name wgt-score-name--ro" style={{ color: teamBColor, fontSize: config.nameFontSize ?? 16 }}>{dc.teamBName ?? 'Team B'}</span>
-            ) : (
-              <input
-                className="wgt-score-name"
-                value={config.teamBName ?? ''}
-                placeholder="Team B"
-                style={{ color: teamBColor, fontSize: config.nameFontSize ?? 16 }}
-                onChange={e => updateWidgetConfig(widgetId, { teamBName: e.target.value })}
-                onClick={e => e.stopPropagation()}
-              />
-            )}
-            {isLinked ? (
-              dc.teamBShortName ? <span className="wgt-score-shortname wgt-score-shortname--ro" style={{ color: teamBColor, fontSize: config.shortNameFontSize ?? 14 }}>{dc.teamBShortName}</span> : null
-            ) : (
-              <input
-                className="wgt-score-shortname"
-                value={config.teamBShortName ?? ''}
-                placeholder="Short"
-                style={{ color: teamBColor, fontSize: config.shortNameFontSize ?? 14 }}
-                onChange={e => updateWidgetConfig(widgetId, { teamBShortName: e.target.value })}
-                onClick={e => e.stopPropagation()}
-              />
-            )}
-            {!isLinked && (
-              <input
-                className="wgt-score-textfield"
-                value={config.teamBTextField ?? ''}
-                placeholder="Text field"
-                style={{ fontSize: config.textFieldFontSize ?? 11 }}
-                onChange={e => updateWidgetConfig(widgetId, { teamBTextField: e.target.value })}
-                onClick={e => e.stopPropagation()}
-              />
-            )}
           </div>
-          <div className="wgt-score-num" style={{ fontSize: config.scoreFontSize ?? 36 }}>{dc.scoreB ?? 0}</div>
+          {isLinked ? (
+            <span className="wgt-score-mname" style={{ color: teamBColor, fontSize: config.nameFontSize ?? 14 }}>
+              {dc.teamBName ?? 'Team B'}
+            </span>
+          ) : (
+            <input
+              className="wgt-score-mname"
+              value={config.teamBName ?? ''}
+              placeholder="Team B"
+              style={{ color: teamBColor, fontSize: config.nameFontSize ?? 14 }}
+              onChange={e => updateWidgetConfig(widgetId, { teamBName: e.target.value })}
+              onClick={e => e.stopPropagation()}
+            />
+          )}
+          {isLinked
+            ? (dc.teamBShortName ? <span className="wgt-score-mshort" style={{ color: teamBColor }}>{dc.teamBShortName}</span> : null)
+            : <input className="wgt-score-mshort" value={config.teamBShortName ?? ''} placeholder="Short"
+                style={{ color: teamBColor }}
+                onChange={e => updateWidgetConfig(widgetId, { teamBShortName: e.target.value })}
+                onClick={e => e.stopPropagation()} />
+          }
         </div>
       </div>
 
-      {/* ── Buttons row — full widget width, shared overlay ──────── */}
+      {/* ── Score buttons ────────────────────────────────────────── */}
       {!isLinked && (
         <div className="wgt-score-btns-outer">
-          <ScoreButtons team="A" increments={increments} onScore={handleScore} onDec={handleDec} buttonSize={config.buttonSize ?? 1} />
-          <ScoreButtons team="B" increments={increments} onScore={handleScore} onDec={handleDec} buttonSize={config.buttonSize ?? 1} />
+          <ScoreButtons team="A" increments={increments} onScore={handleScore} onDec={handleDec} buttonSize={config.buttonSize ?? 1} teamColor={teamAColor} />
+          <div className="wgt-score-mcenter wgt-score-mcenter--btns">
+            {pointCounts.length > 0 && (
+              <div className="wgt-score-stats-pill">
+                {pointCounts.map(({ key, label, A, B }) => (
+                  <div key={key} className="wgt-score-stat-row">
+                    <div className="wgt-score-stat-side">
+                      <span className="wgt-score-stat-dot" style={{ background: teamAColor }} />
+                      <span className="wgt-score-stat-val" style={{ color: teamAColor }}>{A}</span>
+                    </div>
+                    <span className="wgt-score-stat-name">{simpleLabel(label)}</span>
+                    <div className="wgt-score-stat-side wgt-score-stat-side--b">
+                      <span className="wgt-score-stat-val" style={{ color: teamBColor }}>{B}</span>
+                      <span className="wgt-score-stat-dot" style={{ background: teamBColor }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              className="wgt-score-rst"
+              onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); resetWidgetScore(widgetId); }}
+              onClick={(e) => e.stopPropagation()}
+            >RST</button>
+          </div>
+          <ScoreButtons team="B" increments={increments} onScore={handleScore} onDec={handleDec} buttonSize={config.buttonSize ?? 1} teamColor={teamBColor} />
 
           {pendingDec && (() => {
             const isA = pendingDec.team === 'A';
@@ -456,7 +517,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
                 <span className="wgt-score-dec-confirm-label">Deduct points?</span>
                 <span className="wgt-score-dec-confirm-amount">–{pendingDec.value}</span>
                 <div className="wgt-score-dec-confirm-team">
-                  {tLogo && <img className="wgt-score-dec-confirm-logo" src={tLogo} alt="" />}
+                  {tLogo && <img className="wgt-score-dec-confirm-logo" src={resolveImageUrl(tLogo)} alt="" />}
                   <span style={{ color: tColor }}>{tName}</span>
                 </div>
                 <div className="wgt-score-dec-confirm-actions">

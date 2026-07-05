@@ -1,11 +1,16 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useVmixStore } from '../../stores/vmixStore';
+import { LogoUrlPicker } from '../LogoUrlPicker';
 
-interface InputGroup { inputKey: string; inputTitle?: string; fields: string[]; clientId?: string; }
+type FieldEntry = string | { name: string; type: 'source' };
+const fName = (f: FieldEntry): string => typeof f === 'string' ? f : f.name;
+const fType = (f: FieldEntry): 'text' | 'source' => typeof f === 'string' ? 'text' : (f.type ?? 'text');
+
+interface InputGroup { inputKey: string; inputTitle?: string; fields: FieldEntry[]; }
 interface Props { config: Record<string, any>; w: number; h: number; }
 
 export function TitleFieldWidget({ config }: Props) {
-  const { getClientById, vmixState, connections } = useVmixStore();
+  const { getClient, vmixState } = useVmixStore();
 
   const groups: InputGroup[] = useMemo(() =>
     config.inputs ?? (
@@ -30,16 +35,15 @@ export function TitleFieldWidget({ config }: Props) {
     const updates: Record<string, string> = {};
     for (const grp of groups) {
       if (!grp.inputKey) continue;
-      const gVmixState = grp.clientId
-        ? connections.find(c => c.id === grp.clientId)?.vmixState ?? vmixState
-        : vmixState;
+      const gVmixState = vmixState;
       if (!gVmixState) continue;
       const inp = gVmixState.inputs.find(i => i.key === grp.inputKey);
       if (!inp) continue;
       for (const field of grp.fields) {
-        const key = `${grp.inputKey}::${field}`;
+        const fname = fName(field);
+        const key = `${grp.inputKey}::${fname}`;
         if (initRef.current.has(key)) continue;
-        const tf = inp.textFields.find(f => f.name === field);
+        const tf = inp.textFields.find(f => f.name === fname);
         if (tf !== undefined) {
           updates[key] = tf.value;
           initRef.current.add(key);
@@ -50,25 +54,38 @@ export function TitleFieldWidget({ config }: Props) {
       setValues(prev => ({ ...prev, ...updates }));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vmixState, connections]);
+  }, [vmixState]);
 
-  const sendField = useCallback((inputKey: string, field: string, val: string, clientId?: string) => {
+  const sendField = useCallback((inputKey: string, field: FieldEntry, val: string) => {
     if (!inputKey) return;
-    getClientById(clientId)?.setTextField(inputKey, field, val);
-  }, [getClientById]);
+    const client = getClient();
+    const name = fName(field);
+    if (!name) return;
+    if (fType(field) === 'source') {
+      client?.setImageField(inputKey, name, val);
+    } else {
+      client?.setTextField(inputKey, name, val);
+    }
+  }, [getClient]);
 
   const sendAll = useCallback(() => {
+    const c = getClient();
     for (const grp of groups) {
       if (!grp.inputKey) continue;
-      const c = getClientById(grp.clientId);
       for (const field of grp.fields) {
-        c?.setTextField(grp.inputKey, field, values[`${grp.inputKey}::${field}`] ?? '');
+        const name = fName(field);
+        const val = values[`${grp.inputKey}::${name}`] ?? '';
+        if (fType(field) === 'source') {
+          c?.setImageField(grp.inputKey, name, val);
+        } else {
+          c?.setTextField(grp.inputKey, name, val);
+        }
       }
     }
-  }, [groups, values, getClientById]);
+  }, [groups, values, getClient]);
 
-  const handleChange = (inputKey: string, field: string, val: string) => {
-    const key = `${inputKey}::${field}`;
+  const handleChange = (inputKey: string, field: FieldEntry, val: string) => {
+    const key = `${inputKey}::${fName(field)}`;
     setValues(prev => ({ ...prev, [key]: val }));
     if (autoSend) {
       clearTimeout(timers.current[key]);
@@ -78,9 +95,7 @@ export function TitleFieldWidget({ config }: Props) {
 
   // Lookup input title from live vMix state (fallback to stored inputTitle)
   const getInputTitle = (grp: InputGroup): string => {
-    const gVmixState = grp.clientId
-      ? connections.find(c => c.id === grp.clientId)?.vmixState ?? vmixState
-      : vmixState;
+    const gVmixState = vmixState;
     if (gVmixState) {
       const found = gVmixState.inputs.find(i => i.key === grp.inputKey);
       if (found) return `${found.number}. ${found.title}`;
@@ -92,6 +107,7 @@ export function TitleFieldWidget({ config }: Props) {
 
   // Flatten to all field entries for "Send All"
   const allFields = groups.flatMap(g => g.fields.map(f => ({ inputKey: g.inputKey, field: f })));
+  const allTextFields = allFields.filter(({ field }) => fType(field) === 'text');
 
   return (
     <div className="wgt-tf-multi">
@@ -112,31 +128,45 @@ export function TitleFieldWidget({ config }: Props) {
             )}
 
             {grp.fields.map((field, fi) => {
-              const key  = `${grp.inputKey}::${field}`;
-              const val  = values[key] ?? '';
-              // "Title.Text" → "Title", "Lower.Name.Text" → "Lower Name"
-              const label = field.replace(/\.Text$/i, '').replace(/\./g, ' ');
+              const fname = fName(field);
+              const ftype = fType(field);
+              const key   = `${grp.inputKey}::${fname}`;
+              const val   = values[key] ?? '';
+              const label = fname.replace(/\.(Text|Source)$/i, '').replace(/\./g, ' ');
 
               return (
                 <div key={fi} className="wgt-tf-row">
-                  <span className="wgt-tf-field-label" title={field}>{label}</span>
-                  <input
-                    className={`wgt-tf-input${autoSend ? ' wgt-tf-input--auto' : ''}`}
-                    value={val}
-                    disabled={!grp.inputKey}
-                    onChange={e => handleChange(grp.inputKey, field, e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && !autoSend) sendField(grp.inputKey, field, val, grp.clientId);
-                    }}
-                    placeholder={autoSend ? 'Auto-send…' : 'Enter…'}
-                  />
-                  {!autoSend && (
-                    <button
-                      className="wgt-tf-send"
-                      disabled={!grp.inputKey}
-                      title="Send to vMix"
-                      onClick={() => sendField(grp.inputKey, field, val, grp.clientId)}
-                    >→</button>
+                  <span className="wgt-tf-field-label" title={fname}>{label}</span>
+                  {ftype === 'source' ? (
+                    <LogoUrlPicker
+                      compact
+                      value={val}
+                      onChange={v => {
+                        handleChange(grp.inputKey, field, v);
+                        sendField(grp.inputKey, field, v);
+                      }}
+                    />
+                  ) : (
+                    <>
+                      <input
+                        className={`wgt-tf-input${autoSend ? ' wgt-tf-input--auto' : ''}`}
+                        value={val}
+                        disabled={!grp.inputKey}
+                        onChange={e => handleChange(grp.inputKey, field, e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && !autoSend) sendField(grp.inputKey, field, val);
+                        }}
+                        placeholder={autoSend ? 'Auto-send…' : 'Enter…'}
+                      />
+                      {!autoSend && (
+                        <button
+                          className="wgt-tf-send"
+                          disabled={!grp.inputKey}
+                          title="Send to vMix"
+                          onClick={() => sendField(grp.inputKey, field, val)}
+                        >→</button>
+                      )}
+                    </>
                   )}
                 </div>
               );
@@ -145,8 +175,8 @@ export function TitleFieldWidget({ config }: Props) {
         ))}
       </div>
 
-      {/* Send All button — manual mode, multiple fields */}
-      {!autoSend && configured && allFields.length > 1 && (
+      {/* Send All button — manual mode, multiple text fields */}
+      {!autoSend && configured && allTextFields.length > 1 && (
         <button className="wgt-tf-send-all-btn" onClick={sendAll}>
           Send All
         </button>

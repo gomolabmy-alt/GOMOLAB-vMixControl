@@ -30,7 +30,6 @@ interface VmixInput {
   fieldScorer: string;
   fieldJersey: string;
   fieldAction: string;
-  clientId?: string;
 }
 
 function resolveInput(vmixInputs: VmixInput[], actionLabel: string): VmixInput | null {
@@ -45,7 +44,7 @@ interface Player { id: string; name: string; jerseyNo: string; }
 export function ScoreLowerThirdWidget({ config }: Props) {
   const { pages, patchScoreLogEntry } = useCanvasStore();
   const { tournaments } = useTournamentStore();
-  const { getClientById, vmixState, overlayIn, overlayOut } = useVmixStore();
+  const { getClient, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
 
   const allWidgets = pages.flatMap(p => p.widgets);
   const linkedScoreboard = allWidgets.find(w => w.id === config.linkedScoreboardId);
@@ -107,7 +106,7 @@ export function ScoreLowerThirdWidget({ config }: Props) {
   }, [last?.id]);
 
   const sendToVmixEntry = (entry: LogEntry) => {
-    const c = getClientById(activeInput?.clientId);
+    const c = getClient();
     if (!c || !activeInput?.vmixInputKey) return;
     const key = activeInput.vmixInputKey;
     if (activeInput.fieldTeam)   c.setTextField(key, activeInput.fieldTeam,   entry.teamName ?? '');
@@ -130,6 +129,13 @@ export function ScoreLowerThirdWidget({ config }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [last?.id, last?.scorer, last?.jerseyNo, config.autoSend]);
 
+  // Re-push on reconnect
+  useEffect(() => {
+    if (!config.autoSend || !last) return;
+    sendToVmixEntry(last);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vmixSyncVersion]);
+
   const confirmPicker = (player: Player | null) => {
     if (!pickerEntryId || !linkedScoreboard) return;
     const patch = player
@@ -138,7 +144,7 @@ export function ScoreLowerThirdWidget({ config }: Props) {
     patchScoreLogEntry(linkedScoreboard.id, pickerEntryId, patch);
     setPickerEntryId(null);
     // If this was the last entry and autoSend is on, trigger send after patch
-    if (config.autoSend && last?.id === pickerEntryId && getClientById(activeInput?.clientId) && activeInput?.vmixInputKey) {
+    if (config.autoSend && last?.id === pickerEntryId && getClient() && activeInput?.vmixInputKey) {
       const updated = { ...last, ...patch };
       setTimeout(() => sendToVmixEntry(updated), 50);
     }
@@ -245,7 +251,7 @@ export function ScoreLowerThirdWidget({ config }: Props) {
           className="wgt-slt-btn wgt-slt-btn--send"
           onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); sendToVmix(); }}
           onClick={(e) => e.stopPropagation()}
-          disabled={!getClientById(activeInput?.clientId) || !hasInput || !last}
+          disabled={!getClient() || !hasInput || !last}
           title="Send last score data to vMix title"
         >
           ↑ Send

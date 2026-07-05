@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
 mod commands;
+mod ndi;
 mod server;
 
 pub struct AppState {
@@ -9,7 +10,7 @@ pub struct AppState {
     pub caffeinate: Mutex<Option<std::process::Child>>,
 }
 
-fn get_lan_ip() -> String {
+pub(crate) fn get_lan_ip() -> String {
     use std::net::UdpSocket;
     UdpSocket::bind("0.0.0.0:0")
         .and_then(|s| {
@@ -38,6 +39,7 @@ pub fn run() {
                 lan_ip,
                 9877,
                 9878,
+                9879,
                 images_dir,
             ));
 
@@ -85,16 +87,23 @@ pub fn run() {
             commands::get_server_info,
             commands::toggle_interactive,
             commands::toggle_readonly,
+            commands::toggle_commentator,
             commands::set_sleep_block,
             commands::open_image_dialog,
             commands::save_image,
             commands::list_images,
             commands::delete_image,
             commands::get_images_base_url,
+            commands::get_local_ips,
             commands::scan_ndi,
+            commands::ndi_runtime_available,
+            commands::ndi_preview_start,
+            commands::ndi_preview_stop,
+            commands::get_ndi_preview_base_url,
             commands::vmix_tcp_connect,
             commands::vmix_tcp_disconnect,
             commands::vmix_tcp_refresh,
+            commands::vmix_tcp_function,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

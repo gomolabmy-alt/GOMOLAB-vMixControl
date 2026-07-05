@@ -24,6 +24,8 @@ import { PanelWidget } from './PanelWidget';
 import { VmixTitlesWidget } from './VmixTitlesWidget';
 import { RugbyLineupWidget } from './RugbyLineupWidget';
 import { CardLowerThirdWidget } from './CardLowerThirdWidget';
+import { PomodoroWidget } from './PomodoroWidget';
+import { ImageDisplayWidget } from './ImageDisplayWidget';
 
 interface Props {
   widget: CanvasWidget;
@@ -60,6 +62,8 @@ export function WidgetRenderer({ widget }: Props) {
     case 'vmix-titles':   content = <VmixTitlesWidget {...sharedProps} />; break;
     case 'rugby-lineup':       content = <RugbyLineupWidget widgetId={id} {...sharedProps} />; break;
     case 'card-lower-third':   content = <CardLowerThirdWidget widgetId={id} {...sharedProps} />; break;
+    case 'pomodoro':           content = <PomodoroWidget {...sharedProps} />; break;
+    case 'image-display':      content = <ImageDisplayWidget config={config} />; break;
     default:            content = <div style={{ padding: 8, fontSize: 11 }}>Unknown widget</div>;
   }
 

@@ -8,10 +8,8 @@ interface Props {
 }
 
 export function TBarWidget({ config }: Props) {
-  const { getClientById, vmixState, connections } = useVmixStore();
-  const connVmixState = config.vmixClientId
-    ? connections.find(c => c.id === config.vmixClientId)?.vmixState ?? vmixState
-    : vmixState;
+  const { getClient, vmixState } = useVmixStore();
+  const connVmixState = vmixState;
   const [localValue, setLocalValue] = useState(0);
   const trackRef = useRef<HTMLDivElement>(null);
 
@@ -28,7 +26,7 @@ export function TBarWidget({ config }: Props) {
       const ratio = Math.max(0, Math.min(1, (cx - rect.left) / rect.width));
       const val = Math.round(ratio * 255);
       setLocalValue(val);
-      getClientById(config.vmixClientId)?.setTBar(val);
+      getClient()?.setTBar(val);
     };
     update(e.clientX);
   };
@@ -42,7 +40,7 @@ export function TBarWidget({ config }: Props) {
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const val = Math.round(ratio * 255);
     setLocalValue(val);
-    getClientById(config.vmixClientId)?.setTBar(val);
+    getClient()?.setTBar(val);
   };
 
   return (

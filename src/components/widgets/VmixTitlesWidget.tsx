@@ -1,12 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
 import { useVmixStore } from '../../stores/vmixStore';
+import { LogoUrlPicker } from '../LogoUrlPicker';
+
+type FieldEntry = string | { name: string; type: 'source' };
+const fName = (f: FieldEntry): string => typeof f === 'string' ? f : f.name;
+const fType = (f: FieldEntry): 'text' | 'source' => typeof f === 'string' ? 'text' : (f.type ?? 'text');
 
 interface TitleInput {
   id: string;
   inputKey: string;
   label?: string;
-  fields: string[];       // field names like "Title.Text"
-  clientId?: string;
+  fields: FieldEntry[];
 }
 
 interface Props {
@@ -16,7 +20,7 @@ interface Props {
 }
 
 export function VmixTitlesWidget({ config: cfg }: Props) {
-  const { getClientById, vmixState, connections, activeConnection } = useVmixStore();
+  const { getClient, vmixState, connection, activeConnection } = useVmixStore();
 
   const showThumbs: boolean    = cfg.showThumbs ?? true;
   const autoSend: boolean      = cfg.autoSend   ?? false;
@@ -41,16 +45,15 @@ export function VmixTitlesWidget({ config: cfg }: Props) {
     const updates: Record<string, string> = {};
     for (const grp of inputs) {
       if (!grp.inputKey) continue;
-      const gVmixState = grp.clientId
-        ? connections.find(c => c.id === grp.clientId)?.vmixState ?? vmixState
-        : vmixState;
+      const gVmixState = vmixState;
       if (!gVmixState) continue;
       const inp = gVmixState.inputs.find(i => i.key === grp.inputKey);
       if (!inp) continue;
       for (const field of grp.fields) {
-        const key = `${grp.inputKey}::${field}`;
+        const fname = fName(field);
+        const key = `${grp.inputKey}::${fname}`;
         if (initRef.current.has(key)) continue;
-        const tf = inp.textFields?.find(f => f.name === field);
+        const tf = inp.textFields?.find(f => f.name === fname);
         if (tf !== undefined) {
           updates[key] = tf.value;
           initRef.current.add(key);
@@ -61,13 +64,11 @@ export function VmixTitlesWidget({ config: cfg }: Props) {
       setValues(prev => ({ ...prev, ...updates }));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vmixState, connections]);
+  }, [vmixState]);
 
   const thumbUrl = (grp: TitleInput) => {
     if (!showThumbs) return null;
-    const grpEntry = grp.clientId
-      ? connections.find(c => c.id === grp.clientId)
-      : connections[0];
+    const grpEntry = connection;
     const grpConn = grpEntry ?? activeConnection;
     if (!grpConn) return null;
     const gVmixState = grpEntry?.vmixState ?? vmixState;
@@ -76,13 +77,20 @@ export function VmixTitlesWidget({ config: cfg }: Props) {
     return `http://${grpConn.host}:${grpConn.port}/thumbnail?Input=${inp.number}&t=${thumbTs}`;
   };
 
-  const send = (grp: TitleInput, field: string, val: string) => {
-    if (!grp.inputKey || !field) return;
-    getClientById(grp.clientId)?.setTextField(grp.inputKey, field, val);
+  const send = (grp: TitleInput, field: FieldEntry, val: string) => {
+    const client = getClient();
+    if (!client || !grp.inputKey) return;
+    const name = fName(field);
+    if (!name) return;
+    if (fType(field) === 'source') {
+      client.setImageField(grp.inputKey, name, val);
+    } else {
+      client.setTextField(grp.inputKey, name, val);
+    }
   };
 
-  const handleChange = (grp: TitleInput, field: string, val: string) => {
-    const key = `${grp.inputKey}::${field}`;
+  const handleChange = (grp: TitleInput, field: FieldEntry, val: string) => {
+    const key = `${grp.inputKey}::${fName(field)}`;
     setValues(prev => ({ ...prev, [key]: val }));
     if (autoSend) {
       clearTimeout(timers.current[key]);
@@ -93,7 +101,7 @@ export function VmixTitlesWidget({ config: cfg }: Props) {
   const sendAll = () => {
     for (const grp of inputs) {
       for (const field of grp.fields) {
-        send(grp, field, values[`${grp.inputKey}::${field}`] ?? '');
+        send(grp, field, values[`${grp.inputKey}::${fName(field)}`] ?? '');
       }
     }
   };
@@ -107,9 +115,7 @@ export function VmixTitlesWidget({ config: cfg }: Props) {
   return (
     <div className="wgt-vt">
       {inputs.map(grp => {
-        const gVmixState = grp.clientId
-          ? connections.find(c => c.id === grp.clientId)?.vmixState ?? vmixState
-          : vmixState;
+        const gVmixState = vmixState;
         const liveInp  = gVmixState?.inputs.find(i => i.key === grp.inputKey);
         const label    = grp.label || liveInp?.title || grp.inputKey || '—';
         const url      = thumbUrl(grp);
@@ -136,32 +142,47 @@ export function VmixTitlesWidget({ config: cfg }: Props) {
             {/* Input name header */}
             <div className="wgt-vt-card-title" title={label}>{label}</div>
 
-            {/* Text fields */}
-            {grp.fields.map(field => {
-              const key   = `${grp.inputKey}::${field}`;
-              const val   = values[key] ?? '';
-              const label2 = field.replace(/\.Text$/i, '').replace(/\./g, ' ');
+            {/* Text / Source fields */}
+            {grp.fields.map((field, fi) => {
+              const fname  = fName(field);
+              const ftype  = fType(field);
+              const key    = `${grp.inputKey}::${fname}`;
+              const val    = values[key] ?? '';
+              const label2 = fname.replace(/\.(Text|Source)$/i, '').replace(/\./g, ' ');
               return (
-                <div key={field} className="wgt-vt-row">
-                  <span className="wgt-vt-field-label" title={field}>{label2}</span>
-                  <input
-                    className={`wgt-vt-input${autoSend ? ' wgt-vt-input--auto' : ''}`}
-                    value={val}
-                    disabled={!grp.inputKey || !connected}
-                    placeholder={autoSend ? 'Auto…' : 'Value…'}
-                    onChange={e => handleChange(grp, field, e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && !autoSend) send(grp, field, val);
-                      e.stopPropagation();
-                    }}
-                  />
-                  {!autoSend && (
-                    <button
-                      className="wgt-vt-send"
-                      disabled={!grp.inputKey || !connected}
-                      onClick={() => send(grp, field, val)}
-                      title="Send to vMix"
-                    >→</button>
+                <div key={fi} className="wgt-vt-row">
+                  <span className="wgt-vt-field-label" title={fname}>{label2}</span>
+                  {ftype === 'source' ? (
+                    <LogoUrlPicker
+                      compact
+                      value={val}
+                      onChange={v => {
+                        handleChange(grp, field, v);
+                        send(grp, field, v);
+                      }}
+                    />
+                  ) : (
+                    <>
+                      <input
+                        className={`wgt-vt-input${autoSend ? ' wgt-vt-input--auto' : ''}`}
+                        value={val}
+                        disabled={!grp.inputKey || !connected}
+                        placeholder={autoSend ? 'Auto…' : 'Value…'}
+                        onChange={e => handleChange(grp, field, e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && !autoSend) send(grp, field, val);
+                          e.stopPropagation();
+                        }}
+                      />
+                      {!autoSend && (
+                        <button
+                          className="wgt-vt-send"
+                          disabled={!grp.inputKey || !connected}
+                          onClick={() => send(grp, field, val)}
+                          title="Send to vMix"
+                        >→</button>
+                      )}
+                    </>
                   )}
                 </div>
               );

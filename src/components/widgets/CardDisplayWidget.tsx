@@ -30,7 +30,7 @@ const CARD_LABEL: Record<ActiveCard, string> = {
 export function CardDisplayWidget({ config: cfg }: Props) {
   const { pages } = useCanvasStore();
   const { tournaments } = useTournamentStore();
-  const { getClientById } = useVmixStore();
+  const { getClient, vmixSyncVersion } = useVmixStore();
 
   const allWidgets = useMemo(() => pages.flatMap(p => p.widgets), [pages]);
 
@@ -71,7 +71,7 @@ export function CardDisplayWidget({ config: cfg }: Props) {
 
   // ── vMix sync ──────────────────────────────────────────────────────
   const syncToVmix = useCallback(() => {
-    const cdTargets: Array<{inputKey:string;clientId?:string;vmixFieldSinBinA?:string;vmixFieldSinBinB?:string;vmixFieldRedA?:string;vmixFieldRedB?:string}> =
+    const cdTargets: Array<{inputKey:string;vmixFieldSinBinA?:string;vmixFieldSinBinB?:string;vmixFieldRedA?:string;vmixFieldRedB?:string}> =
       cfg.vmixInputs?.length
         ? cfg.vmixInputs
         : cfg.vmixInputKey
@@ -86,7 +86,7 @@ export function CardDisplayWidget({ config: cfg }: Props) {
 
     for (const t of cdTargets) {
       if (!t.inputKey) continue;
-      const c = getClientById(t.clientId);
+      const c = getClient();
       if (!c) continue;
       if (t.vmixFieldSinBinA) c.setTextField(t.inputKey, t.vmixFieldSinBinA, sinbinA);
       if (t.vmixFieldSinBinB) c.setTextField(t.inputKey, t.vmixFieldSinBinB, sinbinB);
@@ -94,11 +94,11 @@ export function CardDisplayWidget({ config: cfg }: Props) {
       if (t.vmixFieldRedB)    c.setTextField(t.inputKey, t.vmixFieldRedB,    redB);
     }
   }, [cfg.vmixInputs, cfg.vmixInputKey, cfg.vmixFieldSinBinA, cfg.vmixFieldSinBinB, cfg.vmixFieldRedA, cfg.vmixFieldRedB,
-      teamA.entries, teamB.entries, getClientById]);
+      teamA.entries, teamB.entries, getClient]);
 
   useEffect(() => {
     if (cfg.vmixAutoSync) syncToVmix();
-  }, [teamA.entries, teamB.entries, cfg.vmixAutoSync, syncToVmix]);
+  }, [teamA.entries, teamB.entries, cfg.vmixAutoSync, syncToVmix, vmixSyncVersion]);
 
   // ── Render ─────────────────────────────────────────────────────────
   function renderEntries(entries: CardEntry[]) {

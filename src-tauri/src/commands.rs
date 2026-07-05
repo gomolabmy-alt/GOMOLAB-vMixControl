@@ -262,8 +262,11 @@ pub async fn vmix_tcp_connect(handle: tauri::AppHandle, host: String, tcp_port: 
         let writer = writer_arc;
         let mut reader = BufReader::new(reader_half);
 
-        // Subscribe to XML state changes
-        let _ = writer.lock().await.write_all(b"SUBSCRIBE XML\r\nSUBSCRIBE TALLY\r\n").await;
+        // Note: vMix's TCP API only supports SUBSCRIBE for TALLY/ACTS events —
+        // "SUBSCRIBE XML" is not a real command (vMix replies "XML ER Not
+        // Supported"). Full state has no push mechanism; the frontend polls
+        // XML\r\n on a short interval over this same connection instead.
+        let _ = writer.lock().await.write_all(b"SUBSCRIBE TALLY\r\n").await;
 
         let mut line = String::new();
         loop {
@@ -310,6 +313,27 @@ pub async fn vmix_tcp_disconnect(host: String, tcp_port: u16) {
     }
 }
 
+/// Send a vMix FUNCTION command over the existing TCP connection.
+/// `cmd` is the pre-formatted line, e.g. "FUNCTION SetText Input=x&SelectedName=y&Value=z"
+/// (vMix's documented TCP API requires '&'-joined params, same as an HTTP query string).
+/// Returns Err if no TCP connection exists — caller should fall back to HTTP.
+#[tauri::command]
+pub async fn vmix_tcp_function(host: String, tcp_port: u16, cmd: String) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let addr = format!("{host}:{tcp_port}");
+    let writer = {
+        let tasks = TCP_TASKS.lock().await;
+        tasks.get(&addr)
+            .map(|e| Arc::clone(&e.writer))
+            .ok_or_else(|| "no TCP connection".to_string())?
+    };
+    let mut line = cmd.trim_end_matches(['\r', '\n']).to_string();
+    line.push_str("\r\n");
+    let mut guard = writer.lock().await;
+    guard.write_all(line.as_bytes()).await
+        .map_err(|e| format!("TCP write: {e}"))
+}
+
 /// Send "XML\r\n" through the existing TCP connection to force an immediate
 /// vMix state push. Call this after any button/function command so the UI
 /// updates within milliseconds via the TCP push path (no extra HTTP poll).
@@ -332,10 +356,16 @@ pub struct ServerInfo {
     pub readonly_port: u16,
     #[serde(rename = "readonlyUrl")]
     pub readonly_url: String,
+    #[serde(rename = "commentatorPort")]
+    pub commentator_port: u16,
+    #[serde(rename = "commentatorUrl")]
+    pub commentator_url: String,
     #[serde(rename = "interactiveEnabled")]
     pub interactive_enabled: bool,
     #[serde(rename = "readonlyEnabled")]
     pub readonly_enabled: bool,
+    #[serde(rename = "commentatorEnabled")]
+    pub commentator_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -462,14 +492,18 @@ pub async fn get_server_info(state: State<'_, AppState>) -> Result<ServerInfo, S
     let srv = &state.server;
     let interactive_enabled = *srv.interactive_enabled.read().await;
     let readonly_enabled = *srv.readonly_enabled.read().await;
+    let commentator_enabled = *srv.commentator_enabled.read().await;
     Ok(ServerInfo {
         ip: srv.lan_ip.clone(),
         port: srv.sync_port,
         url: format!("http://{}:{}", srv.lan_ip, srv.sync_port),
         readonly_port: srv.readonly_port,
         readonly_url: format!("http://{}:{}", srv.lan_ip, srv.readonly_port),
+        commentator_port: srv.commentator_port,
+        commentator_url: format!("http://{}:{}", srv.lan_ip, srv.commentator_port),
         interactive_enabled,
         readonly_enabled,
+        commentator_enabled,
     })
 }
 
@@ -489,6 +523,16 @@ pub async fn toggle_readonly(state: State<'_, AppState>) -> Result<bool, String>
     *enabled = !*enabled;
     if !*enabled {
         state.server.readonly_clients.lock().await.clear();
+    }
+    Ok(*enabled)
+}
+
+#[tauri::command]
+pub async fn toggle_commentator(state: State<'_, AppState>) -> Result<bool, String> {
+    let mut enabled = state.server.commentator_enabled.write().await;
+    *enabled = !*enabled;
+    if !*enabled {
+        state.server.commentator_clients.lock().await.clear();
     }
     Ok(*enabled)
 }
@@ -571,10 +615,9 @@ pub fn save_image(src_path: String, state: State<'_, AppState>) -> Result<SaveIm
     let name = format!("{}_{}.{}", ts, safe_stem, ext);
     let dest = state.server.images_dir.join(&name);
     std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
-    let url = format!(
-        "http://{}:{}/images/{}",
-        state.server.lan_ip, state.server.sync_port, name
-    );
+    // Use localhost so the URL remains valid regardless of which network interface
+    // is active. setImageField rewrites to the LAN IP when sending to vMix.
+    let url = format!("http://localhost:{}/images/{}", state.server.sync_port, name);
     Ok(SaveImageResult { name, url })
 }
 
@@ -597,10 +640,7 @@ pub fn list_images(state: State<'_, AppState>) -> Vec<ImageInfo> {
                 || lower.ends_with(".svg")
         })
         .map(|name| ImageInfo {
-            url: format!(
-                "http://{}:{}/images/{}",
-                state.server.lan_ip, state.server.sync_port, name
-            ),
+            url: format!("http://localhost:{}/images/{}", state.server.sync_port, name),
             name,
         })
         .collect()
@@ -621,16 +661,62 @@ pub fn delete_image(name: String, state: State<'_, AppState>) -> Result<(), Stri
 
 #[tauri::command]
 pub fn get_images_base_url(state: State<'_, AppState>) -> String {
+    // Re-detect the LAN IP on every call (not the cached startup value) — this
+    // command feeds URLs that get persisted into widget/tournament config and
+    // outlive network changes, so a stale IP here silently breaks logos forever.
     format!(
         "http://{}:{}/images",
-        state.server.lan_ip, state.server.sync_port
+        crate::get_lan_ip(),
+        state.server.sync_port
     )
 }
 
-// ── NDI source discovery ─────────────────────────────────────────────────────
+// ── Local IP discovery ───────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_local_ips() -> Vec<String> {
+    #[cfg(unix)]
+    {
+        let mut result = Vec::new();
+        unsafe {
+            let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+            if libc::getifaddrs(&mut ifap) != 0 {
+                return result;
+            }
+            let mut ifa = ifap;
+            while !ifa.is_null() {
+                let addr_ptr = (*ifa).ifa_addr;
+                if !addr_ptr.is_null() && ((*addr_ptr).sa_family as i32) == libc::AF_INET {
+                    let sin = addr_ptr as *const libc::sockaddr_in;
+                    let bytes = (*sin).sin_addr.s_addr.to_ne_bytes();
+                    if bytes[0] != 127 {
+                        result.push(format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3]));
+                    }
+                }
+                ifa = (*ifa).ifa_next;
+            }
+            libc::freeifaddrs(ifap);
+        }
+        result
+    }
+    #[cfg(not(unix))]
+    {
+        vec![]
+    }
+}
+
+// ── NDI source discovery + live preview ─────────────────────────────────────
 
 #[tauri::command]
 pub async fn scan_ndi() -> Vec<String> {
+    // Prefer the real NDI Find API (exact names, no mDNS timing flakiness)
+    // when the NDI runtime is installed — falls back to mDNS below otherwise.
+    if crate::ndi::is_available() {
+        return tokio::task::spawn_blocking(|| crate::ndi::scan_sources(2500))
+            .await
+            .unwrap_or_default();
+    }
+
     use std::{collections::HashSet, process::Stdio, time::Duration};
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -668,4 +754,29 @@ pub async fn scan_ndi() -> Vec<String> {
 
     let _ = child.kill().await;
     sources.into_iter().collect()
+}
+
+#[tauri::command]
+pub fn ndi_runtime_available() -> bool {
+    crate::ndi::is_available()
+}
+
+#[tauri::command]
+pub fn ndi_preview_start(
+    source: String,
+    low_bandwidth: bool,
+    fps: u32,
+    quality: u8,
+) -> Result<String, String> {
+    crate::ndi::start_preview(source, crate::ndi::PreviewOptions { low_bandwidth, fps, quality })
+}
+
+#[tauri::command]
+pub fn ndi_preview_stop(id: String) {
+    crate::ndi::stop_preview(&id);
+}
+
+#[tauri::command]
+pub fn get_ndi_preview_base_url(state: State<'_, AppState>) -> String {
+    format!("http://{}:{}/ndi-preview", state.server.lan_ip, state.server.sync_port)
 }

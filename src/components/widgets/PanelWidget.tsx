@@ -21,11 +21,9 @@ export interface PanelItem {
 }
 
 export function PanelWidget({ config: cfg }: Props) {
-  const { getClientById, vmixState, connections } = useVmixStore();
-  const connVmixState = cfg.vmixClientId
-    ? connections.find(c => c.id === cfg.vmixClientId)?.vmixState ?? vmixState
-    : vmixState;
-  const c = getClientById(cfg.vmixClientId);
+  const { getClient, vmixState } = useVmixStore();
+  const connVmixState = vmixState;
+  const c = getClient();
   const [textValues, setTextValues] = useState<Record<string, string>>({});
   const [firing, setFiring] = useState<Record<string, boolean>>({});
 

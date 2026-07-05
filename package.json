@@ -152,6 +152,7 @@
     "@capacitor/core": "^5.7.0",
     "@tauri-apps/api": "^2.11.1",
     "express": "^5.2.1",
+    "lucide-react": "^1.22.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "ws": "^8.21.0",

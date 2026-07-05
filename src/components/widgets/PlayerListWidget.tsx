@@ -1,5 +1,6 @@
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef, useContext } from 'react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
+import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { SPORT_DEFAULTS, DEFAULT_STAFF_ROLES } from '../../types/tournament';
@@ -16,7 +17,10 @@ function wallClock(): string {
 }
 
 export function PlayerListWidget({ widgetId, config: cfg }: Props) {
-  const { pages, updateWidgetConfig, addTimelineEvent } = useCanvasStore();
+  const store = useCanvasStore();
+  const ctx = useContext(CanvasActionContext);
+  const { pages, addTimelineEvent } = store;
+  const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const highlightPlayer = (player: Player) => {
     const targetId = cfg.linkedPlayerHighlightId;
     if (!targetId) return;
@@ -31,7 +35,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
     });
   };
   const { tournaments, updatePlayer, updateTeam, updateStaffMember } = useTournamentStore();
-  const { getClientById, vmixState, connections } = useVmixStore();
+  const { getClient, vmixState, vmixSyncVersion } = useVmixStore();
 
   // Slot assignment picker
   const [picking, setPicking] = useState<{ section: 'starter' | 'sub'; idx: number } | null>(null);
@@ -119,7 +123,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
   const highlightedPlayerId: string = highlightWidget?.config.highlightedPlayerId ?? '';
 
   // Resolve all vMix name-sync targets (multi-input or legacy single)
-  const plVmixTargets: Array<{inputKey:string;clientId?:string;vmixNamePrefix?:string;vmixJerseyPrefix?:string;vmixAutoSync?:boolean}> =
+  const plVmixTargets: Array<{inputKey:string;vmixNamePrefix?:string;vmixJerseyPrefix?:string;vmixAutoSync?:boolean}> =
     cfg.vmixInputs?.length
       ? cfg.vmixInputs
       : cfg.vmixInputKey
@@ -128,25 +132,25 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
 
   // vMix name sync: slotIdx is 1-based; overrides let callers pass fresh values before store update propagates
   const syncName = useCallback((slotIdx: number, playerId: string | null, overrides?: { name?: string; jerseyNo?: string }) => {
+    const c = getClient();
     for (const t of plVmixTargets) {
       if (!t.inputKey || !t.vmixAutoSync) continue;
       const p = playerId ? playerById[playerId] : null;
       const name     = overrides?.name     ?? p?.name     ?? '';
       const jerseyNo = overrides?.jerseyNo ?? p?.jerseyNo ?? '';
-      const c = getClientById(t.clientId);
       if (t.vmixNamePrefix && c)   c.setTextField(t.inputKey, `${t.vmixNamePrefix}${slotIdx}.Text`, name);
       if (t.vmixJerseyPrefix && c) c.setTextField(t.inputKey, `${t.vmixJerseyPrefix}${slotIdx}.Text`, jerseyNo);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg.vmixInputs, cfg.vmixInputKey, cfg.vmixAutoSync, cfg.vmixNamePrefix, cfg.vmixJerseyPrefix, playerById, getClientById]);
+  }, [cfg.vmixInputs, cfg.vmixInputKey, cfg.vmixAutoSync, cfg.vmixNamePrefix, cfg.vmixJerseyPrefix, playerById, getClient]);
 
   const syncAllNames = useCallback(() => {
     if (!plVmixTargets.length) return;
     const lastUsedIdx = maxOnField + subSlots.length;
+    const c = getClient();
+    if (!c) return;
     for (const t of plVmixTargets) {
       if (!t.inputKey) continue;
-      const c = getClientById(t.clientId);
-      if (!c) continue;
       starterSlots.forEach((id, i) => {
         const p = id ? playerById[id] : null;
         if (t.vmixNamePrefix)   c.setTextField(t.inputKey, `${t.vmixNamePrefix}${i + 1}.Text`,              p?.name     ?? '');
@@ -158,10 +162,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
         if (t.vmixJerseyPrefix) c.setTextField(t.inputKey, `${t.vmixJerseyPrefix}${maxOnField + i + 1}.Text`, p?.jerseyNo ?? '');
       });
       // Clear any extra same-prefix fields in the vMix input beyond the last used slot
-      const connVmixState = t.clientId
-        ? connections.find(conn => conn.id === t.clientId)?.vmixState ?? vmixState
-        : vmixState;
-      const vmixInput = connVmixState?.inputs?.find(inp => inp.key === t.inputKey);
+      const vmixInput = vmixState?.inputs?.find(inp => inp.key === t.inputKey);
       if (vmixInput) {
         const clearExtras = (prefix: string) => {
           if (!prefix) return;
@@ -177,19 +178,19 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg.vmixInputs, cfg.vmixInputKey, cfg.vmixNamePrefix, cfg.vmixJerseyPrefix, starterSlots, subSlots, playerById, maxOnField, getClientById, vmixState, connections]);
+  }, [cfg.vmixInputs, cfg.vmixInputKey, cfg.vmixNamePrefix, cfg.vmixJerseyPrefix, starterSlots, subSlots, playerById, maxOnField, getClient, vmixState]);
 
   // vMix staff names sync (MNG → Manager field, HC → Head Coach field)
   const sendStaffToVmix = useCallback(() => {
     const key = cfg.vmixStaffInputKey;
     if (!key) return;
-    const c = getClientById(cfg.vmixStaffClientId);
+    const c = getClient();
     if (!c) return;
     const manager = players.find(p => p.jerseyNo?.toUpperCase() === 'MNG');
     const hc      = players.find(p => p.jerseyNo?.toUpperCase() === 'HC');
     if (cfg.vmixManagerField) c.setTextField(key, cfg.vmixManagerField, manager?.name ?? '');
     if (cfg.vmixHCField)      c.setTextField(key, cfg.vmixHCField,      hc?.name      ?? '');
-  }, [cfg.vmixStaffInputKey, cfg.vmixManagerField, cfg.vmixHCField, cfg.vmixStaffClientId, players, getClientById]);
+  }, [cfg.vmixStaffInputKey, cfg.vmixManagerField, cfg.vmixHCField, players, getClient]);
 
   useEffect(() => {
     if (cfg.vmixStaffAutoSync) sendStaffToVmix();
@@ -198,28 +199,31 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
     players.find(p => p.jerseyNo?.toUpperCase() === 'HC')?.name,
     cfg.vmixStaffAutoSync,
     sendStaffToVmix,
+    vmixSyncVersion,
   ]);
 
   // vMix team title sync
   const sendTeamToVmix = useCallback(() => {
     const key = cfg.vmixTeamInputKey;
     if (!key || !team) return;
-    const c = getClientById(cfg.vmixTeamClientId);
+    const c = getClient();
     if (!c) return;
     if (cfg.vmixTeamFieldName) c.setTextField(key, cfg.vmixTeamFieldName, team.name ?? '');
     if (cfg.vmixTeamFieldShort) c.setTextField(key, cfg.vmixTeamFieldShort, team.shortName ?? team.name ?? '');
-  }, [cfg.vmixTeamInputKey, cfg.vmixTeamFieldName, cfg.vmixTeamFieldShort, cfg.vmixTeamClientId, team, getClientById]);
+  }, [cfg.vmixTeamInputKey, cfg.vmixTeamFieldName, cfg.vmixTeamFieldShort, team, getClient]);
 
   useEffect(() => {
     if (cfg.vmixTeamAutoSync) sendTeamToVmix();
-  }, [team?.name, team?.shortName, cfg.vmixTeamAutoSync, sendTeamToVmix]);
+  }, [team?.name, team?.shortName, cfg.vmixTeamAutoSync, sendTeamToVmix, vmixSyncVersion]);
 
   // Auto-send full list whenever slots change and any target has auto-sync on
+  // (also re-fires on vmixSyncVersion so a reconnect re-pushes the current
+  // roster instead of leaving vMix stale until the next actual slot change).
   const anyAutoSync = plVmixTargets.some(t => t.inputKey && t.vmixAutoSync && (t.vmixNamePrefix || t.vmixJerseyPrefix));
   useEffect(() => {
     if (anyAutoSync) syncAllNames();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [starterSlots.join(','), subSlots.join(','), anyAutoSync]);
+  }, [starterSlots.join(','), subSlots.join(','), anyAutoSync, vmixSyncVersion]);
 
   // ── Rugby card tracking ───────────────────────────────────────────
   type RugbyCard = 'yellow' | 'orange' | 'red';

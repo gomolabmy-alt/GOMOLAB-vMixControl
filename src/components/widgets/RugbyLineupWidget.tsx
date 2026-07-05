@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback, useContext } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import type { Player } from '../../types/tournament';
+import { CanvasActionContext } from '../../lib/canvasContext';
 
 interface RPlayer {
   number: number;
@@ -52,7 +53,10 @@ interface Props {
 }
 
 export function RugbyLineupWidget({ widgetId, config: cfg, w, h }: Props) {
-  const { updateWidgetConfig, pages } = useCanvasStore();
+  const store = useCanvasStore();
+  const ctx = useContext(CanvasActionContext);
+  const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
+  const pages = store.pages; // always use main canvas pages for player data lookups
   const { tournaments } = useTournamentStore();
 
   const teamColor: string  = cfg.teamColor  ?? '#3498db';
@@ -108,6 +112,29 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h }: Props) {
     return () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
   }, [updatePlayer]);
 
+  // Live substitution overrides: when a PlayerListWidget is linked, read its starters array
+  // so that after a sub the incoming player's name appears at the right position on field.
+  const linkedPlw = cfg.linkedPlayerListId
+    ? pages.flatMap(p => p.widgets).find(w => w.id === cfg.linkedPlayerListId)
+    : null;
+  const subOverrides = useMemo(() => {
+    if (!linkedPlw || !linkedTeam) return {} as Record<number, { name: string; jerseyNo?: string; isSub: boolean }>;
+    const plStarters: string[] = linkedPlw.config?.starters ?? [];
+    const subbedOn: Set<string> = new Set(linkedPlw.config?.subbedOnPlayers ?? []);
+    // All players on this team (starters + subs) so we can look up incoming subs by id
+    const allPlayers = linkedTeam.players ?? [];
+    const playerById = Object.fromEntries(allPlayers.map((p: Player) => [p.id, p]));
+    const overrides: Record<number, { name: string; jerseyNo?: string; isSub: boolean }> = {};
+    POSITIONS_META.forEach((pm, i) => {
+      const id = plStarters[i];
+      if (!id) return;
+      const p = playerById[id];
+      if (!p) return;
+      overrides[pm.number] = { name: p.name, jerseyNo: p.jerseyNo || undefined, isSub: subbedOn.has(id) };
+    });
+    return overrides;
+  }, [linkedPlw, linkedTeam]);
+
   // Available players: from linked tournament team, then fall back to any player-list widget
   const availablePlayers = useMemo((): Player[] => {
     if (linkedTeam?.players?.length) return linkedTeam.players;
@@ -152,7 +179,7 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h }: Props) {
   ).slice(0, 10);
 
   return (
-    <div className="rugby-lineup" style={{ width: w, height: h }} onClick={() => setColorPicking(null)}>
+    <div className="rugby-lineup" style={{ width: w, height: h, pointerEvents: 'auto' }} onClick={() => setColorPicking(null)}>
 
       {/* Header */}
       <div className="rugby-lineup-header">
@@ -207,6 +234,10 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h }: Props) {
         {/* Players */}
         {POSITIONS_META.map(({ number: num }) => {
           const p = getPlayer(num);
+          const override = subOverrides[num];
+          const displayName = override ? override.name : p.name;
+          const displayJerseyNo = override?.jerseyNo ?? (p.jerseyNo ?? num);
+          const isSub = !!override?.isSub;
           const pos = getDisplayPos(num);
           const isEditing = editing === num;
           const isColorPicking = colorPicking === num;
@@ -238,7 +269,7 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h }: Props) {
                     fill={p.jerseyColor} stroke="rgba(0,0,0,0.3)" strokeWidth="1" />
                   <text x="20" y="24" textAnchor="middle" dominantBaseline="middle"
                     fontSize={jerseySize * 0.5} fontWeight="bold" fill={p.textColor}
-                    fontFamily="sans-serif">{p.jerseyNo ?? num}</text>
+                    fontFamily="sans-serif">{displayJerseyNo}</text>
                 </svg>
               </div>
 
@@ -268,7 +299,9 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h }: Props) {
                 </div>
               ) : (
                 <span className="rugby-player-name" style={{ fontSize: nameSize }}>
-                  {p.name || <span style={{ opacity: 0.4 }}>—</span>}
+                  {displayName
+                    ? <>{displayName}{isSub && <span className="rugby-sub-badge">↑</span>}</>
+                    : <span style={{ opacity: 0.4 }}>—</span>}
                 </span>
               )}
 

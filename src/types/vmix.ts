@@ -97,6 +97,30 @@ export interface VmixConnectionEntry {
   lastUpdated: number | null;
 }
 
+export type ConnectionLogEvent =
+  | 'connected'       // initial HTTP connect success
+  | 'disconnected'    // manual disconnect
+  | 'error'           // connect failed or polling fatal error
+  | 'stale'           // no state update for >3s
+  | 'recovered'       // stale resolved — updates resumed
+  | 'sent'            // command sent to vMix API
+  | 'send-error'      // command HTTP request failed
+  | 'tcp-connect'     // TCP push channel established
+  | 'tcp-disconnect'  // TCP push channel dropped
+  | 'tcp-reconnect'   // TCP push channel re-established after a drop
+  | 'poll-fallback'   // TCP unavailable, falling back to HTTP polling
+  | 'poll-error'      // individual HTTP poll failed
+  | 'poll-restart'    // HTTP poll stalled and was restarted by watchdog
+  | 'tcp-stale';      // no XML from TCP for 12s — forcing reconnect
+
+export interface ConnectionLogEntry {
+  id: string;
+  time: number;
+  connectionName: string;
+  event: ConnectionLogEvent;
+  detail?: string;
+}
+
 // ─── Shortcuts ─────────────────────────────────────────────────────────────
 
 export type ShortcutMode = 'momentary' | 'toggle';

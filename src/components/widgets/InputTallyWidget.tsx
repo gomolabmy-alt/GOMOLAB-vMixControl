@@ -8,10 +8,8 @@ interface Props {
 }
 
 export function InputTallyWidget({ config }: Props) {
-  const { vmixState, connections } = useVmixStore();
-  const connVmixState = config.vmixClientId
-    ? connections.find(c => c.id === config.vmixClientId)?.vmixState ?? vmixState
-    : vmixState;
+  const { vmixState } = useVmixStore();
+  const connVmixState = vmixState;
 
   const input = connVmixState?.inputs.find((i) => i.key === config.inputKey);
   const isPgm = connVmixState?.active === input?.number;

@@ -1,6 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useContext } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
+import { CanvasActionContext } from '../../lib/canvasContext';
 import { useVmixStore } from '../../stores/vmixStore';
+import { ndiRuntimeAvailable, ndiPreviewStart, ndiPreviewStop } from '../../lib/ndiPreview';
 
 interface Props {
   widgetId: string;
@@ -13,14 +15,14 @@ interface NdiSource {
 }
 
 export function NdiInputWidget({ widgetId, config: cfg }: Props) {
-  const { updateWidgetConfig } = useCanvasStore();
-  const { getClientById, vmixState, connections, activeConnection } = useVmixStore();
-  const connEntry = cfg.vmixClientId
-    ? connections.find(c => c.id === cfg.vmixClientId)
-    : connections[0];
+  const store = useCanvasStore();
+  const ctx = useContext(CanvasActionContext);
+  const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
+  const { getClient, vmixState, connection, activeConnection } = useVmixStore();
+  const connEntry = connection;
   const conn = connEntry ?? activeConnection;
   const connVmixState = connEntry?.vmixState ?? vmixState;
-  const c = getClientById(cfg.vmixClientId);
+  const c = getClient();
 
   const [newName, setNewName]           = useState('');
   const [scanning, setScanning]         = useState(false);
@@ -30,7 +32,17 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
   const [selectedNumber, setSelectedNumber] = useState<number | null>(null);
   const [thumbTs, setThumbTs]           = useState(Date.now());
 
+  // Real live NDI preview — receives actual video frames directly from the
+  // network (independent of vMix), so any discovered/saved source can be
+  // previewed even before it's added as a vMix input.
+  const [ndiAvailable, setNdiAvailable] = useState(false);
+  const [previewName, setPreviewName]   = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl]     = useState<string | null>(null);
+  const [previewErr, setPreviewErr]     = useState<string | null>(null);
+  const [previewTs, setPreviewTs]       = useState(Date.now());
+
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const previewTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const saved: NdiSource[] = cfg.sources ?? [];
   const connected = !!connVmixState;
@@ -44,13 +56,14 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
       ? `http://${conn.host}:${conn.port}/thumbnail?Input=${number}&t=${thumbTs}`
       : null;
 
-  // Auto-refresh the thumbnail every 500 ms while a source is selected
+  // Auto-refresh the vMix-thumbnail fallback every 500 ms — only needed when
+  // the real NDI preview below isn't available (no NDI runtime installed).
   useEffect(() => {
-    if (selectedNumber !== null) {
+    if (selectedNumber !== null && !ndiAvailable) {
       timerRef.current = setInterval(() => setThumbTs(Date.now()), 500);
     }
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [selectedNumber]);
+  }, [selectedNumber, ndiAvailable]);
 
   // Deselect if input disappears from vMix
   useEffect(() => {
@@ -58,6 +71,51 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
       setSelectedNumber(null);
     }
   }, [ndiInVmix, selectedNumber]);
+
+  // Detect once whether this Mac has the NDI runtime installed (NDI Tools /
+  // Redistributable) — determines whether real live preview is possible.
+  useEffect(() => {
+    if (!canScan) return;
+    ndiRuntimeAvailable().then(setNdiAvailable);
+  }, [canScan]);
+
+  // Start/stop a real NDI receiver session whenever the previewed source
+  // changes, so exactly one background receiver thread runs at a time.
+  useEffect(() => {
+    if (!previewName || !ndiAvailable) { setPreviewUrl(null); setPreviewErr(null); return; }
+    let alive = true;
+    let sessionId: string | null = null;
+    setPreviewErr(null);
+    ndiPreviewStart(previewName, {
+      lowBandwidth: !!cfg.ndiLowBandwidth,
+      fps: cfg.ndiFps ?? 15,
+      quality: cfg.ndiQuality ?? 75,
+    }).then(
+      ({ id, url }) => {
+        if (!alive) { ndiPreviewStop(id); return; }
+        sessionId = id;
+        setPreviewUrl(url);
+      },
+      (e) => { if (alive) setPreviewErr('Preview failed: ' + String(e)); },
+    );
+    return () => {
+      alive = false;
+      setPreviewUrl(null);
+      if (sessionId) ndiPreviewStop(sessionId);
+    };
+  }, [previewName, ndiAvailable, cfg.ndiLowBandwidth, cfg.ndiFps, cfg.ndiQuality]);
+
+  // Poll the latest-frame endpoint on a plain <img> refresh, like the vMix-
+  // thumbnail fallback above. WKWebView (Tauri's engine on macOS) doesn't
+  // reliably render multipart/x-mixed-replace streams, so the backend serves
+  // one JPEG per request and we cache-bust it on an interval instead.
+  useEffect(() => {
+    if (previewTimerRef.current) { clearInterval(previewTimerRef.current); previewTimerRef.current = null; }
+    if (!previewUrl) return;
+    const intervalMs = Math.max(33, Math.round(1000 / (cfg.ndiFps ?? 15)));
+    previewTimerRef.current = setInterval(() => setPreviewTs(Date.now()), intervalMs);
+    return () => { if (previewTimerRef.current) clearInterval(previewTimerRef.current); };
+  }, [previewUrl, cfg.ndiFps]);
 
   const isInVmix = (name: string) =>
     ndiInVmix.some(i => i.title.toLowerCase() === name.toLowerCase());
@@ -107,11 +165,17 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
   const renderNetworkRow = (name: string) => {
     const inVmix = isInVmix(name);
     const isSaved = saved.some(s => s.name === name);
+    const isPreviewing = previewName === name;
     return (
-      <div key={name} className={`wgt-ndi-row${inVmix ? ' wgt-ndi-row--active' : ''}`}>
+      <div
+        key={name}
+        className={`wgt-ndi-row${inVmix ? ' wgt-ndi-row--active' : ''}${isPreviewing ? ' wgt-ndi-row--sel' : ''}`}
+        onClick={() => setPreviewName(isPreviewing ? null : name)}
+        style={{ cursor: ndiAvailable ? 'pointer' : undefined }}
+      >
         <span className={`wgt-ndi-dot${inVmix ? ' wgt-ndi-dot--active' : ''}`} />
         <span className="wgt-ndi-title" title={name}>{name}</span>
-        <div className="wgt-ndi-btns">
+        <div className="wgt-ndi-btns" onClick={e => e.stopPropagation()}>
           {inVmix
             ? <span className="wgt-ndi-in-label">In vMix</span>
             : (
@@ -134,18 +198,35 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
     <div className="wgt-ndi">
 
       {/* ── Live video preview ── */}
-      {selectedNumber !== null && thumbUrl(selectedNumber) && (
+      {previewName !== null && (
         <div className="wgt-ndi-preview">
-          <img
-            className="wgt-ndi-preview-img"
-            src={thumbUrl(selectedNumber)!}
-            alt="NDI preview"
-            onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-            onLoad={e  => { (e.currentTarget as HTMLImageElement).style.display = 'block'; }}
-          />
+          {ndiAvailable && previewUrl ? (
+            <>
+              <img
+                className="wgt-ndi-preview-img"
+                src={`${previewUrl}?t=${previewTs}`}
+                alt="NDI preview"
+                onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                onLoad={e  => { (e.currentTarget as HTMLImageElement).style.display = 'block'; }}
+              />
+              <span className="wgt-ndi-live-badge">● LIVE</span>
+            </>
+          ) : ndiAvailable ? (
+            <div className="wgt-ndi-empty">{previewErr ?? 'Connecting…'}</div>
+          ) : selectedNumber !== null && thumbUrl(selectedNumber) ? (
+            <img
+              className="wgt-ndi-preview-img"
+              src={thumbUrl(selectedNumber)!}
+              alt="NDI preview"
+              onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+              onLoad={e  => { (e.currentTarget as HTMLImageElement).style.display = 'block'; }}
+            />
+          ) : (
+            <div className="wgt-ndi-empty">Install NDI Tools on this Mac for live preview.</div>
+          )}
           <button
             className="wgt-ndi-preview-close"
-            onClick={() => setSelectedNumber(null)}
+            onClick={() => { setPreviewName(null); setSelectedNumber(null); }}
             title="Close preview"
           >×</button>
         </div>
@@ -195,11 +276,17 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
         )}
         {saved.map(src => {
           const inVmix = isInVmix(src.name);
+          const isPreviewing = previewName === src.name;
           return (
-            <div key={src.id} className={`wgt-ndi-row${inVmix ? ' wgt-ndi-row--active' : ''}`}>
+            <div
+              key={src.id}
+              className={`wgt-ndi-row${inVmix ? ' wgt-ndi-row--active' : ''}${isPreviewing ? ' wgt-ndi-row--sel' : ''}`}
+              onClick={() => setPreviewName(isPreviewing ? null : src.name)}
+              style={{ cursor: ndiAvailable ? 'pointer' : undefined }}
+            >
               <span className={`wgt-ndi-dot${inVmix ? ' wgt-ndi-dot--active' : ''}`} />
               <span className="wgt-ndi-title" title={src.name}>{src.name}</span>
-              <div className="wgt-ndi-btns">
+              <div className="wgt-ndi-btns" onClick={e => e.stopPropagation()}>
                 {inVmix
                   ? <span className="wgt-ndi-in-label">In vMix</span>
                   : (
@@ -225,12 +312,15 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
             {ndiInVmix.map(inp => {
               const isActive   = connVmixState!.active  === inp.number;
               const isPreview  = connVmixState!.preview === inp.number;
-              const isSelected = selectedNumber === inp.number;
+              const isSelected = selectedNumber === inp.number || previewName === inp.title;
               return (
                 <div
                   key={inp.key}
                   className={`wgt-ndi-row${isActive ? ' wgt-ndi-row--pgm' : isPreview ? ' wgt-ndi-row--prv' : isSelected ? ' wgt-ndi-row--sel' : ''}`}
-                  onClick={() => setSelectedNumber(isSelected ? null : inp.number)}
+                  onClick={() => {
+                    setSelectedNumber(isSelected ? null : inp.number);
+                    setPreviewName(isSelected ? null : inp.title);
+                  }}
                   style={{ cursor: 'pointer' }}
                 >
                   <span className={`wgt-ndi-dot${isActive ? ' wgt-ndi-dot--pgm' : isPreview ? ' wgt-ndi-dot--prv' : ''}`} />

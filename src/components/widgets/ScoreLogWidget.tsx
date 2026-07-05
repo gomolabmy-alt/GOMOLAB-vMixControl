@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useContext } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
+import { CanvasActionContext } from '../../lib/canvasContext';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import { buildActionSummary } from '../../utils/scoreActions';
@@ -58,8 +59,11 @@ function buildSummaryRows(log: LogEntry[]): SummaryRow[] {
 }
 
 export function ScoreLogWidget({ config }: Props) {
-  const { pages, updateWidgetConfig } = useCanvasStore();
-  const { getClientById } = useVmixStore();
+  const store = useCanvasStore();
+  const ctx = useContext(CanvasActionContext);
+  const { pages } = store;
+  const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
+  const { getClient, vmixSyncVersion } = useVmixStore();
   const { tournaments } = useTournamentStore();
   const [activeHighlightKey, setActiveHighlightKey] = useState('');
 
@@ -85,7 +89,7 @@ export function ScoreLogWidget({ config }: Props) {
   const summaryRows = filteredLog.length > 0 ? buildSummaryRows(filteredLog) : [];
 
   const sendSummary = () => {
-    const c = getClientById(config.vmixClientId);
+    const c = getClient();
     if (!c || !config.vmixSummaryInputKey || !config.vmixSummaryField) return;
     c.setTextField(config.vmixSummaryInputKey, config.vmixSummaryField, summaryRows.map(r => r.line).join(' | '));
   };
@@ -94,11 +98,11 @@ export function ScoreLogWidget({ config }: Props) {
   const logKey = filteredLog.map(e => e.id).join(',');
   useEffect(() => {
     if (!hasSummaryTarget) return;
-    if (logKey === prevLogKeyRef.current) return;
+    if (logKey === prevLogKeyRef.current && vmixSyncVersion === 0) return;
     prevLogKeyRef.current = logKey;
     sendSummary();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [logKey, hasSummaryTarget]);
+  }, [logKey, hasSummaryTarget, vmixSyncVersion]);
 
   // Player highlight
   const highlightTargetId: string = config.linkedPlayerHighlightId ?? '';
@@ -140,7 +144,7 @@ export function ScoreLogWidget({ config }: Props) {
                 className="wgt-score-log-clr"
                 style={{ color: 'var(--accent)' }}
                 onClick={sendSummary}
-                disabled={!getClientById(config.vmixClientId)}
+                disabled={!getClient()}
                 title="Send summary to vMix"
               >↑ Send</button>
             )}

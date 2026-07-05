@@ -74,15 +74,43 @@ function firstInputKey(actions: ActionItem[]): string | undefined {
   return actions.find(a => a.params?.Input)?.params?.Input;
 }
 
+// Derives a toggle button's on/off state from live vMix state rather than
+// local click tracking, so it reflects reality even when the state changed
+// via another control surface, vMix itself, or a command that silently failed.
+function deriveToggleOn(actions: ActionItem[], vmixState: any): boolean {
+  if (!vmixState) return false;
+  for (const a of actions) {
+    const fn = a.fn;
+    if (!fn) continue;
+    const ovlMatch = fn.match(/^OverlayInput(\d)(In|Out|Off|Toggle)?$/);
+    if (ovlMatch) {
+      const ch = parseInt(ovlMatch[1], 10);
+      const overlay = vmixState.overlays?.find((o: any) => o.number === ch);
+      if (overlay) return !!(overlay.key && overlay.key !== '');
+    }
+    switch (fn) {
+      case 'StartRecording': case 'StopRecording': case 'RecordingToggle':
+        return !!vmixState.recording;
+      case 'StartStreaming': case 'StopStreaming': case 'StreamingToggle':
+        return !!vmixState.streaming;
+      case 'StartExternal': case 'StopExternal': case 'ExternalToggle':
+        return !!vmixState.external;
+      case 'StartFullScreen': case 'StopFullScreen': case 'FullScreenToggle':
+        return !!vmixState.fullscreen;
+      case 'FadeToBlack':
+        return !!vmixState.fadeToBlack;
+      case 'StartMultiCorder': case 'StopMultiCorder': case 'MultiCorderToggle':
+        return !!vmixState.multiCorder;
+    }
+  }
+  return false;
+}
+
 export function ButtonWidget({ config }: Props) {
-  const { getClientById, vmixState, connections } = useVmixStore();
-  const connVmixState = config.vmixClientId
-    ? connections.find(c => c.id === config.vmixClientId)?.vmixState ?? vmixState
-    : vmixState;
+  const { getClient, vmixState } = useVmixStore();
+  const connVmixState = vmixState;
   const { executeAppFunction } = useCanvasStore();
-  const [toggled, setToggled] = useState(false);
   const [firing, setFiring] = useState(false);
-  const [sideToggled, setSideToggled] = useState<Record<string, boolean>>({});
   const [sideFiring, setSideFiring] = useState<Record<string, boolean>>({});
 
   const pressActions = getActions(config.actions, config.function, config.params);
@@ -92,7 +120,7 @@ export function ButtonWidget({ config }: Props) {
   const dispatch = async (fn: string, params: Record<string, string>) => {
     if (!fn) return;
     if (isApp(fn)) executeAppFunction(fn, params);
-    else await getClientById(config.vmixClientId)?.sendFunction(fn, params);
+    else await getClient()?.sendFunction(fn, params);
   };
 
   const runActions = async (actions: ActionItem[]) => {
@@ -103,9 +131,8 @@ export function ButtonWidget({ config }: Props) {
 
   const handleDown = async () => {
     if (config.mode === 'toggle') {
-      const next = !toggled;
-      setToggled(next);
-      if (next) await runActions(pressActions);
+      const currentlyOn = deriveToggleOn([...pressActions, ...releaseActions], connVmixState);
+      if (!currentlyOn) await runActions(pressActions);
       else await runActions(releaseActions);
     } else {
       setFiring(true);
@@ -126,9 +153,8 @@ export function ButtonWidget({ config }: Props) {
     const sbPress = sb.actions ?? [];
     const sbRelease = sb.releaseActions ?? [];
     if (sb.mode === 'toggle') {
-      const next = !(sideToggled[sb.id] ?? false);
-      setSideToggled(p => ({ ...p, [sb.id]: next }));
-      if (next) await runActions(sbPress);
+      const currentlyOn = deriveToggleOn([...sbPress, ...sbRelease], connVmixState);
+      if (!currentlyOn) await runActions(sbPress);
       else await runActions(sbRelease);
     } else {
       setSideFiring(p => ({ ...p, [sb.id]: true }));
@@ -148,8 +174,12 @@ export function ButtonWidget({ config }: Props) {
   const mainInputKey = config.tallyInputKey || firstInputKey(pressActions) || firstInputKey(releaseActions);
   const mainTally = tallyClass(mainInputKey, [...pressActions, ...releaseActions], connVmixState);
 
-  // Toggle: on when toggled. Momentary: on when tally is active (overlay/pgm/prv detected from vmix state).
-  const isOn = config.mode === 'toggle' ? toggled : !!mainTally;
+  // Both modes derive "on" from live vMix state — toggle uses deriveToggleOn
+  // (overlay channel / recording / streaming / etc.), momentary uses tally
+  // (PGM/OVL/PRV) — neither depends on local click memory.
+  const isOn = config.mode === 'toggle'
+    ? deriveToggleOn([...pressActions, ...releaseActions], connVmixState)
+    : !!mainTally;
 
   const mainBtn = (
     <button
@@ -180,8 +210,9 @@ export function ButtonWidget({ config }: Props) {
       {sideButtons.map(sb => {
         const sbFire = sideFiring[sb.id] ?? false;
         const sbInputKey = firstInputKey(sb.actions ?? []) || firstInputKey(sb.releaseActions ?? []);
-        const sbTally = tallyClass(sbInputKey, [...(sb.actions ?? []), ...(sb.releaseActions ?? [])], connVmixState);
-        const sbOn = sb.mode === 'toggle' ? (sideToggled[sb.id] ?? false) : !!sbTally;
+        const sbActions = [...(sb.actions ?? []), ...(sb.releaseActions ?? [])];
+        const sbTally = tallyClass(sbInputKey, sbActions, connVmixState);
+        const sbOn = sb.mode === 'toggle' ? deriveToggleOn(sbActions, connVmixState) : !!sbTally;
         return (
           <button
             key={sb.id}

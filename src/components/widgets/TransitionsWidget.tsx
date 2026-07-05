@@ -20,16 +20,14 @@ const TRANS_MAP: Record<string, { label: string; fn: string; color: string }> = 
 };
 
 export function TransitionsWidget({ config }: Props) {
-  const { getClientById, vmixState, connections } = useVmixStore();
-  const connVmixState = config.vmixClientId
-    ? connections.find(c => c.id === config.vmixClientId)?.vmixState ?? vmixState
-    : vmixState;
+  const { getClient, vmixState } = useVmixStore();
+  const connVmixState = vmixState;
   const [firing, setFiring] = useState<string | null>(null);
   const buttons: string[] = config.buttons ?? ['cut', 'fade', 'auto'];
 
   const handle = async (key: string, fn: string) => {
     setFiring(key);
-    await getClientById(config.vmixClientId)?.sendFunction(fn, {});
+    await getClient()?.sendFunction(fn, {});
     setTimeout(() => setFiring(null), 200);
   };
 

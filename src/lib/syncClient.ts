@@ -1,5 +1,6 @@
 const SYNC_PORT = 9877;
 const READONLY_PORT = 9878;
+export const COMMENTATOR_PORT = 9879;
 
 export type SyncAction = {
   type: 'ACTION';
@@ -14,9 +15,54 @@ export type SyncFullState = {
   tournament?: { tournaments: any[]; activeTournamentId: string };
 };
 
+export type SyncCommentatorFullState = {
+  type: 'COMMENTATOR_FULL_STATE';
+  canvas: { pages: any[]; activePageId: string };
+};
+
 export type SyncRequestState = { type: 'REQUEST_STATE' };
 
-export type SyncMessage = SyncAction | SyncFullState | SyncRequestState;
+export interface RemoteVmixConnection {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  status: 'disconnected' | 'connecting' | 'connected' | 'error';
+  error: string | null;
+  edition?: string;
+  version?: string;
+  inputCount?: number;
+}
+
+export type SyncVmixStatus = {
+  type: 'VMIX_STATUS';
+  connections: RemoteVmixConnection[];
+};
+
+export interface BrowserClient {
+  ip: string;
+  kind: 'readonly' | 'commentator';
+}
+
+export type SyncClientList = {
+  type: 'CLIENT_LIST';
+  clients: BrowserClient[];
+};
+
+export type SyncVmixData = {
+  type: 'VMIX_STATE';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  state: any | null;
+};
+
+export type SyncVmixCommand = {
+  type: 'VMIX_COMMAND';
+  cmd: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  args: any[];
+};
+
+export type SyncMessage = SyncAction | SyncFullState | SyncCommentatorFullState | SyncRequestState | SyncVmixStatus | SyncClientList | SyncVmixData | SyncVmixCommand;
 
 type MessageListener = (msg: SyncMessage) => void;
 type StatusListener = (status: 'connecting' | 'connected' | 'disconnected') => void;
@@ -48,11 +94,22 @@ class SyncClient {
     return parseInt(window.location.port || '80', 10) === READONLY_PORT;
   }
 
+  get isCommentator(): boolean {
+    return parseInt(window.location.port || '80', 10) === COMMENTATOR_PORT;
+  }
+
+  /** True when this instance is the sync host (Tauri desktop app) */
+  get isHost(): boolean {
+    return this._getFullState !== null;
+  }
+
   connect(getFullState?: () => SyncFullState) {
     this._getFullState = getFullState ?? null;
     const host = window.location.hostname || 'localhost';
     const pagePort = parseInt(window.location.port || '80', 10);
-    const wsPort = pagePort === READONLY_PORT ? READONLY_PORT : SYNC_PORT;
+    const wsPort = pagePort === READONLY_PORT ? READONLY_PORT
+                 : pagePort === COMMENTATOR_PORT ? COMMENTATOR_PORT
+                 : SYNC_PORT;
     this._url = `ws://${host}:${wsPort}`;
     this._open();
   }

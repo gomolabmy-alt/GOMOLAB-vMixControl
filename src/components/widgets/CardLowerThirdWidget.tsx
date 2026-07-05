@@ -80,7 +80,7 @@ function resolveCardPlayers(allWidgets: any[], tournaments: any[], linkedId: str
 export function CardLowerThirdWidget({ config }: Props) {
   const { pages } = useCanvasStore();
   const { tournaments } = useTournamentStore();
-  const { client, vmixState, overlayIn, overlayOut } = useVmixStore();
+  const { client, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
 
   const allWidgets = pages.flatMap(p => p.widgets);
 
@@ -107,16 +107,27 @@ export function CardLowerThirdWidget({ config }: Props) {
   const ch = config.overlayChannel ?? 1;
   const overlay = vmixState?.overlays?.find((o: any) => o.number === ch);
   const overlayActive = !!(overlay && overlay.key !== '');
-  const hasInput = !!config.vmixInputKey;
+  const hasInput = !!(
+    config.vmixInputKeyYellow || config.vmixInputKeyOrange || config.vmixInputKeyRed || config.vmixInputKey
+  );
+
+  const resolveInputKey = (cardType: RugbyCard): string => {
+    if (cardType === 'yellow') return config.vmixInputKeyYellow ?? config.vmixInputKey ?? '';
+    if (cardType === 'orange') return config.vmixInputKeyOrange ?? config.vmixInputKey ?? '';
+    return config.vmixInputKeyRed ?? config.vmixInputKey ?? '';
+  };
 
   const sendToVmix = (player: CardPlayer | null) => {
-    if (!client || !config.vmixInputKey || !player) return;
-    const key = config.vmixInputKey;
+    if (!client || !player) return;
+    const key = resolveInputKey(player.cardType);
+    if (!key) return;
     if (config.fieldJersey)   client.setTextField(key, config.fieldJersey,   player.jerseyNo);
     if (config.fieldName)     client.setTextField(key, config.fieldName,     player.name);
     if (config.fieldTeam)     client.setTextField(key, config.fieldTeam,     player.teamName);
     if (config.fieldCardType) client.setTextField(key, config.fieldCardType, CARD_LABEL[player.cardType]);
   };
+
+  const selectedInputKey = selected ? resolveInputKey(selected.cardType) : undefined;
 
   const lastSentRef = useRef<string | null>(null);
   useEffect(() => {
@@ -127,6 +138,13 @@ export function CardLowerThirdWidget({ config }: Props) {
     sendToVmix(selected);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.playerId, selected?.cardType, config.autoSend]);
+
+  // Re-push on reconnect regardless of dedup guard
+  useEffect(() => {
+    if (!config.autoSend || !selected) return;
+    sendToVmix(selected);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vmixSyncVersion]);
 
   const configured = config.linkedPlayerListA || config.linkedPlayerListB;
 
@@ -219,7 +237,7 @@ export function CardLowerThirdWidget({ config }: Props) {
         >↑ Send</button>
         <button
           className={`wgt-clt-btn wgt-clt-btn--show${overlayActive ? ' wgt-clt-btn--active' : ''}`}
-          onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); overlayIn(ch, config.vmixInputKey || undefined); }}
+          onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); overlayIn(ch, selectedInputKey); }}
           onClick={(e) => e.stopPropagation()}
           disabled={!vmixState || !hasInput}
           title="Show overlay"

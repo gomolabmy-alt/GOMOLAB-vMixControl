@@ -8,6 +8,7 @@ import type { CanvasWidget } from '../types/canvas';
 import { INPUT_TYPE_LABELS } from '../types/vmix';
 import type { VmixInput } from '../types/vmix';
 import { LogoUrlPicker } from './LogoUrlPicker';
+import { resolveImageUrl } from '../lib/imageUrl';
 
 function msToFormatStr(ms: number, format: string): string {
   const totalSec = Math.floor((ms ?? 0) / 1000);
@@ -437,7 +438,18 @@ function FieldPickerDropdown({ inputKey, value, onChange, placeholder = 'Field.T
   );
 }
 
-interface Props { widget: CanvasWidget; onClose: () => void; }
+interface Props {
+  widget: CanvasWidget;
+  onClose: () => void;
+  pagesOverride?: import('../types/canvas').CanvasPage[];
+  actionsOverride?: {
+    updateWidgetConfig: (id: string, patch: Record<string, any>) => void;
+    updateWidget: (id: string, patch: Partial<CanvasWidget>) => void;
+    deleteWidget: (id: string) => void;
+    duplicateWidget: (id: string) => void;
+    selectWidget: (id: string | null) => void;
+  };
+}
 
 function CollapsibleSection({ label, children, defaultOpen = true }: { label: string; children: React.ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -461,9 +473,17 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-export function WidgetConfigPanel({ widget, onClose }: Props) {
-  const { updateWidgetConfig, updateWidget, duplicateWidget, deleteWidget, selectWidget, pages } = useCanvasStore();
-  const { vmixState, globalVariables, connections } = useVmixStore();
+const _panelPos = { x: -1, y: 56, w: 300, h: 480 };
+
+export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverride }: Props) {
+  const store = useCanvasStore();
+  const updateWidgetConfig = actionsOverride?.updateWidgetConfig ?? store.updateWidgetConfig;
+  const updateWidget = actionsOverride?.updateWidget ?? store.updateWidget;
+  const duplicateWidget = actionsOverride?.duplicateWidget ?? store.duplicateWidget;
+  const deleteWidget = actionsOverride?.deleteWidget ?? store.deleteWidget;
+  const selectWidget = actionsOverride?.selectWidget ?? store.selectWidget;
+  const pages = pagesOverride ? [...store.pages, ...pagesOverride] : store.pages;
+  const { vmixState, globalVariables, getClient } = useVmixStore();
   const { tournaments } = useTournamentStore();
   const cfg = widget.config;
   const up = (patch: Record<string, any>) => updateWidgetConfig(widget.id, patch);
@@ -490,16 +510,59 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
   }, [cfg.finalPlayDurationMs, cfg.format]);
   const allInputs = vmixState?.inputs ?? [];
 
-  // Return inputs from a specific connection (or primary if no id)
-  const inputsForConn = (clientId?: string): typeof allInputs => {
-    if (!clientId || connections.length <= 1) return allInputs;
-    const conn = connections.find(c => c.id === clientId);
-    return conn?.vmixState?.inputs ?? allInputs;
-  };
-
   const [vtCollapsed, setVTCollapsed] = useState<Record<string, boolean>>({});
   const [tfCollapsed, setTFCollapsed] = useState<Record<number, boolean>>({});
   const [panelCollapsed, setPanelCollapsed] = useState(false);
+  const [pos, setPos] = useState<{ x: number; y: number; w: number; h: number }>(() => {
+    if (_panelPos.x < 0) _panelPos.x = Math.max(0, window.innerWidth - _panelPos.w - 16);
+    return { ..._panelPos };
+  });
+  const updatePos = (patch: Partial<typeof pos>) => {
+    const next = { ...pos, ...patch };
+    Object.assign(_panelPos, next);
+    setPos(next);
+  };
+  const panelDragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
+  const panelResizeXRef = useRef<{ sx: number; ow: number } | null>(null);
+  const panelResizeBRRef = useRef<{ sx: number; sy: number; ow: number; oh: number } | null>(null);
+  const onPanelDragDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const tag = (e.target as HTMLElement).tagName;
+    if (tag === 'INPUT' || tag === 'BUTTON' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    panelDragRef.current = { sx: e.clientX, sy: e.clientY, ox: pos.x, oy: pos.y };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    e.preventDefault();
+  };
+  const onPanelDragMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!panelDragRef.current) return;
+    const x = Math.max(0, Math.min(window.innerWidth - 80, panelDragRef.current.ox + e.clientX - panelDragRef.current.sx));
+    const y = Math.max(0, Math.min(window.innerHeight - 40, panelDragRef.current.oy + e.clientY - panelDragRef.current.sy));
+    updatePos({ x, y });
+  };
+  const onPanelDragUp = () => { panelDragRef.current = null; };
+  const onResizeXDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    panelResizeXRef.current = { sx: e.clientX, ow: pos.w };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    e.stopPropagation(); e.preventDefault();
+  };
+  const onResizeXMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!panelResizeXRef.current) return;
+    updatePos({ w: Math.max(240, Math.min(700, panelResizeXRef.current.ow + e.clientX - panelResizeXRef.current.sx)) });
+  };
+  const onResizeXUp = () => { panelResizeXRef.current = null; };
+  const onResizeBRDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    panelResizeBRRef.current = { sx: e.clientX, sy: e.clientY, ow: pos.w, oh: pos.h };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    e.stopPropagation(); e.preventDefault();
+  };
+  const onResizeBRMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!panelResizeBRRef.current) return;
+    const w = Math.max(240, Math.min(700, panelResizeBRRef.current.ow + e.clientX - panelResizeBRRef.current.sx));
+    const h = Math.max(120, Math.min(window.innerHeight - 40, panelResizeBRRef.current.oh + e.clientY - panelResizeBRRef.current.sy));
+    updatePos({ w, h });
+  };
+  const onResizeBRUp = () => { panelResizeBRRef.current = null; };
+  const [adjNewLabel, setAdjNewLabel] = useState('');
+  const [adjNewSeconds, setAdjNewSeconds] = useState('10');
   const [vilCollapsed, setVilCollapsed] = useState<Record<string, boolean>>({});
 
   const renderInputPicker = (
@@ -524,26 +587,6 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
   const renderFieldPicker = (inputKey: string, value: string, onChange: (v: string) => void, placeholder = 'Field.Text', fieldFilter?: (name: string) => boolean, inputs?: typeof allInputs) => (
     <FieldPickerDropdown inputKey={inputKey} value={value} onChange={onChange} placeholder={placeholder} fieldFilter={fieldFilter} allInputs={inputs ?? allInputs} />
   );
-
-  // Connection picker — only renders when multiple connections are active
-  const connPicker = (currentId: string | undefined, onChange: (id: string | undefined) => void) => {
-    if (connections.length <= 1) return null;
-    return (
-      <Field label="vMix Connection">
-        <select
-          className="field-input"
-          value={currentId ?? connections[0]?.id ?? ''}
-          onChange={e => onChange(e.target.value || undefined)}
-        >
-          {connections.map((c, ci) => (
-            <option key={c.id} value={c.id}>
-              {ci === 0 ? `[Primary] ` : ''}{c.name} — {c.host}:{c.port}
-            </option>
-          ))}
-        </select>
-      </Field>
-    );
-  };
 
   const renderConfig = () => {
     switch (widget.type) {
@@ -751,7 +794,6 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
 
         return (
           <>
-            {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
             <Field label="Label">
               <input className="field-input" value={cfg.label ?? ''} onChange={e => up({ label: e.target.value })} />
             </Field>
@@ -870,7 +912,10 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
 
       case 'title-field': {
         // Normalise legacy single-input format
-        type TFGroup = { inputKey: string; inputTitle?: string; name?: string; fields: string[]; clientId?: string };
+        type TFEntry = string | { name: string; type: 'source' };
+        type TFGroup = { inputKey: string; inputTitle?: string; name?: string; fields: TFEntry[] };
+        const tfFName = (f: TFEntry) => typeof f === 'string' ? f : f.name;
+        const tfFType = (f: TFEntry): 'text' | 'source' => typeof f === 'string' ? 'text' : (f.type ?? 'text');
         const groups: TFGroup[] = cfg.inputs ?? (
           cfg.inputKey
             ? [{ inputKey: cfg.inputKey, inputTitle: cfg.inputTitle, fields: cfg.fields ?? [cfg.fieldName ?? 'Title.Text'] }]
@@ -939,13 +984,12 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                   </div>
 
                   {!isCollapsed && (<>
-                    {connPicker(grp.clientId, id => updateGroup(gi, { clientId: id }))}
                     {renderInputPicker(
                       'vMix Input',
                       grp.inputKey,
                       grp.inputTitle,
                       (key, title) => {
-                        const inp = inputsForConn(grp.clientId).find(i => i.key === key);
+                        const inp = allInputs.find(i => i.key === key);
                         updateGroup(gi, {
                           inputKey: key,
                           inputTitle: title,
@@ -953,7 +997,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                         });
                       },
                       undefined,
-                      inputsForConn(grp.clientId),
+                      allInputs,
                     )}
 
                     {/* Field list */}
@@ -962,15 +1006,27 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                         <div key={fi} className="tf-field-row">
                           <FieldPickerDropdown
                             inputKey={grp.inputKey}
-                            value={f}
+                            value={tfFName(f)}
                             onChange={v => {
                               const next = [...grp.fields];
-                              next[fi] = v;
+                              next[fi] = tfFType(f) === 'source' ? { name: v, type: 'source' } : v;
                               updateGroup(gi, { fields: next });
                             }}
                             placeholder="FieldName.Text"
-                            allInputs={inputsForConn(grp.clientId)}
+                            allInputs={allInputs}
                           />
+                          <button
+                            className={`btn btn--small${tfFType(f) === 'source' ? '' : ' btn--ghost'}`}
+                            title={tfFType(f) === 'source' ? 'Source (image) field — click to switch to Text' : 'Text field — click to switch to Source'}
+                            style={{ minWidth: 22, padding: '0 4px', fontSize: 10 }}
+                            onClick={() => {
+                              const next = [...grp.fields];
+                              const name = tfFName(f);
+                              next[fi] = tfFType(f) === 'text' ? { name, type: 'source' } : name;
+                              updateGroup(gi, { fields: next });
+                            }}>
+                            {tfFType(f) === 'source' ? 'S' : 'T'}
+                          </button>
                           <button className="btn btn--ghost btn--small tf-field-del"
                             onClick={() => updateGroup(gi, { fields: grp.fields.filter((_, i) => i !== fi) })}
                             disabled={grp.fields.length === 1}>×</button>
@@ -1079,6 +1135,15 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
           )}
           </CollapsibleSection>
 
+          <CollapsibleSection label="Match Info">
+            <Field label="Competition">
+              <input className="field-input" value={cfg.competition ?? ''} placeholder="e.g. Premier League" onChange={e => up({ competition: e.target.value })} />
+            </Field>
+            <Field label="Round / Week">
+              <input className="field-input" value={cfg.subtitle ?? ''} placeholder="e.g. Round 5" onChange={e => up({ subtitle: e.target.value })} />
+            </Field>
+          </CollapsibleSection>
+
           <CollapsibleSection label="Sport Style">
           <Field label="Style">
             <select className="field-input" value={cfg.style ?? 'basic'} onChange={e => {
@@ -1145,13 +1210,6 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
               <span style={{ minWidth: 32, textAlign: 'right', fontSize: 12, color: 'var(--text-secondary)' }}>{cfg.shortNameFontSize ?? 14}px</span>
             </div>
           </Field>
-          <Field label="Text field size (px)">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <input type="range" min={8} max={36} step={1} className="field-range"
-                value={cfg.textFieldFontSize ?? 11} onChange={e => up({ textFieldFontSize: Number(e.target.value) })} />
-              <span style={{ minWidth: 32, textAlign: 'right', fontSize: 12, color: 'var(--text-secondary)' }}>{cfg.textFieldFontSize ?? 11}px</span>
-            </div>
-          </Field>
           <Field label="Button size">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <input type="range" min={0.5} max={2.5} step={0.05} className="field-range"
@@ -1163,18 +1221,17 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
 
           {/* ── Multiple vMix Title Inputs ── */}
           {(() => {
-            type SbInput = { id: string; inputKey: string; inputTitle?: string; clientId?: string; fieldScoreA: string; fieldScoreB: string; fieldTeamA: string; fieldTeamB: string; fieldShortA: string; fieldShortB: string; fieldTextA: string; fieldTextB: string; fieldLogoA: string; fieldLogoB: string };
+            type SbInput = { id: string; inputKey: string; inputTitle?: string; fieldScoreA: string; fieldScoreB: string; fieldTeamA: string; fieldTeamB: string; fieldShortA: string; fieldShortB: string; fieldTextA: string; fieldTextB: string; fieldLogoA: string; fieldLogoB: string; fieldCompetition: string; fieldRound: string };
             // Migrate legacy single-input config on first open
             const sbInputs: SbInput[] = cfg.vmixInputs?.length
               ? cfg.vmixInputs
               : cfg.vmixInputKey
-                ? [{ id: 'legacy', inputKey: cfg.vmixInputKey, inputTitle: cfg.vmixInputTitle, fieldScoreA: cfg.fieldScoreA ?? 'ScoreA.Text', fieldScoreB: cfg.fieldScoreB ?? 'ScoreB.Text', fieldTeamA: cfg.fieldTeamA ?? 'TeamA.Text', fieldTeamB: cfg.fieldTeamB ?? 'TeamB.Text', fieldShortA: cfg.fieldShortA ?? '', fieldShortB: cfg.fieldShortB ?? '', fieldTextA: cfg.fieldTextA ?? '', fieldTextB: cfg.fieldTextB ?? '', fieldLogoA: cfg.fieldLogoA ?? '', fieldLogoB: cfg.fieldLogoB ?? '' }]
+                ? [{ id: 'legacy', inputKey: cfg.vmixInputKey, inputTitle: cfg.vmixInputTitle, fieldScoreA: cfg.fieldScoreA ?? 'ScoreA.Text', fieldScoreB: cfg.fieldScoreB ?? 'ScoreB.Text', fieldTeamA: cfg.fieldTeamA ?? 'TeamA.Text', fieldTeamB: cfg.fieldTeamB ?? 'TeamB.Text', fieldShortA: cfg.fieldShortA ?? '', fieldShortB: cfg.fieldShortB ?? '', fieldTextA: cfg.fieldTextA ?? '', fieldTextB: cfg.fieldTextB ?? '', fieldLogoA: cfg.fieldLogoA ?? '', fieldLogoB: cfg.fieldLogoB ?? '', fieldCompetition: cfg.fieldCompetition ?? '', fieldRound: cfg.fieldRound ?? '' }]
                 : [];
             const setSbInputs = (next: SbInput[]) => up({ vmixInputs: next });
             const updateSb = (idx: number, patch: Partial<SbInput>) =>
               setSbInputs(sbInputs.map((s, i) => i === idx ? { ...s, ...patch } : s));
-            const addSbInput = () => setSbInputs([...sbInputs, { id: crypto.randomUUID(), inputKey: '', fieldScoreA: 'ScoreA.Text', fieldScoreB: 'ScoreB.Text', fieldTeamA: 'TeamA.Text', fieldTeamB: 'TeamB.Text', fieldShortA: '', fieldShortB: '', fieldTextA: '', fieldTextB: '', fieldLogoA: '', fieldLogoB: '' }]);
-            const multiConn = connections.length > 1;
+            const addSbInput = () => setSbInputs([...sbInputs, { id: crypto.randomUUID(), inputKey: '', fieldScoreA: 'ScoreA.Text', fieldScoreB: 'ScoreB.Text', fieldTeamA: 'TeamA.Text', fieldTeamB: 'TeamB.Text', fieldShortA: '', fieldShortB: '', fieldTextA: '', fieldTextB: '', fieldLogoA: '', fieldLogoB: '', fieldCompetition: '', fieldRound: '' }]);
 
             return (
               <>
@@ -1195,49 +1252,34 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                         )}
                       </div>
                       {!isVilCollapsed && (<>
-                        {multiConn && (
-                          <Field label="vMix Connection">
-                            <select
-                              className="field-input"
-                              value={inp.clientId ?? ''}
-                              onChange={e => updateSb(idx, { clientId: e.target.value || undefined })}
-                            >
-                              {connections.map((c, ci) => (
-                                <option key={c.id} value={c.id}>
-                                  {ci === 0 ? `[Primary] ${c.name}` : c.name} — {c.host}:{c.port}
-                                </option>
-                              ))}
-                            </select>
-                          </Field>
-                        )}
                         {renderInputPicker('vMix Title Input', inp.inputKey, inp.inputTitle,
                           (key, title) => updateSb(idx, { inputKey: key, inputTitle: title }),
-                          undefined, inputsForConn(inp.clientId),
+                          undefined, allInputs,
                         )}
                         {inp.inputKey && (
                           <>
-                            <Field label="Score A Field">{renderFieldPicker(inp.inputKey, inp.fieldScoreA, v => updateSb(idx, { fieldScoreA: v }), 'ScoreA.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                            <Field label="Score B Field">{renderFieldPicker(inp.inputKey, inp.fieldScoreB, v => updateSb(idx, { fieldScoreB: v }), 'ScoreB.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                            <Field label="Team A Field">{renderFieldPicker(inp.inputKey, inp.fieldTeamA, v => updateSb(idx, { fieldTeamA: v }), 'TeamA.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                            <Field label="Team B Field">{renderFieldPicker(inp.inputKey, inp.fieldTeamB, v => updateSb(idx, { fieldTeamB: v }), 'TeamB.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                            <Field label="Short Name A Field">{renderFieldPicker(inp.inputKey, inp.fieldShortA ?? '', v => updateSb(idx, { fieldShortA: v }), 'ShortA.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                            <Field label="Short Name B Field">{renderFieldPicker(inp.inputKey, inp.fieldShortB ?? '', v => updateSb(idx, { fieldShortB: v }), 'ShortB.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                            <Field label="Text Field A">{renderFieldPicker(inp.inputKey, inp.fieldTextA ?? '', v => updateSb(idx, { fieldTextA: v }), 'TextA.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                            <Field label="Text Field B">{renderFieldPicker(inp.inputKey, inp.fieldTextB ?? '', v => updateSb(idx, { fieldTextB: v }), 'TextB.Text', undefined, inputsForConn(inp.clientId))}</Field>
+                            <Field label="Score A Field">{renderFieldPicker(inp.inputKey, inp.fieldScoreA, v => updateSb(idx, { fieldScoreA: v }), 'ScoreA.Text', undefined, allInputs)}</Field>
+                            <Field label="Score B Field">{renderFieldPicker(inp.inputKey, inp.fieldScoreB, v => updateSb(idx, { fieldScoreB: v }), 'ScoreB.Text', undefined, allInputs)}</Field>
+                            <Field label="Team A Field">{renderFieldPicker(inp.inputKey, inp.fieldTeamA, v => updateSb(idx, { fieldTeamA: v }), 'TeamA.Text', undefined, allInputs)}</Field>
+                            <Field label="Team B Field">{renderFieldPicker(inp.inputKey, inp.fieldTeamB, v => updateSb(idx, { fieldTeamB: v }), 'TeamB.Text', undefined, allInputs)}</Field>
+                            <Field label="Short Name A Field">{renderFieldPicker(inp.inputKey, inp.fieldShortA ?? '', v => updateSb(idx, { fieldShortA: v }), 'ShortA.Text', undefined, allInputs)}</Field>
+                            <Field label="Short Name B Field">{renderFieldPicker(inp.inputKey, inp.fieldShortB ?? '', v => updateSb(idx, { fieldShortB: v }), 'ShortB.Text', undefined, allInputs)}</Field>
+                            <Field label="Competition Field">{renderFieldPicker(inp.inputKey, inp.fieldCompetition ?? '', v => updateSb(idx, { fieldCompetition: v }), 'Competition.Text', undefined, allInputs)}</Field>
+                            <Field label="Round/Week Field">{renderFieldPicker(inp.inputKey, inp.fieldRound ?? '', v => updateSb(idx, { fieldRound: v }), 'Round.Text', undefined, allInputs)}</Field>
                             <Field label="Logo A Field">{renderFieldPicker(inp.inputKey, inp.fieldLogoA ?? '', v => {
                               updateSb(idx, { fieldLogoA: v });
                               if (v && cfg.teamALogo) {
-                                const { getClientById } = useVmixStore.getState();
-                                const c = getClientById(inp.clientId);
+                                const { getClient } = useVmixStore.getState();
+                                const c = getClient();
                                 if (c && inp.inputKey) c.setImageField(inp.inputKey, v, cfg.teamALogo);
                               }
-                            }, 'LogoA.Source', n => n.toLowerCase().endsWith('.source'), inputsForConn(inp.clientId))}</Field>
+                            }, 'LogoA.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
                             {inp.fieldLogoA && (
                               <Field label="Logo A (auto)">
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                   {cfg.teamALogo ? (
                                     <>
-                                      <img src={cfg.teamALogo} alt="" style={{ width: 28, height: 21, objectFit: 'contain', border: '1px solid var(--border)', borderRadius: 3, background: '#111', flexShrink: 0 }} />
+                                      <img src={resolveImageUrl(cfg.teamALogo)} alt="" style={{ width: 28, height: 21, objectFit: 'contain', border: '1px solid var(--border)', borderRadius: 3, background: '#111', flexShrink: 0 }} />
                                       <span style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>{cfg.teamALogo}</span>
                                     </>
                                   ) : (
@@ -1249,17 +1291,17 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                             <Field label="Logo B Field">{renderFieldPicker(inp.inputKey, inp.fieldLogoB ?? '', v => {
                               updateSb(idx, { fieldLogoB: v });
                               if (v && cfg.teamBLogo) {
-                                const { getClientById } = useVmixStore.getState();
-                                const c = getClientById(inp.clientId);
+                                const { getClient } = useVmixStore.getState();
+                                const c = getClient();
                                 if (c && inp.inputKey) c.setImageField(inp.inputKey, v, cfg.teamBLogo);
                               }
-                            }, 'LogoB.Source', n => n.toLowerCase().endsWith('.source'), inputsForConn(inp.clientId))}</Field>
+                            }, 'LogoB.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
                             {inp.fieldLogoB && (
                               <Field label="Logo B (auto)">
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                                   {cfg.teamBLogo ? (
                                     <>
-                                      <img src={cfg.teamBLogo} alt="" style={{ width: 28, height: 21, objectFit: 'contain', border: '1px solid var(--border)', borderRadius: 3, background: '#111', flexShrink: 0 }} />
+                                      <img src={resolveImageUrl(cfg.teamBLogo)} alt="" style={{ width: 28, height: 21, objectFit: 'contain', border: '1px solid var(--border)', borderRadius: 3, background: '#111', flexShrink: 0 }} />
                                       <span style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>{cfg.teamBLogo}</span>
                                     </>
                                   ) : (
@@ -1321,7 +1363,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
 
       case 'score-lower-third': {
         const scoreboards = pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard'));
-        type SltInput = { id: string; actionLabel: string; vmixInputKey: string; vmixInputTitle?: string; clientId?: string; fieldTeam: string; fieldScorer: string; fieldJersey: string; fieldAction: string };
+        type SltInput = { id: string; actionLabel: string; vmixInputKey: string; vmixInputTitle?: string; fieldTeam: string; fieldScorer: string; fieldJersey: string; fieldAction: string };
         const sltInputs: SltInput[] = cfg.vmixInputs?.length
           ? cfg.vmixInputs
           : [{ id: 'default', actionLabel: '', vmixInputKey: '', fieldTeam: 'Team.Text', fieldScorer: 'Scorer.Text', fieldJersey: 'Jersey.Text', fieldAction: 'Action.Text' }];
@@ -1386,22 +1428,21 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                         <input className="field-input" value={inp.actionLabel} placeholder="e.g. Try, Goal (blank = default)"
                           onChange={e => updateSlt(idx, { actionLabel: e.target.value })} />
                       </Field>
-                      {connPicker(inp.clientId, id => updateSlt(idx, { clientId: id }))}
                       {renderInputPicker(
                         'vMix Title Input',
                         inp.vmixInputKey,
                         inp.vmixInputTitle,
                         (key, title) => updateSlt(idx, { vmixInputKey: key, vmixInputTitle: title }),
                         (i: any) => i.type === 'GT',
-                        inputsForConn(inp.clientId),
+                        allInputs,
                       )}
                       {inp.vmixInputKey && (
                         <>
-                          <Field label="Team Name Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldTeam, v => updateSlt(idx, { fieldTeam: v }), 'Team.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                          <Field label="Scorer Name Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldScorer, v => updateSlt(idx, { fieldScorer: v }), 'Scorer.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                          <Field label="Jersey No. Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldJersey, v => updateSlt(idx, { fieldJersey: v }), 'Jersey.Text', undefined, inputsForConn(inp.clientId))}</Field>
+                          <Field label="Team Name Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldTeam, v => updateSlt(idx, { fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
+                          <Field label="Scorer Name Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldScorer, v => updateSlt(idx, { fieldScorer: v }), 'Scorer.Text', undefined, allInputs)}</Field>
+                          <Field label="Jersey No. Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldJersey, v => updateSlt(idx, { fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
                           <Field label="Score Action Field">
-                            {renderFieldPicker(inp.vmixInputKey, inp.fieldAction, v => updateSlt(idx, { fieldAction: v }), 'Action.Text', undefined, inputsForConn(inp.clientId))}
+                            {renderFieldPicker(inp.vmixInputKey, inp.fieldAction, v => updateSlt(idx, { fieldAction: v }), 'Action.Text', undefined, allInputs)}
                           </Field>
                         </>
                       )}
@@ -1457,19 +1498,18 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
             </CollapsibleSection>
 
             <CollapsibleSection label="vMix Title Input">
-              {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
               {renderInputPicker('vMix Input', cfg.vmixInputKey ?? '', cfg.vmixInputTitle,
                 (key, title) => up({ vmixInputKey: key, vmixInputTitle: title }),
                 (i: any) => i.type === 'GT',
-                inputsForConn(cfg.vmixClientId),
+                allInputs,
               )}
               {cfg.vmixInputKey && (
                 <>
-                  <Field label="Name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Name.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                  <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                  <Field label="Position field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? 'Position.Text', v => up({ fieldPosition: v }), 'Position.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                  <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Team.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                  <Field label="Score summary field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldScoreSummary ?? '', v => up({ fieldScoreSummary: v }), 'ScoreSummary.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
+                  <Field label="Name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Name.Text', undefined, allInputs)}</Field>
+                  <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
+                  <Field label="Position field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? 'Position.Text', v => up({ fieldPosition: v }), 'Position.Text', undefined, allInputs)}</Field>
+                  <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
+                  <Field label="Score summary field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldScoreSummary ?? '', v => up({ fieldScoreSummary: v }), 'ScoreSummary.Text', undefined, allInputs)}</Field>
                 </>
               )}
             </CollapsibleSection>
@@ -1512,18 +1552,17 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
             </CollapsibleSection>
 
             <CollapsibleSection label="vMix Title Input">
-              {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
               {renderInputPicker('vMix Input', cfg.vmixInputKey ?? '', cfg.vmixInputTitle,
                 (key, title) => up({ vmixInputKey: key, vmixInputTitle: title }),
                 (i: any) => i.type === 'GT',
-                inputsForConn(cfg.vmixClientId),
+                allInputs,
               )}
               {cfg.vmixInputKey && (
                 <>
-                  <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                  <Field label="Name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Name.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                  <Field label="Timer field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTimer ?? 'Timer.Text', v => up({ fieldTimer: v }), 'Timer.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                  <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Team.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
+                  <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
+                  <Field label="Name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Name.Text', undefined, allInputs)}</Field>
+                  <Field label="Timer field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTimer ?? 'Timer.Text', v => up({ fieldTimer: v }), 'Timer.Text', undefined, allInputs)}</Field>
+                  <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
                 </>
               )}
             </CollapsibleSection>
@@ -1691,6 +1730,87 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
               )}
             </>
           )}
+          <Field label="Quick Adjust Buttons">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%' }}>
+              {((cfg.adjustButtons ?? []) as { id: string; label: string; deltaMs: number }[]).map((btn, i) => (
+                <div key={btn.id} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                  <input
+                    className="field-input"
+                    style={{ flex: 1, minWidth: 0 }}
+                    value={btn.label}
+                    placeholder="Label"
+                    onChange={e => {
+                      const buttons = [...(cfg.adjustButtons ?? [])];
+                      buttons[i] = { ...btn, label: e.target.value };
+                      up({ adjustButtons: buttons });
+                    }}
+                  />
+                  <input
+                    type="number"
+                    className="field-input"
+                    style={{ width: 72 }}
+                    value={btn.deltaMs / 1000}
+                    title="Seconds (negative = subtract)"
+                    onChange={e => {
+                      const buttons = [...(cfg.adjustButtons ?? [])];
+                      buttons[i] = { ...btn, deltaMs: (parseFloat(e.target.value) || 0) * 1000 };
+                      up({ adjustButtons: buttons });
+                    }}
+                  />
+                  <span style={{ fontSize: 10, color: 'var(--text-secondary)', minWidth: 16 }}>s</span>
+                  <button
+                    className="wcp-btn-icon"
+                    title="Remove button"
+                    onClick={() => {
+                      const buttons = (cfg.adjustButtons ?? []).filter((_: unknown, j: number) => j !== i);
+                      up({ adjustButtons: buttons });
+                    }}
+                  >✕</button>
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginTop: 2 }}>
+                <input
+                  className="field-input"
+                  style={{ flex: 1, minWidth: 0 }}
+                  value={adjNewLabel}
+                  placeholder="Label (e.g. +30s)"
+                  onChange={e => setAdjNewLabel(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      const secs = parseFloat(adjNewSeconds) || 0;
+                      if (secs === 0) return;
+                      const newBtn = { id: Math.random().toString(36).slice(2), label: adjNewLabel || `${secs > 0 ? '+' : ''}${secs}s`, deltaMs: secs * 1000 };
+                      up({ adjustButtons: [...(cfg.adjustButtons ?? []), newBtn] });
+                      setAdjNewLabel(''); setAdjNewSeconds('10');
+                    }
+                  }}
+                />
+                <input
+                  type="number"
+                  className="field-input"
+                  style={{ width: 72 }}
+                  value={adjNewSeconds}
+                  title="Seconds (negative = subtract)"
+                  onChange={e => setAdjNewSeconds(e.target.value)}
+                />
+                <span style={{ fontSize: 10, color: 'var(--text-secondary)', minWidth: 16 }}>s</span>
+                <button
+                  className="wcp-btn-icon wcp-btn-icon--add"
+                  title="Add button"
+                  onClick={() => {
+                    const secs = parseFloat(adjNewSeconds) || 0;
+                    if (secs === 0) return;
+                    const newBtn = { id: Math.random().toString(36).slice(2), label: adjNewLabel || `${secs > 0 ? '+' : ''}${secs}s`, deltaMs: secs * 1000 };
+                    up({ adjustButtons: [...(cfg.adjustButtons ?? []), newBtn] });
+                    setAdjNewLabel(''); setAdjNewSeconds('10');
+                  }}
+                >+</button>
+              </div>
+              <p style={{ fontSize: 10, color: 'var(--text-secondary)', margin: '2px 0 0' }}>
+                Positive = add time, negative = subtract. Buttons work while timer is running.
+              </p>
+            </div>
+          </Field>
           </CollapsibleSection>
             <CollapsibleSection label="Final Play">
             <Field label="Enable Final Play">
@@ -1995,7 +2115,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
           })()}
           {/* ── Multiple vMix Timer Inputs ── */}
           {(() => {
-            type TiInput = { id: string; inputKey: string; inputTitle?: string; clientId?: string; fieldName: string; fieldTimerName?: string; fieldPeriodLabel?: string; fieldPeriodImage?: string };
+            type TiInput = { id: string; inputKey: string; inputTitle?: string; fieldName: string; fieldTimerName?: string; fieldPeriodLabel?: string; fieldPeriodImage?: string };
             const tiInputs: TiInput[] = cfg.vmixInputs?.length
               ? cfg.vmixInputs
               : cfg.vmixInputKey
@@ -2019,18 +2139,17 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                         {tiInputs.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setTiInputs(tiInputs.filter((_, i) => i !== idx))}>×</button>}
                       </div>
                       {!isVilCollapsed && (<>
-                        {connPicker(inp.clientId, id => updateTi(idx, { clientId: id }))}
                         {renderInputPicker('vMix Title Input', inp.inputKey, inp.inputTitle,
                           (key, title) => updateTi(idx, { inputKey: key, inputTitle: title }),
                           i => i.type === 'GT',
-                          inputsForConn(inp.clientId),
+                          allInputs,
                         )}
                         {inp.inputKey && (
                           <>
-                            <Field label="Timer Value Field">{renderFieldPicker(inp.inputKey, inp.fieldName, v => updateTi(idx, { fieldName: v }), 'Timer.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                            <Field label="Timer Name Field">{renderFieldPicker(inp.inputKey, inp.fieldTimerName ?? '', v => updateTi(idx, { fieldTimerName: v }), 'TimerName.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                            <Field label="Period Label Field">{renderFieldPicker(inp.inputKey, inp.fieldPeriodLabel ?? '', v => updateTi(idx, { fieldPeriodLabel: v }), 'Period.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                            <Field label="Period Image Field">{renderFieldPicker(inp.inputKey, inp.fieldPeriodImage ?? '', v => updateTi(idx, { fieldPeriodImage: v }), 'PeriodImg.Source', undefined, inputsForConn(inp.clientId))}</Field>
+                            <Field label="Timer Value Field">{renderFieldPicker(inp.inputKey, inp.fieldName, v => updateTi(idx, { fieldName: v }), 'Timer.Text', undefined, allInputs)}</Field>
+                            <Field label="Timer Name Field">{renderFieldPicker(inp.inputKey, inp.fieldTimerName ?? '', v => updateTi(idx, { fieldTimerName: v }), 'TimerName.Text', undefined, allInputs)}</Field>
+                            <Field label="Period Label Field">{renderFieldPicker(inp.inputKey, inp.fieldPeriodLabel ?? '', v => updateTi(idx, { fieldPeriodLabel: v }), 'Period.Text', undefined, allInputs)}</Field>
+                            <Field label="Period Image Field">{renderFieldPicker(inp.inputKey, inp.fieldPeriodImage ?? '', v => updateTi(idx, { fieldPeriodImage: v }), 'PeriodImg.Source', undefined, allInputs)}</Field>
                           </>
                         )}
                       </>)}
@@ -2073,7 +2192,6 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
 
       case 'file-path': return (
         <>
-          {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
           <Field label="Label">
             <input className="field-input" value={cfg.label ?? ''} onChange={e => up({ label: e.target.value })} />
           </Field>
@@ -2083,9 +2201,9 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
             cfg.inputTitle,
             (key, title) => up({ inputKey: key, inputTitle: title }),
             i => i.type === 'GT',
-            inputsForConn(cfg.vmixClientId),
+            allInputs,
           )}
-          <Field label="Field Name">{renderFieldPicker(cfg.inputKey ?? '', cfg.fieldName ?? '', v => up({ fieldName: v }), 'Path.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
+          <Field label="Field Name">{renderFieldPicker(cfg.inputKey ?? '', cfg.fieldName ?? '', v => up({ fieldName: v }), 'Path.Text', undefined, allInputs)}</Field>
           <Field label="File Filter">
             <select className="field-input" value={cfg.accept ?? 'image/*'} onChange={e => up({ accept: e.target.value })}>
               <option value="image/*">Images only (jpg, png, gif…)</option>
@@ -2109,13 +2227,11 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
           <Field label="Label">
             <input className="field-input" value={cfg.label ?? 'T-Bar'} onChange={e => up({ label: e.target.value })} />
           </Field>
-          {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
         </>
       );
 
       case 'volume': return (
         <>
-          {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
           <Field label="Target">
             <select className="field-input" value={cfg.target ?? 'master'} onChange={e => up({ target: e.target.value })}>
               <option value="master">Master</option>
@@ -2147,7 +2263,6 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
 
       case 'overlay': return (
         <>
-          {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
           <Field label="Overlay Channel">
             <select className="field-input" value={cfg.channel ?? 1} onChange={e => up({ channel: Number(e.target.value) })}>
               {[1,2,3,4].map(n => <option key={n} value={n}>Overlay {n}</option>)}
@@ -2183,16 +2298,51 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
         </>
       );
 
+      case 'image-display': return (
+        <>
+          <Field label="Image">
+            <LogoUrlPicker
+              value={cfg.imageUrl ?? ''}
+              onChange={url => up({ imageUrl: url })}
+              placeholder="Pick from library…"
+            />
+          </Field>
+          <Field label="Fit">
+            <select className="field-input" value={cfg.objectFit ?? 'contain'} onChange={e => up({ objectFit: e.target.value })}>
+              <option value="contain">Contain</option>
+              <option value="cover">Cover</option>
+              <option value="fill">Stretch</option>
+              <option value="none">Original size</option>
+            </select>
+          </Field>
+          <Field label="Background">
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input type="color" className="color-custom"
+                value={cfg.bgColor && cfg.bgColor !== 'transparent' ? cfg.bgColor : '#000000'}
+                onChange={e => up({ bgColor: e.target.value })} />
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+                <input type="checkbox" checked={!cfg.bgColor || cfg.bgColor === 'transparent'}
+                  onChange={e => up({ bgColor: e.target.checked ? 'transparent' : '#000000' })} />
+                Transparent
+              </label>
+            </div>
+          </Field>
+          <Field label="Caption">
+            <input className="field-input" value={cfg.caption ?? ''} placeholder="Optional label"
+              onChange={e => up({ caption: e.target.value })} />
+          </Field>
+        </>
+      );
+
       case 'input-tally': return (
         <>
-          {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
           {renderInputPicker(
             'Input',
             cfg.inputKey ?? '',
             cfg.inputTitle,
             (key, title) => up({ inputKey: key, inputTitle: title }),
             undefined,
-            inputsForConn(cfg.vmixClientId),
+            allInputs,
           )}
           <Field label="Show Title">
             <input type="checkbox" checked={cfg.showTitle !== false} onChange={e => up({ showTitle: e.target.checked })} />
@@ -2205,7 +2355,6 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
 
       case 'transitions': return (
         <>
-          {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
           <Field label="Buttons">
             <div className="trans-picker">
               {TRANS_KEYS.map(key => (
@@ -2263,16 +2412,15 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
               <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
                 Sends a per-player score summary (jersey · name: count×action pts) to a vMix text field whenever the log changes.
               </p>
-              {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
               <Field label="vMix Input">
                 {renderInputPicker('sl_sum_input', cfg.vmixSummaryInputKey ?? '', cfg.vmixSummaryInputTitle,
                   (key, title) => up({ vmixSummaryInputKey: key, vmixSummaryInputTitle: title }),
                   undefined,
-                  inputsForConn(cfg.vmixClientId))}
+                  allInputs)}
               </Field>
               {cfg.vmixSummaryInputKey && (
                 <Field label="Text Field">
-                  {renderFieldPicker(cfg.vmixSummaryInputKey, cfg.vmixSummaryField ?? '', v => up({ vmixSummaryField: v }), 'Summary.Text', undefined, inputsForConn(cfg.vmixClientId))}
+                  {renderFieldPicker(cfg.vmixSummaryInputKey, cfg.vmixSummaryField ?? '', v => up({ vmixSummaryField: v }), 'Summary.Text', undefined, allInputs)}
                 </Field>
               )}
             </CollapsibleSection>
@@ -2460,7 +2608,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
             </CollapsibleSection>
             <CollapsibleSection label="vMix Name Sync">
             {(() => {
-              type PlInput = { id: string; inputKey: string; inputTitle?: string; clientId?: string; vmixNamePrefix: string; vmixJerseyPrefix: string; vmixAutoSync: boolean };
+              type PlInput = { id: string; inputKey: string; inputTitle?: string; vmixNamePrefix: string; vmixJerseyPrefix: string; vmixAutoSync: boolean };
               const plInputs: PlInput[] = cfg.vmixInputs?.length
                 ? cfg.vmixInputs
                 : cfg.vmixInputKey
@@ -2484,10 +2632,9 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                         {plInputs.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setPlInputs(plInputs.filter((_, i) => i !== idx))}>×</button>}
                       </div>
                       {!isVilCollapsed && (<>
-                        {connPicker(inp.clientId, id => updatePl(idx, { clientId: id }))}
                         {renderInputPicker('vMix Input', inp.inputKey, inp.inputTitle,
                           (key, title) => updatePl(idx, { inputKey: key, inputTitle: title }),
-                          undefined, inputsForConn(inp.clientId),
+                          undefined, allInputs,
                         )}
                       </>)}
                       {inp.inputKey && (
@@ -2498,7 +2645,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                               inp.vmixNamePrefix ? `${inp.vmixNamePrefix}1.Text` : '',
                               (v) => updatePl(idx, { vmixNamePrefix: v.replace(/\.Text$/i, '').replace(/\d+$/, '') }),
                               'Pick Name1.Text → auto-prefix',
-                              undefined, inputsForConn(inp.clientId),
+                              undefined, allInputs,
                             )}
                           </Field>
                           <Field label="Jersey No prefix">
@@ -2507,7 +2654,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                               inp.vmixJerseyPrefix ? `${inp.vmixJerseyPrefix}1.Text` : '',
                               (v) => updatePl(idx, { vmixJerseyPrefix: v.replace(/\.Text$/i, '').replace(/\d+$/, '') }),
                               'Pick Jersey1.Text → auto-prefix',
-                              undefined, inputsForConn(inp.clientId),
+                              undefined, allInputs,
                             )}
                           </Field>
                           <Field label="Auto-sync on edit">
@@ -2631,7 +2778,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
             </Field>
             <CollapsibleSection label="vMix Sub Overlay">
             {(() => {
-              type SubInput = { id: string; inputKey: string; inputTitle?: string; clientId?: string; vmixFieldOut: string; vmixFieldIn: string };
+              type SubInput = { id: string; inputKey: string; inputTitle?: string; vmixFieldOut: string; vmixFieldIn: string };
               const subInputs: SubInput[] = cfg.vmixInputs?.length
                 ? cfg.vmixInputs
                 : cfg.vmixInputKey
@@ -2655,18 +2802,17 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                         {subInputs.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setSubInputs(subInputs.filter((_, i) => i !== idx))}>×</button>}
                       </div>
                       {!isVilCollapsed && (<>
-                      {connPicker(inp.clientId, id => updateSub(idx, { clientId: id }))}
                       {renderInputPicker('vMix Input', inp.inputKey, inp.inputTitle,
                         (key, title) => updateSub(idx, { inputKey: key, inputTitle: title }),
-                        undefined, inputsForConn(inp.clientId),
+                        undefined, allInputs,
                       )}
                       {inp.inputKey && (
                         <>
                           <Field label="Player Off field">
-                            {renderFieldPicker(inp.inputKey, inp.vmixFieldOut, v => updateSub(idx, { vmixFieldOut: v }), 'PlayerOff.Text', undefined, inputsForConn(inp.clientId))}
+                            {renderFieldPicker(inp.inputKey, inp.vmixFieldOut, v => updateSub(idx, { vmixFieldOut: v }), 'PlayerOff.Text', undefined, allInputs)}
                           </Field>
                           <Field label="Player On field">
-                            {renderFieldPicker(inp.inputKey, inp.vmixFieldIn, v => updateSub(idx, { vmixFieldIn: v }), 'PlayerOn.Text', undefined, inputsForConn(inp.clientId))}
+                            {renderFieldPicker(inp.inputKey, inp.vmixFieldIn, v => updateSub(idx, { vmixFieldIn: v }), 'PlayerOn.Text', undefined, allInputs)}
                           </Field>
                         </>
                       )}
@@ -2708,7 +2854,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
             </Field>
             <CollapsibleSection label="vMix Title Sync">
             {(() => {
-              type CdInput = { id: string; inputKey: string; inputTitle?: string; clientId?: string; vmixFieldSinBinA: string; vmixFieldSinBinB: string; vmixFieldRedA: string; vmixFieldRedB: string };
+              type CdInput = { id: string; inputKey: string; inputTitle?: string; vmixFieldSinBinA: string; vmixFieldSinBinB: string; vmixFieldRedA: string; vmixFieldRedB: string };
               const cdInputs: CdInput[] = cfg.vmixInputs?.length
                 ? cfg.vmixInputs
                 : cfg.vmixInputKey
@@ -2735,19 +2881,18 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                         {cdInputs.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setCdInputs(cdInputs.filter((_, i) => i !== idx))}>×</button>}
                       </div>
                       {!isVilCollapsed && (<>
-                      {connPicker(inp.clientId, id => updateCd(idx, { clientId: id }))}
                       {renderInputPicker('vMix Input', inp.inputKey, inp.inputTitle,
                         (key, title) => updateCd(idx, { inputKey: key, inputTitle: title }),
-                        undefined, inputsForConn(inp.clientId),
+                        undefined, allInputs,
                       )}
                       {inp.inputKey && (
                         <>
                           <div className="config-section-label" style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>Sin bin fields</div>
-                          <Field label="Team A sin bin">{renderFieldPicker(inp.inputKey, inp.vmixFieldSinBinA, v => updateCd(idx, { vmixFieldSinBinA: v }), 'SinBinA.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                          <Field label="Team B sin bin">{renderFieldPicker(inp.inputKey, inp.vmixFieldSinBinB, v => updateCd(idx, { vmixFieldSinBinB: v }), 'SinBinB.Text', undefined, inputsForConn(inp.clientId))}</Field>
+                          <Field label="Team A sin bin">{renderFieldPicker(inp.inputKey, inp.vmixFieldSinBinA, v => updateCd(idx, { vmixFieldSinBinA: v }), 'SinBinA.Text', undefined, allInputs)}</Field>
+                          <Field label="Team B sin bin">{renderFieldPicker(inp.inputKey, inp.vmixFieldSinBinB, v => updateCd(idx, { vmixFieldSinBinB: v }), 'SinBinB.Text', undefined, allInputs)}</Field>
                           <div className="config-section-label" style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>Red card fields</div>
-                          <Field label="Team A red card">{renderFieldPicker(inp.inputKey, inp.vmixFieldRedA, v => updateCd(idx, { vmixFieldRedA: v }), 'RedA.Text', undefined, inputsForConn(inp.clientId))}</Field>
-                          <Field label="Team B red card">{renderFieldPicker(inp.inputKey, inp.vmixFieldRedB, v => updateCd(idx, { vmixFieldRedB: v }), 'RedB.Text', undefined, inputsForConn(inp.clientId))}</Field>
+                          <Field label="Team A red card">{renderFieldPicker(inp.inputKey, inp.vmixFieldRedA, v => updateCd(idx, { vmixFieldRedA: v }), 'RedA.Text', undefined, allInputs)}</Field>
+                          <Field label="Team B red card">{renderFieldPicker(inp.inputKey, inp.vmixFieldRedB, v => updateCd(idx, { vmixFieldRedB: v }), 'RedB.Text', undefined, allInputs)}</Field>
                         </>
                       )}
                       </>)}
@@ -2792,22 +2937,35 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
               </Field>
             </CollapsibleSection>
 
-            <CollapsibleSection label="vMix Title Input">
-              {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
-              {renderInputPicker('vMix Input', cfg.vmixInputKey ?? '', cfg.vmixInputTitle,
-                (key, title) => up({ vmixInputKey: key, vmixInputTitle: title }),
+            <CollapsibleSection label="Yellow Card — vMix Input">
+              {renderInputPicker('vMix Input', cfg.vmixInputKeyYellow ?? '', cfg.vmixInputTitleYellow,
+                (key, title) => up({ vmixInputKeyYellow: key, vmixInputTitleYellow: title }),
                 (i: any) => i.type === 'GT',
-                inputsForConn(cfg.vmixClientId),
-              )}
-              {cfg.vmixInputKey && (
-                <>
-                  <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                  <Field label="Name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Name.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                  <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Team.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                  <Field label="Card type field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldCardType ?? 'Card.Text', v => up({ fieldCardType: v }), 'Card.Text', undefined, inputsForConn(cfg.vmixClientId))}</Field>
-                </>
+                allInputs,
               )}
             </CollapsibleSection>
+            <CollapsibleSection label="Orange Card — vMix Input">
+              {renderInputPicker('vMix Input', cfg.vmixInputKeyOrange ?? '', cfg.vmixInputTitleOrange,
+                (key, title) => up({ vmixInputKeyOrange: key, vmixInputTitleOrange: title }),
+                (i: any) => i.type === 'GT',
+                allInputs,
+              )}
+            </CollapsibleSection>
+            <CollapsibleSection label="Red Card — vMix Input">
+              {renderInputPicker('vMix Input', cfg.vmixInputKeyRed ?? '', cfg.vmixInputTitleRed,
+                (key, title) => up({ vmixInputKeyRed: key, vmixInputTitleRed: title }),
+                (i: any) => i.type === 'GT',
+                allInputs,
+              )}
+            </CollapsibleSection>
+            {(cfg.vmixInputKeyYellow || cfg.vmixInputKeyOrange || cfg.vmixInputKeyRed) && (
+              <CollapsibleSection label="Field Mapping">
+                <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
+                <Field label="Name field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Name.Text', undefined, allInputs)}</Field>
+                <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
+                <Field label="Card type field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldCardType ?? 'Card.Text', v => up({ fieldCardType: v }), 'Card.Text', undefined, allInputs)}</Field>
+              </CollapsibleSection>
+            )}
 
             <CollapsibleSection label="Overlay">
               <Field label="Overlay Channel">
@@ -2823,10 +2981,32 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
       case 'ndi-input': return (
         <>
           <CollapsibleSection label="NDI Input">
-            {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
             <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
               Save NDI source names from the widget itself. Use the format your network shows, e.g. <em>LAPTOP (Camera 1)</em>.
             </p>
+          </CollapsibleSection>
+          <CollapsibleSection label="Live Preview">
+            <Field label="Bandwidth">
+              <select className="field-input" value={cfg.ndiLowBandwidth ? 'low' : 'highest'}
+                onChange={e => up({ ndiLowBandwidth: e.target.value === 'low' })}>
+                <option value="highest">Highest quality</option>
+                <option value="low">Low bandwidth</option>
+              </select>
+            </Field>
+            <Field label="Speed (fps)">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="range" min={1} max={30} step={1} className="field-range"
+                  value={cfg.ndiFps ?? 15} onChange={e => up({ ndiFps: Number(e.target.value) })} />
+                <span style={{ minWidth: 32, textAlign: 'right', fontSize: 12, color: 'var(--text-secondary)' }}>{cfg.ndiFps ?? 15}fps</span>
+              </div>
+            </Field>
+            <Field label="Quality">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input type="range" min={10} max={100} step={5} className="field-range"
+                  value={cfg.ndiQuality ?? 75} onChange={e => up({ ndiQuality: Number(e.target.value) })} />
+                <span style={{ minWidth: 32, textAlign: 'right', fontSize: 12, color: 'var(--text-secondary)' }}>{cfg.ndiQuality ?? 75}</span>
+              </div>
+            </Field>
           </CollapsibleSection>
         </>
       );
@@ -2858,7 +3038,6 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
         const TYPE_LABELS: Record<string, string> = { command: 'Command', input: 'Input', text: 'Text Field' };
         return (
           <>
-            {connPicker(cfg.vmixClientId, id => up({ vmixClientId: id }))}
             <CollapsibleSection label="Items">
             {panelItems.length === 0 && (
               <p className="config-no-settings" style={{ marginBottom: 6 }}>No items yet — add below</p>
@@ -2940,7 +3119,10 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
       }
 
       case 'vmix-titles': {
-        type VTInput = { id: string; inputKey: string; label?: string; name?: string; fields: string[]; clientId?: string };
+        type VTEntry = string | { name: string; type: 'source' };
+        type VTInput = { id: string; inputKey: string; label?: string; name?: string; fields: VTEntry[] };
+        const vtFName = (f: VTEntry) => typeof f === 'string' ? f : f.name;
+        const vtFType = (f: VTEntry): 'text' | 'source' => typeof f === 'string' ? 'text' : (f.type ?? 'text');
         const vtInputs: VTInput[] = cfg.inputs ?? [];
         const setVTInputs = (next: VTInput[]) => up({ inputs: next });
         const updateVT = (idx: number, patch: Partial<VTInput>) =>
@@ -2984,10 +3166,9 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                   </div>
 
                   {!isCollapsed && (<>
-                    {connPicker(grp.clientId, id => updateVT(gi, { clientId: id }))}
                     {renderInputPicker('vMix Input', grp.inputKey, grp.label,
                       (key, title) => {
-                        const inp = inputsForConn(grp.clientId).find(i => i.key === key);
+                        const inp = allInputs.find(i => i.key === key);
                         updateVT(gi, {
                           inputKey: key,
                           label: title,
@@ -2997,7 +3178,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                         });
                       },
                       undefined,
-                      inputsForConn(grp.clientId),
+                      allInputs,
                     )}
 
                     <Field label="Display Label (optional)">
@@ -3011,15 +3192,27 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                         <div key={fi} className="tf-field-row">
                           <FieldPickerDropdown
                             inputKey={grp.inputKey}
-                            value={f}
+                            value={vtFName(f)}
                             onChange={v => {
                               const next = [...grp.fields];
-                              next[fi] = v;
+                              next[fi] = vtFType(f) === 'source' ? { name: v, type: 'source' } : v;
                               updateVT(gi, { fields: next });
                             }}
                             placeholder="FieldName.Text"
-                            allInputs={inputsForConn(grp.clientId)}
+                            allInputs={allInputs}
                           />
+                          <button
+                            className={`btn btn--small${vtFType(f) === 'source' ? '' : ' btn--ghost'}`}
+                            title={vtFType(f) === 'source' ? 'Source (image) field — click to switch to Text' : 'Text field — click to switch to Source'}
+                            style={{ minWidth: 22, padding: '0 4px', fontSize: 10 }}
+                            onClick={() => {
+                              const next = [...grp.fields];
+                              const name = vtFName(f);
+                              next[fi] = vtFType(f) === 'text' ? { name, type: 'source' } : name;
+                              updateVT(gi, { fields: next });
+                            }}>
+                            {vtFType(f) === 'source' ? 'S' : 'T'}
+                          </button>
                           <button className="btn btn--ghost btn--small tf-field-del"
                             onClick={() => updateVT(gi, { fields: grp.fields.filter((_, i) => i !== fi) })}
                             disabled={grp.fields.length === 1}>×</button>
@@ -3045,6 +3238,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
       }
 
       case 'rugby-lineup': {
+        const allPlayerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
         const linkedT = tournaments.find(t => t.id === cfg.linkedTournamentId);
         const side: 'A' | 'B' = cfg.teamSide ?? 'A';
         const linkedTeam = side === 'A' ? linkedT?.teamA : linkedT?.teamB;
@@ -3059,6 +3253,28 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
         };
         return (
           <>
+            <Field label="Player List">
+              <select
+                className="field-input"
+                value={cfg.linkedPlayerListId ?? ''}
+                onChange={e => {
+                  const plw = allPlayerListWidgets.find(w => w.id === e.target.value);
+                  up({
+                    linkedPlayerListId: e.target.value || undefined,
+                    linkedTournamentId: plw?.config.linkedTournamentId ?? cfg.linkedTournamentId,
+                    teamSide: plw?.config.teamSide ?? cfg.teamSide,
+                  });
+                }}
+              >
+                <option value="">— none (manual names) —</option>
+                {allPlayerListWidgets.map(w => {
+                  const t = tournaments.find(t => t.id === w.config.linkedTournamentId);
+                  const s: 'A' | 'B' = w.config.teamSide ?? 'A';
+                  const team = s === 'A' ? t?.teamA : t?.teamB;
+                  return <option key={w.id} value={w.id}>{team?.name ?? w.id} ({s})</option>;
+                })}
+              </select>
+            </Field>
             <Field label="Tournament">
               <select className="field-input" value={cfg.linkedTournamentId ?? ''}
                 onChange={e => up({ linkedTournamentId: e.target.value })}>
@@ -3088,7 +3304,7 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
                     </button>
                   </div>
                 </Field>
-                {linkedTeam && (
+                {linkedTeam && !cfg.linkedPlayerListId && (
                   <Field label="Players">
                     <button className="btn btn--secondary btn--small" onClick={loadFromTournament}>
                       Load names from {linkedTeam.name}
@@ -3106,8 +3322,16 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
   };
 
   return (
-    <div className={`config-panel${panelCollapsed ? ' config-panel--collapsed' : ''}`}>
-      <div className="config-panel-header">
+    <div
+      className={`config-panel${panelCollapsed ? ' config-panel--collapsed' : ''}`}
+      style={{ left: pos.x, top: pos.y, width: pos.w, height: panelCollapsed ? undefined : pos.h } as React.CSSProperties}
+    >
+      <div
+        className="config-panel-header"
+        onPointerDown={onPanelDragDown}
+        onPointerMove={onPanelDragMove}
+        onPointerUp={onPanelDragUp}
+      >
         <span className="config-panel-header-icon">{WIDGET_TYPE_ICONS[widget.type]}</span>
         <input
           key={widget.id}
@@ -3132,7 +3356,54 @@ export function WidgetConfigPanel({ widget, onClose }: Props) {
       {!panelCollapsed && (
         <div className="config-panel-body">
           {renderConfig()}
+          <CollapsibleSection label="Widget Appearance" defaultOpen={false}>
+            <Field label="Theme">
+              <select
+                className="field-input"
+                value={cfg.widgetTheme ?? 'inherit'}
+                onChange={e => up({ widgetTheme: e.target.value === 'inherit' ? undefined : e.target.value })}
+              >
+                <option value="inherit">Inherit app theme</option>
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+              </select>
+            </Field>
+            <Field label="Accent Color">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <input
+                  type="color"
+                  value={cfg.widgetAccent ?? '#4a90d9'}
+                  onChange={e => up({ widgetAccent: e.target.value })}
+                  style={{ width: 36, height: 28, padding: 2, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-2)', cursor: 'pointer', flexShrink: 0 }}
+                />
+                <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                  {cfg.widgetAccent ?? 'default'}
+                </span>
+                {cfg.widgetAccent && (
+                  <button
+                    className="btn btn--ghost btn--small"
+                    style={{ marginLeft: 'auto', fontSize: 10 }}
+                    onClick={() => up({ widgetAccent: undefined })}
+                  >Reset</button>
+                )}
+              </div>
+            </Field>
+          </CollapsibleSection>
         </div>
+      )}
+      <div
+        className="config-panel-resize-x"
+        onPointerDown={onResizeXDown}
+        onPointerMove={onResizeXMove}
+        onPointerUp={onResizeXUp}
+      />
+      {!panelCollapsed && (
+        <div
+          className="config-panel-resize-br"
+          onPointerDown={onResizeBRDown}
+          onPointerMove={onResizeBRMove}
+          onPointerUp={onResizeBRUp}
+        />
       )}
     </div>
   );

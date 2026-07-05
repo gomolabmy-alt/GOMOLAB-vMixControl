@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useContext } from 'react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
+import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { SPORT_DEFAULTS } from '../../types/tournament';
@@ -22,8 +23,11 @@ function breakLabel(total: number): string {
   return total === 2 ? 'Half Time' : 'Break';
 }
 
-export function TimerWidget({ widgetId, config }: Props) {
-  const { startWidgetTimer, pauseWidgetTimer, resetWidgetTimer, adjustWidgetTimer, skipWidgetBreak, endWidgetPeriod, startFinalPlay, startExtraTime, startAfterEt, updateWidgetConfig, pages, executeAppFunction } = useCanvasStore();
+export function TimerWidget({ widgetId, config, h }: Props) {
+  const store = useCanvasStore();
+  const ctx = useContext(CanvasActionContext);
+  const { startWidgetTimer, pauseWidgetTimer, resetWidgetTimer, adjustWidgetTimer, skipWidgetBreak, endWidgetPeriod, startFinalPlay, startExtraTime, startAfterEt, pages, executeAppFunction } = store;
+  const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { sendFunction } = useVmixStore();
 
   const { tournaments } = useTournamentStore();
@@ -124,21 +128,31 @@ export function TimerWidget({ widgetId, config }: Props) {
   const afterEtLabel = afterEtMode === 'goldenPoint' ? 'Golden Point' : 'Sudden Death';
   const afterEtDurationMs = dc.afterEtDurationMs ?? 0;
 
-  // Accumulated game time: count-up + reset mode accumulates previous periods
-  // (continue mode already carries currentMs forward; countdown resets to durationMs each period)
+  // Accumulated game time.
+  // During countup overrun, show elapsed-since-overrun-start (i.e. from 00:00),
+  // not the full accumulated period time.
   const accumulatedMs = (() => {
-    if ((dc.mode ?? 'countdown') === 'countdown' || (dc.periodMode ?? 'reset') === 'continue') {
+    const isCountdown = (dc.mode ?? 'countdown') === 'countdown';
+    const isContinue  = (dc.periodMode ?? 'reset') === 'continue';
+
+    if (isCountdown || isContinue) {
+      // Countup+continue overrun: currentMs = periodStart + durationMs + elapsed → strip the offset
+      if (!isCountdown && (dc.overrunning ?? false) && (dc.durationMs ?? 0) > 0) {
+        return Math.max(0, (dc.currentMs ?? 0) - (dc.periodStartMs ?? 0) - dc.durationMs);
+      }
       return dc.currentMs ?? 0;
+    }
+    // Countup+reset overrun: same strip
+    if ((dc.overrunning ?? false) && (dc.durationMs ?? 0) > 0) {
+      return Math.max(0, (dc.currentMs ?? 0) - (dc.periodStartMs ?? 0) - dc.durationMs);
     }
     const period = Math.min(dc.currentPeriod ?? 1, dc.periods ?? 1);
     return (period - 1) * (dc.durationMs ?? 0) + (dc.currentMs ?? 0);
   })();
 
-  // Main display: game time normally; swapped to FP count-up when in Final Play
   const displayMs = accumulatedMs;
-  const mainDisplayMs = inFinalPlay ? (dc.finalPlayMs ?? 0) : displayMs;
+  const mainDisplayMs = displayMs; // FP timer rendered separately; period time shown as shrinking ref
 
-  // Active time used for button labels (reflects current running phase)
   const activeMs = inFinalPlay
     ? (dc.finalPlayMs ?? 0)
     : inAfterEt
@@ -147,7 +161,6 @@ export function TimerWidget({ widgetId, config }: Props) {
         ? (dc.etCurrentMs ?? 0)
         : accumulatedMs;
 
-  // Secondary mini: frozen game time during FP, break/ET/GP time otherwise
   const breakMs = inFinalPlay
     ? displayMs
     : inAfterEt
@@ -164,7 +177,6 @@ export function TimerWidget({ widgetId, config }: Props) {
         ? (etInBreak ? (dc.etBreakDurationMs ?? 0) : etDurationMs)
         : (dc.breakDurationMs ?? 0);
 
-  // Mini label: when in FP, label the frozen game clock shown in mini
   const fpMiniLabel = periods === 2
     ? (Math.min(currentPeriod, periods) === 1 ? '1H' : '2H')
     : periods === 4 ? `Q${Math.min(currentPeriod, periods)}` : `P${Math.min(currentPeriod, periods)}`;
@@ -187,8 +199,7 @@ export function TimerWidget({ widgetId, config }: Props) {
     inFinalPlay;
 
   const activeOverrunning = inAfterEt ? afterEtOverrunning : inExtraTime ? etOverrunning : overrunning;
-  // Main display prefix: only for regular period overrun (not during Final Play)
-  const displayPrefix = !inFinalPlay && overrunning && dc.mode === 'countdown' ? '+' : '';
+  const displayPrefix = !inFinalPlay && !inExtraTime && !inAfterEt && overrunning ? '+' : '';
   const display = displayPrefix + formatTime(mainDisplayMs, config.format ?? dc.format ?? 'mm:ss');
 
   const pct = (() => {
@@ -256,132 +267,258 @@ export function TimerWidget({ widgetId, config }: Props) {
         ? 'Full Time'
         : periodLabel(currentPeriod, periods);
 
+  // ── Responsive sizes from widget height ────────────────────────────────────
+  const timeFontSize  = Math.max(18, Math.min(96, Math.floor(h * 0.27)));
+  const playSize      = Math.max(32, Math.min(66, Math.floor(h * 0.24)));
+  const playFontSize  = Math.max(12, Math.floor(playSize * 0.38));
+  const iconSize      = Math.max(24, Math.min(52, Math.floor(h * 0.2)));
+  const secSize       = Math.max(22, Math.min(44, Math.floor(h * 0.17)));
+  const secFontSize   = Math.max(11, Math.floor(secSize * 0.44));
+
+  // ── UI derived values for new card design ──────────────────────────────────
+
+  // Header icon reflects current phase
+  const headerIcon = allPeriodsComplete ? '✓'
+    : inFinalPlay        ? '⚡'
+    : inAfterEt          ? '⚔'
+    : inExtraTime        ? '➕'
+    : (inBreak || etInBreak) ? '☕'
+    : '⏱';
+
+  // Phase label shown in header
+  const headerPhase = inAfterEt ? afterEtLabel
+    : inExtraTime ? etBadge
+    : autoPeriodLabel;
+
+  // Subtitle: break mini-time when applicable, else duration hint.
+  // During ET period / afterET the elapsed time is shown big (FP-style), so skip it here.
+  const headerSub = showBreakTimer && (inFinalPlay || etInBreak)
+    ? `${miniLabel} · ${miniPrefix}${formatTime(breakMs, config.format ?? dc.format ?? 'mm:ss')}`
+    : !showBreakTimer && dc.durationMs > 0
+      ? `${Math.round(dc.durationMs / 60000)}min${dc.breakDurationMs > 0 ? ` · ☕ ${Math.round(dc.breakDurationMs / 60000)}min` : ''}`
+      : null;
+
+  // Big play button
+  type MainBtn =
+    | { kind: 'done' }
+    | { kind: 'start'; icon: string; lbl: string; color: string; fn: () => void }
+    | { kind: 'play-pause'; color: string };
+
+  const mainBtn: MainBtn = allPeriodsComplete
+    ? { kind: 'done' }
+    : regularComplete && canStartET
+      ? { kind: 'start', icon: '▶', lbl: 'Start ET', color: '#9b59b6', fn: () => startExtraTime(widgetId) }
+      : regularComplete && hasAfterEt
+        ? { kind: 'start', icon: '▶', lbl: afterEtLabel, color: '#e67e22', fn: () => startAfterEt(widgetId) }
+        : etComplete && hasAfterEt
+          ? { kind: 'start', icon: '▶', lbl: afterEtLabel, color: '#e67e22', fn: () => startAfterEt(widgetId) }
+          : {
+              kind: 'play-pause',
+              color: activeOverrunning ? '#e74c3c'
+                : (inBreak || etInBreak) ? '#e67e22'
+                : config.running ? '#2ecc71'
+                : '#3498db',
+            };
+
+  const playLabel = mainBtn.kind === 'done'
+    ? 'Done'
+    : mainBtn.kind === 'start'
+      ? mainBtn.lbl
+      : config.running ? 'Pause' : (
+          inFinalPlay ? 'Final Play' :
+          inAfterEt ? afterEtLabel :
+          inExtraTime ? 'Extra Time' :
+          (inBreak || etInBreak) ? 'Resume' : 'Play'
+        );
+
+  // Secondary button (below big button)
+  const secondaryBtn = (() => {
+    if (mainBtn.kind !== 'play-pause') {
+      if (regularComplete || etComplete || afterEtComplete) {
+        return { icon: '↺', lbl: 'Reset', fn: () => resetWidgetTimer(widgetId) };
+      }
+      return null;
+    }
+    if (inBreak || etInBreak) return { icon: '⏭', lbl: 'Skip', fn: () => skipWidgetBreak(widgetId) };
+    return {
+      icon: '⏹',
+      lbl: (inAfterEt ? `End ${afterEtLabel}` : inExtraTime ? etEndLabel : endLabel).replace('⏹ ', ''),
+      fn: () => {
+        endWidgetPeriod(widgetId);
+        if (inFinalPlay) fireFinalPlayEnd();
+        else if (!inExtraTime && !inAfterEt) firePeriodEnd();
+      },
+    };
+  })();
+
+  // Adjust buttons
+  const customBtns = (config.adjustButtons ?? []) as { id: string; label: string; deltaMs: number }[];
+  const adjustBtns = customBtns.length > 0
+    ? customBtns
+    : [
+        { id: '_m60', label: '−1m', deltaMs: -60000 },
+        { id: '_m10', label: '−10s', deltaMs: -10000 },
+        { id: '_p10', label: '+10s', deltaMs: 10000 },
+        { id: '_p60', label: '+1m', deltaMs: 60000 },
+      ];
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
+  const alertClass = inFinalPlay || (inExtraTime && etOverrunning) || (inAfterEt && afterEtOverrunning)
+    ? ' wgt-tc--final-play'
+    : activeOverrunning
+      ? ' wgt-tc--overrun'
+      : '';
+
   return (
-    <div className="wgt-timer">
-      {!isLinked && (
-        <button className="wgt-timer-reset-top" title="Reset timer" onClick={() => resetWidgetTimer(widgetId)}>↺</button>
-      )}
-      {isLinked && (
-        <div className="wgt-timer-linked-badge" title={`Linked to: ${sourceWidget?.label ?? sourceWidget?.id}`}>↗ {sourceWidget?.label ?? 'Linked'}</div>
-      )}
+    <div className={`wgt-tc${alertClass}`}>
+      {/* ── Body: [label 1/3 + timer 2/3 + full-width bar] [buttons] ── */}
+      <div className="wgt-tc-body">
 
-      {(periods > 1 || inExtraTime || inAfterEt || inFinalPlay) && (
-        <div className={`wgt-timer-period ${(inBreak || etInBreak) ? 'wgt-timer-period--break' : ''} ${activeOverrunning ? 'wgt-timer-period--overrun' : ''}`}>
-          {inAfterEt ? afterEtLabel : inExtraTime ? etBadge : autoPeriodLabel}
-          {activeOverrunning && <span className="wgt-timer-ot"> +OT</span>}
-        </div>
-      )}
+        <div className="wgt-tc-main-area">
+          <div className="wgt-tc-time-row">
+            {/* Period label — 1/3 */}
+            <div className="wgt-tc-label-col">
+              <div className="wgt-tc-icon" style={{ width: iconSize, height: iconSize, fontSize: Math.floor(iconSize * 0.5) }}>{headerIcon}</div>
+              <span className={`wgt-tc-phase${activeOverrunning ? ' wgt-tc-phase--ot' : ''}`}>
+                {headerPhase}
+                {activeOverrunning && !inExtraTime && !inAfterEt && <span className="wgt-tc-ot-tag"> +OT</span>}
+              </span>
+              {headerSub && <span className="wgt-tc-sub">{headerSub}</span>}
+              {isLinked && (
+                <span className="wgt-tc-linked" title={`Linked to: ${sourceWidget?.label ?? sourceWidget?.id}`}>
+                  ↗ {sourceWidget?.label ?? 'Linked'}
+                </span>
+              )}
+            </div>
+            {/* Main time — 2/3 */}
+            {inFinalPlay || inExtraTime || inAfterEt ? (
+              <div className="wgt-tc-time-area wgt-tc-time-area--fp">
+                {/* Period/base time shrinks to reference */}
+                <div className="wgt-tc-fp-period" style={{ fontSize: Math.floor(timeFontSize * 0.36) }}>
+                  {display}
+                </div>
+                {/* ET / afterET / FP counter — counts from 0:00, no prefix */}
+                <div className="wgt-tc-time wgt-tc-time--fp" style={{ fontSize: timeFontSize }}>
+                  {formatTime(activeMs, config.format ?? dc.format ?? 'mm:ss')}
+                </div>
+              </div>
+            ) : (
+              <div className="wgt-tc-time-area">
+                <div className={`wgt-tc-time${overrunning ? ' wgt-tc-time--overrun' : ''}`} style={{ fontSize: timeFontSize }}>
+                  {display}
+                </div>
+              </div>
+            )}
+          </div>
+          {(dc.durationMs > 0 || (inBreak && dc.breakDurationMs > 0) || inExtraTime || inAfterEt || periods > 1) && (() => {
+            const overallFrac = periods > 1
+              ? inBreak
+                ? currentPeriod / periods
+                : (inExtraTime || inAfterEt || allPeriodsComplete)
+                  ? 1
+                  : Math.min(currentPeriod - 1 + pct / 100, periods) / periods
+              : pct / 100;
+            const trackPct = Math.max(0, Math.min(100, overallFrac * 100));
 
-      <div className="wgt-timer-display-row">
-        <div
-          className={`wgt-timer-display ${inBreak ? 'wgt-timer-display--break' : ''} ${overrunning ? 'wgt-timer-display--overrun' : ''}`}
-          style={{ fontSize: config.timerFontSize ?? 28 }}
-        >
-          {display}
+            // Gradient: red bleeds in from right during last 30% of each period
+            const completedFillPct = periods > 1 && trackPct > 0
+              ? Math.min(100, (currentPeriod - 1) / periods * 10000 / trackPct)
+              : 0;
+            const warnContainerPct = ((currentPeriod - 1) + 0.7) / periods * 100;
+            const warnFillPct = trackPct > 0 ? warnContainerPct * 100 / trackPct : 200;
+            const fillBg = (overrunning || inBreak || etInBreak || allPeriodsComplete || warnFillPct >= 100)
+              ? barColor
+              : `linear-gradient(to right, ${barColor} ${completedFillPct.toFixed(1)}%, ${barColor} ${warnFillPct.toFixed(1)}%, #e74c3c 100%)`;
+
+            return (
+              <div className="wgt-tc-route" style={{ ['--rbc' as string]: barColor } as any}>
+                <div className="wgt-tc-route-pill">
+                  <div className="wgt-tc-route-track">
+                    <div className="wgt-tc-route-fill" style={{ width: `${trackPct}%`, background: fillBg }} />
+                    {periods > 1 && Array.from({ length: periods + 1 }, (_, i) => {
+                      const pos = (i / periods) * 100;
+                      return (
+                        <div key={i} className={`wgt-tc-route-stn${pos < trackPct ? ' passed' : ''}`} style={{ left: `${pos}%` }} />
+                      );
+                    })}
+                    <div className="wgt-tc-route-cursor" style={{ left: `${trackPct}%` }} />
+                  </div>
+                </div>
+                {periods > 1 && (
+                  <div className="wgt-tc-route-lbls">
+                    {Array.from({ length: periods + 1 }, (_, i) => (
+                      <span key={i} className="wgt-tc-route-lbl">
+                        {i < periods
+                          ? periods === 2 ? (i === 0 ? '1H' : '2H') : periods === 4 ? `Q${i + 1}` : `P${i + 1}`
+                          : 'FT'}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
-        {showBreakTimer && (
-          <div className="wgt-timer-break-mini">
-            <span className="wgt-timer-break-mini-label">{miniLabel}</span>
-            <span className="wgt-timer-break-mini-time" style={{ fontSize: Math.round((config.timerFontSize ?? 28) * 0.48) }}>
-              {miniPrefix}{formatTime(breakMs, config.format ?? dc.format ?? 'mm:ss')}
-            </span>
+
+        {/* Right: play / secondary / reset buttons */}
+        {!isLinked && (
+          <div className="wgt-tc-btn-col">
+            {/* Play / Pause / Start / Done */}
+            {mainBtn.kind === 'done' ? (
+              <div className="wgt-tc-play wgt-tc-play--done" style={{ fontSize: playFontSize }}>
+                <span className="wgt-tc-play-circle">✓</span>
+                <span className="wgt-tc-play-lbl">Done</span>
+              </div>
+            ) : mainBtn.kind === 'start' ? (
+              <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: mainBtn.color, boxShadow: `0 3px 10px ${mainBtn.color}55` }} onClick={mainBtn.fn}>
+                <span className="wgt-tc-play-circle">{mainBtn.icon}</span>
+                <span className="wgt-tc-play-lbl">{mainBtn.lbl}</span>
+              </button>
+            ) : (
+              <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: mainBtn.color, boxShadow: `0 3px 10px ${mainBtn.color}55` }}
+                onClick={() => config.running ? pauseWidgetTimer(widgetId) : startWidgetTimer(widgetId)}
+              >
+                <span className="wgt-tc-play-circle">{config.running ? '⏸' : '▶'}</span>
+                <span className="wgt-tc-play-lbl">{playLabel}</span>
+              </button>
+            )}
+
+            {/* Secondary (Break / Next Period) */}
+            {secondaryBtn && (
+              <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: '#7b8cde', boxShadow: '0 3px 10px #7b8cde55' }} onClick={secondaryBtn.fn}>
+                <span className="wgt-tc-play-circle">{secondaryBtn.icon}</span>
+                <span className="wgt-tc-play-lbl">{secondaryBtn.lbl}</span>
+              </button>
+            )}
+
+            {/* Reset */}
+            <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: '#8899aa', boxShadow: '0 3px 10px #8899aa44' }}
+              onClick={() => resetWidgetTimer(widgetId)}
+            >
+              <span className="wgt-tc-play-circle">↺</span>
+              <span className="wgt-tc-play-lbl">Reset</span>
+            </button>
           </div>
         )}
       </div>
 
-      {(dc.durationMs > 0 || (inBreak && dc.breakDurationMs > 0) || inExtraTime) && (
-        <div className="wgt-timer-bar">
-          <div className="wgt-timer-bar-fill" style={{ width: `${pct}%`, background: barColor }} />
-        </div>
-      )}
-
-      {!isLinked && !inBreak && !overrunning && !etInBreak && !etOverrunning && (
-        <div className="wgt-timer-adjust">
-          <button className="wgt-timer-adj" onClick={() => adjustWidgetTimer(widgetId, -60000)}>–1m</button>
-          <button className="wgt-timer-adj" onClick={() => adjustWidgetTimer(widgetId, -10000)}>–10s</button>
-          <button className="wgt-timer-adj" onClick={() => adjustWidgetTimer(widgetId, 10000)}>+10s</button>
-          <button className="wgt-timer-adj" onClick={() => adjustWidgetTimer(widgetId, 60000)}>+1m</button>
-        </div>
-      )}
-
+      {/* ── Footer: adjust buttons + stats ── */}
       {!isLinked && (
-        <div className="wgt-timer-controls" style={{ fontSize: config.btnFontSize ?? 13 }}>
-          {/* ── Done states ── */}
-          {regularComplete ? (
-            <>
-              <button className="wgt-timer-btn wgt-timer-btn--end">⏹ Full Time</button>
-              {etPeriods > 0 && (
-                <button className="wgt-timer-btn wgt-timer-btn--et" onClick={() => startExtraTime(widgetId)}>
-                  ▶ Start ET
-                </button>
-              )}
-              {etPeriods === 0 && hasAfterEt && (
-                <button className="wgt-timer-btn wgt-timer-btn--et" onClick={() => startAfterEt(widgetId)}>
-                  ▶ {afterEtLabel}
-                </button>
-              )}
-              <button className="wgt-timer-btn wgt-timer-btn--reset" onClick={() => resetWidgetTimer(widgetId)}>↺ Reset</button>
-            </>
-          ) : etComplete ? (
-            <>
-              <button className="wgt-timer-btn wgt-timer-btn--end">⏹ AET</button>
-              {hasAfterEt && (
-                <button className="wgt-timer-btn wgt-timer-btn--et" onClick={() => startAfterEt(widgetId)}>
-                  ▶ {afterEtLabel}
-                </button>
-              )}
-              <button className="wgt-timer-btn wgt-timer-btn--reset" onClick={() => resetWidgetTimer(widgetId)}>↺ Reset</button>
-            </>
-          ) : afterEtComplete ? (
-            <>
-              <button className="wgt-timer-btn wgt-timer-btn--end">⏹ {afterEtLabel}</button>
-              <button className="wgt-timer-btn wgt-timer-btn--reset" onClick={() => resetWidgetTimer(widgetId)}>↺ Reset</button>
-            </>
-          ) : (inBreak || etInBreak) ? (
-            /* ── Break state ── */
-            <>
-              {config.running ? (
-                <button className="wgt-timer-btn wgt-timer-btn--pause" onClick={() => pauseWidgetTimer(widgetId)}>
-                  ⏸ Pause Break
-                </button>
-              ) : (
-                <button className="wgt-timer-btn wgt-timer-btn--start" onClick={() => startWidgetTimer(widgetId)}>
-                  {etInBreak ? '▶ Resume ET Break' : '▶ Resume Break'}
-                </button>
-              )}
-              <button className="wgt-timer-btn wgt-timer-btn--skip" onClick={() => skipWidgetBreak(widgetId)}>⏭ Skip</button>
-              <button className="wgt-timer-btn wgt-timer-btn--reset" onClick={() => resetWidgetTimer(widgetId)}>↺ Reset</button>
-            </>
-          ) : (
-            /* ── Active play (normal + overrun, regular + ET + afterEt) ── */
-            <>
-              <button className="wgt-timer-btn wgt-timer-btn--end" onClick={() => {
-                endWidgetPeriod(widgetId);
-                if (inFinalPlay) fireFinalPlayEnd();
-                else if (!inExtraTime && !inAfterEt) firePeriodEnd();
-              }}>
-                {inAfterEt ? `⏹ ${afterEtLabel}` : inExtraTime ? etEndLabel : endLabel}
+        <div className="wgt-tc-footer">
+          <div className="wgt-tc-stats">
+            {dc.durationMs > 0 && <span>⏱ {Math.round(dc.durationMs / 60000)}min</span>}
+            {dc.breakDurationMs > 0 && (
+              <><span className="wgt-tc-dot">·</span><span>☕ {Math.round(dc.breakDurationMs / 60000)}min</span></>
+            )}
+          </div>
+          <div className="wgt-tc-btns">
+            {adjustBtns.map((btn) => (
+              <button key={btn.id} className="wgt-tc-adj" onClick={() => adjustWidgetTimer(widgetId, btn.deltaMs)}>
+                {btn.label}
               </button>
-              {config.running ? (
-                <button className="wgt-timer-btn wgt-timer-btn--pause" onClick={() => pauseWidgetTimer(widgetId)}>⏸ Pause</button>
-              ) : (
-                <button className="wgt-timer-btn wgt-timer-btn--start" onClick={() => startWidgetTimer(widgetId)}>
-                  {inFinalPlay
-                    ? '▶ Resume Final Play'
-                    : inAfterEt
-                      ? `▶ ${afterEtLabel}`
-                      : inExtraTime
-                        ? etPeriods === 2
-                          ? `▶ Start ET ${etCurrentPeriod === 1 ? '1st Half' : '2nd Half'}`
-                          : '▶ Start Extra Time'
-                        : periods > 1 && currentPeriod > 1
-                          ? `▶ Start ${periodLabel(currentPeriod, periods)}`
-                          : '▶ Start'}
-                </button>
-              )}
-              <button className="wgt-timer-btn wgt-timer-btn--reset" onClick={() => resetWidgetTimer(widgetId)}>↺ Reset</button>
-            </>
-          )}
+            ))}
+          </div>
         </div>
       )}
     </div>

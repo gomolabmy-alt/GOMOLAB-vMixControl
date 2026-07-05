@@ -1,12 +1,17 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
+export type AppTheme = 'dark' | 'light';
+
 interface AppSettingsState {
   canvasWidth: number;
   canvasHeight: number;
   canvasScale: number;
   setCanvasSize: (w: number, h: number) => void;
   setCanvasScale: (s: number) => void;
+  // Theme
+  theme: AppTheme;
+  setTheme: (t: AppTheme) => void;
   // Read-only notification popups
   notifyGoal: boolean;
   notifyCard: boolean;
@@ -29,6 +34,9 @@ export const useAppSettings = create<AppSettingsState>()(
 
       setCanvasSize: (w, h) => set({ canvasWidth: Math.max(400, w), canvasHeight: Math.max(300, h) }),
       setCanvasScale: (s) => set({ canvasScale: Math.min(3, Math.max(0.1, s)) }),
+
+      theme: 'dark',
+      setTheme: (t) => set({ theme: t }),
 
       notifyGoal: true,
       notifyCard: true,

@@ -8,6 +8,7 @@
   <array>
     <string>_vmix._tcp</string>
     <string>_http._tcp</string>
+    <string>_ndi._tcp</string>
   </array>
   <key>NSAppTransportSecurity</key>
   <dict>
