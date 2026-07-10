@@ -562,6 +562,13 @@ fn spawn_sleep_blocker() -> Option<std::process::Child> {
 
 #[cfg(target_os = "windows")]
 fn spawn_sleep_blocker() -> Option<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW (0x08000000): -WindowStyle Hidden only hides windows
+    // PowerShell itself opens — it doesn't suppress the console host window
+    // Windows briefly flashes for the powershell.exe process itself, which is
+    // what showed up every time a timer started (spawn_sleep_blocker runs
+    // for as long as any timer is running).
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
     // Send a harmless F15 keypress every 30 s via WScript.Shell to keep the
     // system awake without requiring admin rights or changing system settings.
     std::process::Command::new("powershell")
@@ -569,6 +576,7 @@ fn spawn_sleep_blocker() -> Option<std::process::Child> {
             "-NoProfile", "-WindowStyle", "Hidden", "-Command",
             "while($true){(New-Object -ComObject WScript.Shell).SendKeys('{F15}');Start-Sleep 30}",
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .ok()
 }

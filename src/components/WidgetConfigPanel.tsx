@@ -1695,28 +1695,56 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               <Field label="Change title color on overrun">
                 <label className="tf-autosend-label">
                   <input type="checkbox" checked={cfg.overrunColorEnabled ?? false} onChange={e => up({ overrunColorEnabled: e.target.checked })} />
-                  Send SetColor to vMix on overrun
+                  Send a vMix function on overrun
                 </label>
               </Field>
-              {cfg.overrunColorEnabled && (
-                <>
-                  <Field label="Color Field Name">
-                    {renderFieldPicker(cfg.vmixInputs?.[0]?.inputKey ?? cfg.vmixInputKey ?? '', cfg.overrunColorField ?? '', v => up({ overrunColorField: v }), 'Timer.Text')}
-                  </Field>
-                  <Field label="Overrun Color">
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                      <input type="color" className="color-custom" value={cfg.overrunColor ?? '#ff0000'} onChange={e => up({ overrunColor: e.target.value })} />
-                      <span className="field-label" style={{ fontSize: 10 }}>{(cfg.overrunColor ?? '#ff0000').toUpperCase()}</span>
-                    </div>
-                  </Field>
-                  <Field label="Normal Color (restored)">
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                      <input type="color" className="color-custom" value={cfg.normalColor ?? '#ffffff'} onChange={e => up({ normalColor: e.target.value })} />
-                      <span className="field-label" style={{ fontSize: 10 }}>{(cfg.normalColor ?? '#ffffff').toUpperCase()}</span>
-                    </div>
-                  </Field>
-                </>
-              )}
+              {cfg.overrunColorEnabled && (() => {
+                const ocFn = cfg.overrunColorFn ?? 'SetColor';
+                const isCustomOc = ocFn !== '' && !VMIX_ALL_FNS.find(f => f.fn === ocFn);
+                const selectValOc = isCustomOc ? '__custom__' : ocFn;
+                return (
+                  <>
+                    <Field label="Function">
+                      <select className="field-input" value={selectValOc} onChange={e => {
+                        if (e.target.value === '__custom__') up({ overrunColorFn: '' });
+                        else up({ overrunColorFn: e.target.value });
+                      }}>
+                        <option value="">— select function —</option>
+                        {VMIX_FUNCTIONS.map(g => (
+                          <optgroup key={g.group} label={g.group}>
+                            {g.fns.map(f => <option key={f.fn} value={f.fn}>{f.label}</option>)}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </Field>
+                    {isCustomOc && (
+                      <Field label="Custom Function">
+                        <input className="field-input" value={ocFn}
+                          onChange={e => up({ overrunColorFn: e.target.value })}
+                          placeholder="e.g. SetColor" />
+                      </Field>
+                    )}
+                    <Field label="Selected Name">
+                      {renderFieldPicker(cfg.vmixInputs?.[0]?.inputKey ?? cfg.vmixInputKey ?? '', cfg.overrunColorField ?? '', v => up({ overrunColorField: v }), 'e.g. Color1')}
+                    </Field>
+                    <span className="field-hint" style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginTop: -4, marginBottom: 4 }}>
+                      For SetColor, this must match the named Colour property in the vMix title — not a plain text field name.
+                    </span>
+                    <Field label="Overrun Color">
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <input type="color" className="color-custom" value={cfg.overrunColor ?? '#ff0000'} onChange={e => up({ overrunColor: e.target.value })} />
+                        <span className="field-label" style={{ fontSize: 10 }}>{(cfg.overrunColor ?? '#ff0000').toUpperCase()}</span>
+                      </div>
+                    </Field>
+                    <Field label="Normal Color (restored)">
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <input type="color" className="color-custom" value={cfg.normalColor ?? '#ffffff'} onChange={e => up({ normalColor: e.target.value })} />
+                        <span className="field-label" style={{ fontSize: 10 }}>{(cfg.normalColor ?? '#ffffff').toUpperCase()}</span>
+                      </div>
+                    </Field>
+                  </>
+                );
+              })()}
             </>
           )}
           <Field label="Quick Adjust Buttons">
@@ -1990,6 +2018,17 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                 {cfg.autoAdvance
                   ? 'Auto: no manual step needed between periods and breaks.'
                   : 'Manual (default): period end and break end both pause the timer — press Play/Resume to start each next step.'}
+              </p>
+            </Field>
+          )}
+          {(cfg.periods ?? 1) > 1 && !cfg.autoAdvance && (cfg.breakDurationMs ?? 0) > 0 && (
+            <Field label="Auto-start break">
+              <label className="tf-autosend-label">
+                <input type="checkbox" checked={cfg.autoStartBreak ?? false} onChange={e => up({ autoStartBreak: e.target.checked })} />
+                Start the half-time/break timer immediately once "End Period" is confirmed
+              </label>
+              <p className="app-settings-hint" style={{ margin: '4px 0 0' }}>
+                Still asks for confirmation to end the period — just skips the extra Play press to start the break countdown afterward.
               </p>
             </Field>
           )}

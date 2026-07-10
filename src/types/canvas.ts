@@ -187,6 +187,14 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       // wait for a manual Play/Resume press. When true, it flows straight
       // through period → break → next period with no manual step.
       autoAdvance: false,
+      // Set when a period's timer reaches its scheduled end on its own (not
+      // autoAdvance/Final Play) — the operator must confirm before the label
+      // actually advances, same prompt as pressing the manual End button.
+      awaitingEndConfirm: false,
+      // When true (opt-in), confirming "End Period" still requires the
+      // confirm prompt, but the half-time/break countdown starts immediately
+      // afterward instead of waiting for a second Play press.
+      autoStartBreak: false,
       currentPeriod: 1, periodStartMs: 0, overrunning: false, inBreak: false, breakCurrentMs: 0,
       breakVmixInputKey: '', breakFieldName: 'Timer.Text',
       miniVmixInputKey: '', miniFieldName: 'MiniTimer.Text',

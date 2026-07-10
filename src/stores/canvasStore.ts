@@ -188,7 +188,12 @@ function sendOverrunColor(cfg: Record<string, any>, client: any, active: boolean
   const field = cfg.overrunColorField || cfg.fieldName;
   if (!field) return;
   const color = hexToVmixColor(active ? (cfg.overrunColor || '#ff0000') : (cfg.normalColor || '#ffffff'));
-  client.setColor(inputKey, field, color);
+  // Configurable vMix function (defaults to SetColor) — SetColor only takes
+  // effect on a title object that has that exact name assigned to a Colour
+  // property in the GT template; if the template exposes a plain text field
+  // instead, the operator can pick a different function (e.g. SetText) here.
+  const fn = cfg.overrunColorFn || 'SetColor';
+  client.fn(fn, { Input: inputKey, SelectedName: field, Value: color }).catch(() => {});
 }
 
 function formatTime(ms: number, fmt: string): string {
@@ -751,6 +756,11 @@ export const useCanvasStore = create<CanvasStore>()(
           const config = findWidgetConfig(widgetId);
           if (!config) return;
 
+          // Pressing Play directly (bypassing the end-of-period confirm
+          // prompt) means "keep this period going" — clear the pending flag
+          // so it doesn't reappear stale after the interval restarts.
+          if (config.awaitingEndConfirm) updateWidgetConfig(widgetId, { awaitingEndConfirm: false });
+
           // If a previous period ended and froze the display, now advance to the next period
           if (config.resumeMs !== undefined && config.resumeMs !== null && !config.inBreak && !config.inFinalPlay) {
             updateWidgetConfig(widgetId, {
@@ -844,7 +854,11 @@ export const useCanvasStore = create<CanvasStore>()(
             }
 
             const { client: triggerClient } = useVmixStore.getState();
-            firePeriodEndTrigger(cfg, triggerClient);
+            // Manual mode (no auto-advance, no Final Play) defers both the
+            // label/period change AND this trigger until the operator
+            // confirms — endWidgetPeriod (called on confirm) fires it then.
+            const deferToConfirm = !cfg.finalPlayEnabled && !cfg.autoAdvance;
+            if (!deferToConfirm) firePeriodEndTrigger(cfg, triggerClient);
 
             if (currentPeriod < periods) {
               const breakMs = cfg.breakDurationMs ?? 0;
@@ -903,32 +917,17 @@ export const useCanvasStore = create<CanvasStore>()(
                 }
               } else {
                 // Manual mode (default): freeze at the transition point and
-                // stop — the operator presses Play/Resume to start the half-time
-                // countdown, and again to start the next period once it ends.
+                // wait for the operator to confirm before the label/period
+                // actually advances — reaching the end on its own is treated
+                // the same as pressing "End" manually (same confirm dialog).
+                // periodStartMs/durationMs are left untouched so endWidgetPeriod
+                // (called on confirm) recomputes the exact same transition.
                 stopInterval();
-                if (breakMs > 0) {
-                  const breakStartMs = cfg.breakCountMode === 'up' ? 0 : breakMs;
-                  updateWidgetConfig(widgetId, {
-                    currentMs: periodEndMs,
-                    resumeMs: nextCurrentMs,
-                    resumePeriodStartMs: nextPeriodStartMs,
-                    periodStartMs: nextPeriodStartMs,
-                    inBreak: true,
-                    breakCurrentMs: breakStartMs,
-                    running: false,
-                  });
-                  timerSendAll(triggerClient, { ...cfg, inBreak: true }, formatTime(breakStartMs, cfg.format));
-                } else {
-                  updateWidgetConfig(widgetId, {
-                    currentMs: nextCurrentMs,
-                    resumeMs: null,
-                    resumePeriodStartMs: null,
-                    periodStartMs: nextPeriodStartMs,
-                    currentPeriod: currentPeriod + 1,
-                    inBreak: false,
-                    running: false,
-                  });
-                }
+                updateWidgetConfig(widgetId, {
+                  currentMs: periodEndMs,
+                  running: false,
+                  awaitingEndConfirm: true,
+                });
               }
             } else {
               const finalMs = cfg.mode === 'countdown' ? 0 : periods * cfg.durationMs;
@@ -956,10 +955,13 @@ export const useCanvasStore = create<CanvasStore>()(
                   inFinalPlay: true, finalPlayMs: 0,
                 });
               } else {
+                // Same confirm-before-advance treatment as the mid-tournament
+                // branch above — currentPeriod is left at `periods` (not yet
+                // periods+1) so endWidgetPeriod's Full Time branch fires on confirm.
                 stopInterval();
                 updateWidgetConfig(widgetId, {
                   currentMs: currentMsAtFullTime, running: false,
-                  currentPeriod: periods + 1,
+                  awaitingEndConfirm: true,
                 });
               }
             }
@@ -1441,6 +1443,7 @@ export const useCanvasStore = create<CanvasStore>()(
             etPeriodStartMs: 0, etInBreak: false, etBreakCurrentMs: 0, etOverrunning: false,
             inAfterEt: false, afterEtCurrentMs: 0, afterEtOverrunning: false,
             inFinalPlay: false, finalPlayMs: 0, finalPlayPendingNext: false,
+            awaitingEndConfirm: false,
           });
           const { client } = useVmixStore.getState();
           timerSendAll(client, config, formatTime(resetMs, config.format));
@@ -1477,6 +1480,7 @@ export const useCanvasStore = create<CanvasStore>()(
             inExtraTime: false, etCurrentPeriod: 1, etInBreak: false, etBreakCurrentMs: 0, etOverrunning: false,
             inAfterEt: false, afterEtOverrunning: false,
             inFinalPlay: false, finalPlayMs: 0, finalPlayPendingNext: false,
+            awaitingEndConfirm: false,
           });
           const { client } = useVmixStore.getState();
           timerSendAll(client, config, formatTime(startMs, config.format));
@@ -1587,7 +1591,11 @@ export const useCanvasStore = create<CanvasStore>()(
             if (pendingNext) {
               const breakMs = cfg.breakDurationMs ?? 0;
               if (breakMs > 0) {
-                updateWidgetConfig(widgetId, { ...base, inBreak: true, breakCurrentMs: cfg.breakCountMode === 'up' ? 0 : breakMs });
+                updateWidgetConfig(widgetId, {
+                  ...base, inBreak: true, breakCurrentMs: cfg.breakCountMode === 'up' ? 0 : breakMs,
+                  running: !!cfg.autoStartBreak,
+                });
+                if (cfg.autoStartBreak) get().startWidgetTimer(widgetId);
               } else {
                 updateWidgetConfig(widgetId, {
                   ...base,
@@ -1623,10 +1631,11 @@ export const useCanvasStore = create<CanvasStore>()(
               const etBreakMs = cfg.etBreakDurationMs ?? 0;
               if (etBreakMs > 0) {
                 updateWidgetConfig(widgetId, {
-                  etOverrunning: false, running: false,
+                  etOverrunning: false, running: !!cfg.autoStartBreak,
                   etCurrentMs: nextEtMs, etPeriodStartMs: nextEtPeriodStartMs,
                   etInBreak: true, etBreakCurrentMs: cfg.breakCountMode === 'up' ? 0 : etBreakMs,
                 });
+                if (cfg.autoStartBreak) get().startWidgetTimer(widgetId);
               } else {
                 updateWidgetConfig(widgetId, {
                   etOverrunning: false, running: false,
@@ -1658,12 +1667,13 @@ export const useCanvasStore = create<CanvasStore>()(
             const breakMs = cfg.breakDurationMs ?? 0;
             if (breakMs > 0) {
               updateWidgetConfig(widgetId, {
-                overrunning: false, running: false,
+                overrunning: false, running: !!cfg.autoStartBreak,
                 currentMs: periodEndMs, resumeMs: nextCurrentMs,
                 resumePeriodStartMs: nextPeriodStartMs,
                 periodStartMs: nextPeriodStartMs,
                 inBreak: true, breakCurrentMs: cfg.breakCountMode === 'up' ? 0 : breakMs,
               });
+              if (cfg.autoStartBreak) get().startWidgetTimer(widgetId);
             } else {
               // No break — advance straight into the next period's actual
               // starting value, not the previous period's frozen end value

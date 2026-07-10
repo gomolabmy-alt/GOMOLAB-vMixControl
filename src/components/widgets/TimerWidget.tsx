@@ -1,8 +1,7 @@
-import { useEffect, useContext } from 'react';
+import { useEffect, useContext, useState } from 'react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTournamentStore } from '../../stores/tournamentStore';
-import { useVmixStore } from '../../stores/vmixStore';
 import { SPORT_DEFAULTS } from '../../types/tournament';
 
 
@@ -28,38 +27,13 @@ export function TimerWidget({ widgetId, config, h }: Props) {
   const ctx = useContext(CanvasActionContext);
   const { startWidgetTimer, pauseWidgetTimer, resetWidgetTimer, adjustWidgetTimer, skipWidgetBreak, endWidgetPeriod, jumpToPeriod, startFinalPlay, startExtraTime, startAfterEt, pages, executeAppFunction } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
-  const { sendFunction } = useVmixStore();
 
   const { tournaments } = useTournamentStore();
 
-  const fireTrigger = (fnKey: string, inputKey: string, selectedName: string, value: string) => {
-    if (!fnKey) return;
-    const params: Record<string, string> = {};
-    if (inputKey)     params.Input        = inputKey;
-    if (selectedName) params.SelectedName = selectedName;
-    if (value)        params.Value        = value;
-    sendFunction(fnKey, params);
-  };
-
-  const fireFinalPlayEnd = () => {
-    if (!config.finalPlayEndTriggerEnabled) return;
-    fireTrigger(
-      config.finalPlayEndTriggerFn      ?? '',
-      config.finalPlayEndTriggerInput   ?? '',
-      config.finalPlayEndTriggerSelectedName ?? '',
-      config.finalPlayEndTriggerValue   ?? '',
-    );
-  };
-
-  const firePeriodEnd = () => {
-    if (!config.periodEndTriggerEnabled) return;
-    fireTrigger(
-      config.periodEndTriggerFn      ?? '',
-      config.periodEndTriggerInput   ?? '',
-      config.periodEndTriggerSelectedName ?? '',
-      config.periodEndTriggerValue   ?? '',
-    );
-  };
+  // Arms the same confirm prompt as a natural (automatic) period end — both
+  // paths share one UI so "end period" always looks and behaves the same,
+  // whether the operator clicked End or the clock ran out on its own.
+  const [pendingEnd, setPendingEnd] = useState(false);
 
   // When linked, use the source timer's state for display
   const allWidgets = pages.flatMap(p => p.widgets);
@@ -204,27 +178,43 @@ export function TimerWidget({ widgetId, config, h }: Props) {
   const displayPrefix = !inFinalPlay && !inExtraTime && !inAfterEt && overrunning ? '+' : '';
   const display = displayPrefix + formatTime(mainDisplayMs, config.format ?? dc.format ?? 'mm:ss');
 
+  // Progress fraction — always expressed as "how much of this phase has
+  // elapsed", so the bar fills the same way (0% → 100%) whether the clock is
+  // counting up (currentMs already is elapsed) or counting down (currentMs is
+  // remaining, so elapsed = duration − currentMs). Previously this used
+  // currentMs directly everywhere, which only happened to be right for
+  // count-up mode — countdown timers showed the bar running backwards.
+  const isCountdown = dc.mode === 'countdown';
+  const cfgBreakCountUp = dc.breakCountMode === 'up';
   const pct = (() => {
     if (inAfterEt) {
       if (afterEtOverrunning) return 100;
-      return afterEtDurationMs > 0
-        ? Math.min(100, ((dc.afterEtCurrentMs ?? 0) / afterEtDurationMs) * 100)
-        : 0;
+      if (afterEtDurationMs <= 0) return 0;
+      const elapsed = isCountdown ? afterEtDurationMs - (dc.afterEtCurrentMs ?? 0) : (dc.afterEtCurrentMs ?? 0);
+      return Math.min(100, Math.max(0, (elapsed / afterEtDurationMs) * 100));
     }
     if (inExtraTime) {
       if (etInBreak) {
         const bd = dc.etBreakDurationMs ?? 0;
-        return bd > 0 ? Math.min(100, ((dc.etBreakCurrentMs ?? 0) / bd) * 100) : 0;
+        if (bd <= 0) return 0;
+        const elapsed = cfgBreakCountUp ? (dc.etBreakCurrentMs ?? 0) : bd - (dc.etBreakCurrentMs ?? 0);
+        return Math.min(100, Math.max(0, (elapsed / bd) * 100));
       }
       if (etOverrunning) return 100;
-      return etDurationMs > 0
-        ? Math.min(100, (((dc.etCurrentMs ?? 0) - (dc.etPeriodStartMs ?? 0)) / etDurationMs) * 100)
-        : 0;
+      if (etDurationMs <= 0) return 0;
+      const etCurrent = (dc.etCurrentMs ?? 0) - (dc.etPeriodStartMs ?? 0);
+      const elapsed = isCountdown ? etDurationMs - etCurrent : etCurrent;
+      return Math.min(100, Math.max(0, (elapsed / etDurationMs) * 100));
     }
-    if (inBreak && (dc.breakDurationMs ?? 0) > 0)
-      return Math.min(100, ((dc.breakCurrentMs ?? 0) / dc.breakDurationMs) * 100);
-    if (dc.durationMs > 0 && !overrunning)
-      return Math.min(100, (((dc.currentMs ?? 0) - periodStartMs) / dc.durationMs) * 100);
+    if (inBreak && (dc.breakDurationMs ?? 0) > 0) {
+      const elapsed = cfgBreakCountUp ? (dc.breakCurrentMs ?? 0) : dc.breakDurationMs - (dc.breakCurrentMs ?? 0);
+      return Math.min(100, Math.max(0, (elapsed / dc.breakDurationMs) * 100));
+    }
+    if (dc.durationMs > 0 && !overrunning) {
+      const current = (dc.currentMs ?? 0) - periodStartMs;
+      const elapsed = isCountdown ? dc.durationMs - current : current;
+      return Math.min(100, Math.max(0, (elapsed / dc.durationMs) * 100));
+    }
     return overrunning ? 100 : 0;
   })();
 
@@ -345,14 +335,24 @@ export function TimerWidget({ widgetId, config, h }: Props) {
     return {
       icon: '⏹',
       lbl: (inAfterEt ? `End ${afterEtLabel}` : inExtraTime ? etEndLabel : endLabel).replace('⏹ ', ''),
-      fn: () => {
-        endWidgetPeriod(widgetId);
-        if (inFinalPlay) fireFinalPlayEnd();
-        else if (!inExtraTime && !inAfterEt) firePeriodEnd();
-      },
+      // Ending a regular period or an overrun manually cuts the clock short,
+      // so it arms the same confirm prompt shown when the clock reaches the
+      // end on its own (canvasStore.ts sets awaitingEndConfirm the same way)
+      // — Final Play is already the "wrapping up" phase, so it ends immediately.
+      // endWidgetPeriod already fires the period-end/final-play-end vMix
+      // trigger internally — firing it again here sent every trigger twice,
+      // which silently cancels out toggle-style vMix functions.
+      fn: () => { if (inFinalPlay) endWidgetPeriod(widgetId); else setPendingEnd(true); },
       color: '#e74c3c',
     };
   })();
+
+  const showEndConfirm = pendingEnd || !!config.awaitingEndConfirm;
+  const confirmEnd = () => { endWidgetPeriod(widgetId); setPendingEnd(false); };
+  const cancelEnd = () => {
+    if (config.awaitingEndConfirm) updateWidgetConfig(widgetId, { awaitingEndConfirm: false });
+    setPendingEnd(false);
+  };
 
   // Adjust buttons
   const customBtns = (config.adjustButtons ?? []) as { id: string; label: string; deltaMs: number }[];
@@ -481,41 +481,60 @@ export function TimerWidget({ widgetId, config, h }: Props) {
         {/* Right: play / secondary / reset buttons */}
         {!isLinked && (
           <div className="wgt-tc-btn-col">
-            {/* Play / Pause / Start / Done */}
-            {mainBtn.kind === 'done' ? (
-              <div className="wgt-tc-play wgt-tc-play--done" style={{ fontSize: playFontSize }}>
-                <span className="wgt-tc-play-circle">✓</span>
-                <span className="wgt-tc-play-lbl">Done</span>
-              </div>
-            ) : mainBtn.kind === 'start' ? (
-              <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: mainBtn.color, boxShadow: `0 3px 10px ${mainBtn.color}55` }} onClick={mainBtn.fn}>
-                <span className="wgt-tc-play-circle">{mainBtn.icon}</span>
-                <span className="wgt-tc-play-lbl">{mainBtn.lbl}</span>
-              </button>
+            {showEndConfirm ? (
+              // Same prompt whether the operator clicked End or the clock ran
+              // out on its own (canvasStore.ts sets awaitingEndConfirm the
+              // same way) — styled identically to the regular timer buttons
+              // instead of a generic confirm bar, since it's replacing them.
+              <>
+                <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: '#e74c3c', boxShadow: '0 3px 10px #e74c3c55' }} onClick={confirmEnd}>
+                  <span className="wgt-tc-play-circle">✓</span>
+                  <span className="wgt-tc-play-lbl">Confirm {secondaryBtn?.lbl ?? 'End Period'}</span>
+                </button>
+                <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: '#8899aa', boxShadow: '0 3px 10px #8899aa44' }} onClick={cancelEnd}>
+                  <span className="wgt-tc-play-circle">✕</span>
+                  <span className="wgt-tc-play-lbl">Cancel</span>
+                </button>
+              </>
             ) : (
-              <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: mainBtn.color, boxShadow: `0 3px 10px ${mainBtn.color}55` }}
-                onClick={() => config.running ? pauseWidgetTimer(widgetId) : startWidgetTimer(widgetId)}
-              >
-                <span className="wgt-tc-play-circle">{config.running ? '⏸' : '▶'}</span>
-                <span className="wgt-tc-play-lbl">{playLabel}</span>
-              </button>
-            )}
+              <>
+                {/* Play / Pause / Start / Done */}
+                {mainBtn.kind === 'done' ? (
+                  <div className="wgt-tc-play wgt-tc-play--done" style={{ fontSize: playFontSize }}>
+                    <span className="wgt-tc-play-circle">✓</span>
+                    <span className="wgt-tc-play-lbl">Done</span>
+                  </div>
+                ) : mainBtn.kind === 'start' ? (
+                  <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: mainBtn.color, boxShadow: `0 3px 10px ${mainBtn.color}55` }} onClick={mainBtn.fn}>
+                    <span className="wgt-tc-play-circle">{mainBtn.icon}</span>
+                    <span className="wgt-tc-play-lbl">{mainBtn.lbl}</span>
+                  </button>
+                ) : (
+                  <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: mainBtn.color, boxShadow: `0 3px 10px ${mainBtn.color}55` }}
+                    onClick={() => config.running ? pauseWidgetTimer(widgetId) : startWidgetTimer(widgetId)}
+                  >
+                    <span className="wgt-tc-play-circle">{config.running ? '⏸' : '▶'}</span>
+                    <span className="wgt-tc-play-lbl">{playLabel}</span>
+                  </button>
+                )}
 
-            {/* Secondary (Break / Next Period) */}
-            {secondaryBtn && (
-              <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: secondaryBtn.color, boxShadow: `0 3px 10px ${secondaryBtn.color}55` }} onClick={secondaryBtn.fn}>
-                <span className="wgt-tc-play-circle">{secondaryBtn.icon}</span>
-                <span className="wgt-tc-play-lbl">{secondaryBtn.lbl}</span>
-              </button>
-            )}
+                {/* Secondary (Break / Next Period) */}
+                {secondaryBtn && (
+                  <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: secondaryBtn.color, boxShadow: `0 3px 10px ${secondaryBtn.color}55` }} onClick={secondaryBtn.fn}>
+                    <span className="wgt-tc-play-circle">{secondaryBtn.icon}</span>
+                    <span className="wgt-tc-play-lbl">{secondaryBtn.lbl}</span>
+                  </button>
+                )}
 
-            {/* Reset */}
-            <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: '#8899aa', boxShadow: '0 3px 10px #8899aa44' }}
-              onClick={() => resetWidgetTimer(widgetId)}
-            >
-              <span className="wgt-tc-play-circle">↺</span>
-              <span className="wgt-tc-play-lbl">Reset</span>
-            </button>
+                {/* Reset */}
+                <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: '#8899aa', boxShadow: '0 3px 10px #8899aa44' }}
+                  onClick={() => resetWidgetTimer(widgetId)}
+                >
+                  <span className="wgt-tc-play-circle">↺</span>
+                  <span className="wgt-tc-play-lbl">Reset</span>
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>
