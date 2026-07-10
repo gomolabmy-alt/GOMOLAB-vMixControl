@@ -11283,7 +11283,7 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
   flex: 1;
   min-width: 0;
 }
-.wgt-rm-team--b { flex-direction: row-reverse; text-align: right; }
+.wgt-rm-team--b { justify-content: flex-end; }
 .wgt-rm-logo {
   width: 20px;
   height: 20px;
@@ -11462,7 +11462,7 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
   flex: 1;
   min-width: 0;
 }
-.wgt-ms-team--b { flex-direction: row-reverse; text-align: right; }
+.wgt-ms-team--b { justify-content: flex-end; }
 .wgt-ms-logo {
   width: 26px;
   height: 26px;

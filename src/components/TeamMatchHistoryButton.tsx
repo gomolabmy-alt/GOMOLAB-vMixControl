@@ -117,10 +117,10 @@ export function TeamMatchHistoryButton({ teamName, teamShortName, logo, color }:
                     <div className="team-hist-row">
                       <span className="team-hist-date">{m.time || '—'}</span>
                       <span className="team-hist-vs">v</span>
-                      <span className="team-hist-opp">{oppName}</span>
                       {oppLogo
                         ? <img className="team-hist-opp-logo" src={resolveImageUrl(oppLogo)} alt="" />
                         : <div className="team-hist-opp-logo team-hist-opp-logo--ph" style={{ background: oppColor }} />}
+                      <span className="team-hist-opp">{oppName}</span>
                       {m.competition && <span className="team-hist-comp">{m.competition}</span>}
                     </div>
                     {m.round && <div className="team-hist-round">{m.round}</div>}
@@ -147,10 +147,10 @@ export function TeamMatchHistoryButton({ teamName, teamShortName, logo, color }:
                     <span className={`team-hist-outcome team-hist-outcome--${outcome}`}>{outcome}</span>
                     <span className="team-hist-date">{r.time || '—'}</span>
                     <span className="team-hist-vs">v</span>
-                    <span className="team-hist-opp">{oppName}</span>
                     {oppLogo
                       ? <img className="team-hist-opp-logo" src={resolveImageUrl(oppLogo)} alt="" />
                       : <div className="team-hist-opp-logo team-hist-opp-logo--ph" style={{ background: oppColor }} />}
+                    <span className="team-hist-opp">{oppName}</span>
                     <span className="team-hist-score">{own} - {opp}</span>
                   </div>
                   {r.round && <div className="team-hist-round">{r.round}</div>}
