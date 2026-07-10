@@ -24,7 +24,9 @@ export type WidgetType =
   | 'rugby-lineup'
   | 'card-lower-third'
   | 'pomodoro'
-  | 'image-display';
+  | 'image-display'
+  | 'recent-matches'
+  | 'match-schedule';
 
 export type TimelineEventType = 'score' | 'yellow-card' | 'orange-card' | 'red-card' | 'substitution' | 'period' | 'custom';
 
@@ -101,6 +103,7 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       linkedTimerWidgetId: '', linkedScoreLogWidgetId: '',
       linkedPlayerListA: '', linkedPlayerListB: '',
       linkedScoreboardSourceId: '',
+      lastSavedSignature: '',
     },
   },
   'score-log': {
@@ -219,6 +222,7 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
     w: 300, h: 520,
     config: {
       linkedTournamentId: '',
+      linkedTeamId: '',
       teamSide: 'A',
       linkedTimerWidgetId: '',
       linkedTimelineId: '',
@@ -241,6 +245,7 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
     w: 300, h: 360,
     config: {
       linkedTournamentId: '',
+      linkedTeamId: '',
       teamSide: 'A',
       linkedPlayerListId: '',
       linkedTimerWidgetId: '',
@@ -299,6 +304,8 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
   'rugby-lineup': {
     w: 420, h: 560,
     config: {
+      linkedTournamentId: '',
+      linkedTeamId: '',
       teamName: 'Team Name',
       teamColor: '#3498db',
       fieldColor: '#2d7a3a',
@@ -329,6 +336,22 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
     w: 240, h: 160,
     config: { imageUrl: '', objectFit: 'contain', bgColor: 'transparent' },
   },
+  'recent-matches': {
+    w: 320, h: 360,
+    config: {
+      title: 'Latest Results',
+      maxResults: 8,
+      groupByCompetition: true,
+      showDate: true,
+    },
+  },
+  'match-schedule': {
+    w: 340, h: 320,
+    config: {
+      title: 'Upcoming Matches',
+      linkedScoreboardId: '',
+    },
+  },
 };
 
 export const WIDGET_TYPE_LABELS: Record<WidgetType, string> = {
@@ -347,6 +370,8 @@ export const WIDGET_TYPE_LABELS: Record<WidgetType, string> = {
   'card-lower-third': 'Card LT',
   pomodoro: 'Pomodoro',
   'image-display': 'Image',
+  'recent-matches': 'Latest Results',
+  'match-schedule': 'Match Schedule',
 };
 
 export const WIDGET_TYPE_ICONS: Record<WidgetType, string> = {
@@ -365,4 +390,6 @@ export const WIDGET_TYPE_ICONS: Record<WidgetType, string> = {
   'card-lower-third': '🟨',
   pomodoro: '🍅',
   'image-display': '🖼',
+  'recent-matches': '🏆',
+  'match-schedule': '📅',
 };

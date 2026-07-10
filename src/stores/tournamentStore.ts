@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type { Tournament, Team, Player, StaffMember, SportType, TournamentSettings } from '../types/tournament';
+import type { Tournament, SportType, TournamentSettings } from '../types/tournament';
 import { SPORT_DEFAULTS } from '../types/tournament';
 import { syncClient } from '../lib/syncClient';
 
@@ -8,31 +8,14 @@ interface TournamentStore {
   tournaments: Tournament[];
   activeTournamentId: string;
 
-  addTournament: (data: {
-    name: string;
-    sport: SportType;
-    teamAName?: string;
-    teamBName?: string;
-    teamAColor?: string;
-    teamBColor?: string;
-  }) => string;
+  addTournament: (data: { name: string; sport: SportType }) => string;
   updateTournament: (id: string, patch: Partial<Pick<Tournament, 'name' | 'sport'>>) => void;
   deleteTournament: (id: string) => void;
-
-  updateTeam: (tournamentId: string, side: 'A' | 'B', patch: Partial<Omit<Team, 'players'>>) => void;
-  updateStaffMember: (tournamentId: string, side: 'A' | 'B', staffId: string, name: string) => void;
-
-  addPlayer: (tournamentId: string, side: 'A' | 'B', player: Omit<Player, 'id'>) => string;
-  updatePlayer: (tournamentId: string, side: 'A' | 'B', playerId: string, patch: Partial<Omit<Player, 'id'>>) => void;
-  deletePlayer: (tournamentId: string, side: 'A' | 'B', playerId: string) => void;
-  replaceTeamPlayers: (tournamentId: string, side: 'A' | 'B', players: Omit<Player, 'id'>[]) => void;
 
   updateTournamentSettings: (id: string, patch: Partial<TournamentSettings>) => void;
   setActiveTournament: (id: string) => void;
   restoreTournaments: (tournaments: unknown[], activeTournamentId: string) => void;
 }
-
-const blankTeam = (name: string, color: string): Team => ({ name, color, players: [] });
 
 export const useTournamentStore = create<TournamentStore>()(
   persist(
@@ -40,15 +23,13 @@ export const useTournamentStore = create<TournamentStore>()(
       tournaments: [],
       activeTournamentId: '',
 
-      addTournament: ({ name, sport, teamAName = 'Team A', teamBName = 'Team B', teamAColor = '#e74c3c', teamBColor = '#3498db' }) => {
+      addTournament: ({ name, sport }) => {
         const id = crypto.randomUUID();
         set(s => ({
           tournaments: [...s.tournaments, {
             id,
             name,
             sport,
-            teamA: blankTeam(teamAName, teamAColor),
-            teamB: blankTeam(teamBName, teamBColor),
             settings: { ...SPORT_DEFAULTS[sport] },
             createdAt: Date.now(),
           }],
@@ -87,76 +68,6 @@ export const useTournamentStore = create<TournamentStore>()(
         };
       }),
 
-      updateTeam: (tournamentId, side, patch) => {
-        set(s => ({
-          tournaments: s.tournaments.map(t => {
-            if (t.id !== tournamentId) return t;
-            return side === 'A'
-              ? { ...t, teamA: { ...t.teamA, ...patch } }
-              : { ...t, teamB: { ...t.teamB, ...patch } };
-          }),
-        }));
-        syncClient.send({ type: 'ACTION', store: 'tournament', fn: 'updateTeam', args: [tournamentId, side, patch] });
-      },
-
-      updateStaffMember: (tournamentId, side, staffId, name) => {
-        set(s => ({
-          tournaments: s.tournaments.map(t => {
-            if (t.id !== tournamentId) return t;
-            const team = side === 'A' ? t.teamA : t.teamB;
-            const next: StaffMember[] = (team.staff ?? []).map(s => s.id === staffId ? { ...s, name } : s);
-            return side === 'A'
-              ? { ...t, teamA: { ...t.teamA, staff: next } }
-              : { ...t, teamB: { ...t.teamB, staff: next } };
-          }),
-        }));
-        syncClient.send({ type: 'ACTION', store: 'tournament', fn: 'updateStaffMember', args: [tournamentId, side, staffId, name] });
-      },
-
-      addPlayer: (tournamentId, side, player) => {
-        const playerId = crypto.randomUUID();
-        set(s => ({
-          tournaments: s.tournaments.map(t => {
-            if (t.id !== tournamentId) return t;
-            const newPlayer = { ...player, id: playerId };
-            return side === 'A'
-              ? { ...t, teamA: { ...t.teamA, players: [...t.teamA.players, newPlayer] } }
-              : { ...t, teamB: { ...t.teamB, players: [...t.teamB.players, newPlayer] } };
-          }),
-        }));
-        return playerId;
-      },
-
-      updatePlayer: (tournamentId, side, playerId, patch) => set(s => ({
-        tournaments: s.tournaments.map(t => {
-          if (t.id !== tournamentId) return t;
-          const upd = (ps: Player[]) => ps.map(p => p.id === playerId ? { ...p, ...patch } : p);
-          return side === 'A'
-            ? { ...t, teamA: { ...t.teamA, players: upd(t.teamA.players) } }
-            : { ...t, teamB: { ...t.teamB, players: upd(t.teamB.players) } };
-        }),
-      })),
-
-      deletePlayer: (tournamentId, side, playerId) => set(s => ({
-        tournaments: s.tournaments.map(t => {
-          if (t.id !== tournamentId) return t;
-          const del = (ps: Player[]) => ps.filter(p => p.id !== playerId);
-          return side === 'A'
-            ? { ...t, teamA: { ...t.teamA, players: del(t.teamA.players) } }
-            : { ...t, teamB: { ...t.teamB, players: del(t.teamB.players) } };
-        }),
-      })),
-
-      replaceTeamPlayers: (tournamentId, side, players) => set(s => ({
-        tournaments: s.tournaments.map(t => {
-          if (t.id !== tournamentId) return t;
-          const withIds: Player[] = players.map(p => ({ ...p, id: crypto.randomUUID() }));
-          return side === 'A'
-            ? { ...t, teamA: { ...t.teamA, players: withIds } }
-            : { ...t, teamB: { ...t.teamB, players: withIds } };
-        }),
-      })),
-
       setActiveTournament: (id) => set({ activeTournamentId: id }),
 
       restoreTournaments: (tournaments, activeTournamentId) =>
@@ -188,12 +99,6 @@ export function initTournamentSync() {
     if (msg.type !== 'ACTION' || msg.store !== 'tournament') return;
     const store = useTournamentStore.getState();
     switch (msg.fn) {
-      case 'updateTeam':
-        store.updateTeam(msg.args[0], msg.args[1], msg.args[2]);
-        break;
-      case 'updateStaffMember':
-        store.updateStaffMember(msg.args[0], msg.args[1], msg.args[2], msg.args[3]);
-        break;
       case 'updateTournamentSettings':
         store.updateTournamentSettings(msg.args[0], msg.args[1]);
         break;

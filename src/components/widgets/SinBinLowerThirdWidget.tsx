@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
-import { useTournamentStore } from '../../stores/tournamentStore';
+import { useTeamDbStore } from '../../stores/teamDbStore';
 
 interface Props {
   widgetId: string;
@@ -22,7 +22,7 @@ interface SinBinPlayer {
 
 export function SinBinLowerThirdWidget({ config }: Props) {
   const { pages, returnPlayerFromSinBin } = useCanvasStore();
-  const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
   const { client, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
 
   const allWidgets = pages.flatMap(p => p.widgets);
@@ -44,9 +44,8 @@ export function SinBinLowerThirdWidget({ config }: Props) {
     const currentMs: number = timerCfg?.currentMs ?? 0;
     const timerMode: string = timerCfg?.mode ?? 'countup';
 
-    const tournament = tournaments.find(t => t.id === plCfg.linkedTournamentId);
     const side: 'A' | 'B' = plCfg.teamSide ?? 'A';
-    const teamData = side === 'A' ? tournament?.teamA : tournament?.teamB;
+    const teamData = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
     const players: any[] = teamData?.players ?? [];
 
     return Object.entries(sinBinEntries).flatMap(([playerId, startMs]) => {

@@ -1,9 +1,15 @@
 import { useState, useMemo, useEffect, useContext } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
-import { useTournamentStore } from '../../stores/tournamentStore';
+import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
+import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
+import { LogoUrlPicker } from '../LogoUrlPicker';
+import { TeamPicker } from '../TeamPicker';
+import { MatchSchedulePicker } from '../MatchSchedulePicker';
+import { useMatchScheduleStore, type ScheduledMatch } from '../../stores/matchScheduleStore';
+import { computeMatchSignature, buildResultFromConfig, guardScoreboardOverwrite } from '../../utils/scoreboardSnapshot';
 
 interface Props {
   widgetId: string;
@@ -97,8 +103,10 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const ctx = useContext(CanvasActionContext);
   const { pages, scoreWidgetAction, resetWidgetScore } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
-  const { tournaments, updateTeam } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
   const { client, vmixSyncVersion } = useVmixStore();
+  const { addResult } = useMatchResultsStore();
+  const { markSent } = useMatchScheduleStore();
 
   // When linked, mirror the source scoreboard's display state
   const allWidgets = useMemo(() => pages.flatMap(p => p.widgets), [pages]);
@@ -108,54 +116,26 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const isLinked = !!sourceWidget;
   const dc: Record<string, any> = sourceWidget?.config ?? config;
 
+  // Live status pill reflects the linked timer's actual state (reusing the
+  // same linkedTimerWidgetId already used for score-log timestamps) instead
+  // of always showing a static "LIVE".
+  const linkedTimer = dc.linkedTimerWidgetId
+    ? allWidgets.find(w => w.id === dc.linkedTimerWidgetId && w.type === 'timer')
+    : null;
+  const tCfg = linkedTimer?.config;
+  const liveStatus = !tCfg
+    ? { label: 'LIVE', color: '#e74c3c', pulse: true }
+    : tCfg.inFinalPlay
+      ? { label: 'FINAL PLAY', color: '#e74c3c', pulse: true }
+      : (tCfg.inBreak || tCfg.etInBreak)
+        ? { label: 'HALF TIME', color: '#e67e22', pulse: false }
+        : tCfg.running
+          ? { label: 'LIVE', color: '#e74c3c', pulse: true }
+          : { label: 'NOT LIVE', color: '#7f8c9a', pulse: false };
+
   const increments: Increment[] = config.increments ?? [1, 2, 5, 10];
   const [pending, setPending] = useState<Pending | null>(null);
   const [pendingDec, setPendingDec] = useState<{ team: 'A' | 'B'; value: number } | null>(null);
-
-  const tournament = config.linkedTournamentId
-    ? tournaments.find(t => t.id === config.linkedTournamentId)
-    : null;
-
-  useEffect(() => {
-    if (!tournament) return;
-    const { teamA, teamB } = tournament;
-    if (
-      config.teamAName      !== teamA.name  ||
-      config.teamBName      !== teamB.name  ||
-      config.teamAShortName !== (teamA.shortName ?? config.teamAShortName) ||
-      config.teamBShortName !== (teamB.shortName ?? config.teamBShortName) ||
-      config.teamAColor     !== teamA.color ||
-      config.teamBColor     !== teamB.color ||
-      config.teamALogo      !== (teamA.logo ?? null) ||
-      config.teamBLogo      !== (teamB.logo ?? null)
-    ) {
-      updateWidgetConfig(widgetId, {
-        teamAName: teamA.name, teamBName: teamB.name,
-        ...(teamA.shortName != null && { teamAShortName: teamA.shortName }),
-        ...(teamB.shortName != null && { teamBShortName: teamB.shortName }),
-        teamAColor: teamA.color, teamBColor: teamB.color,
-        teamALogo: teamA.logo ?? null, teamBLogo: teamB.logo ?? null,
-      });
-      {
-        const targets = config.vmixInputs?.length
-          ? config.vmixInputs
-          : config.vmixInputKey
-            ? [{ inputKey: config.vmixInputKey, fieldTeamA: config.fieldTeamA, fieldTeamB: config.fieldTeamB, fieldLogoA: config.fieldLogoA, fieldLogoB: config.fieldLogoB }]
-            : [];
-        for (const t of targets) {
-          if (!t.inputKey) continue;
-          const c = client;
-          if (!c) continue;
-          if (t.fieldTeamA) c.setTextField(t.inputKey, t.fieldTeamA, teamA.name);
-          if (t.fieldTeamB) c.setTextField(t.inputKey, t.fieldTeamB, teamB.name);
-          if (t.fieldLogoA && teamA.logo) c.setImageField(t.inputKey, t.fieldLogoA, teamA.logo);
-          if (t.fieldLogoB && teamB.logo) c.setImageField(t.inputKey, t.fieldLogoB, teamB.logo);
-        }
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tournament?.teamA.name, tournament?.teamA.shortName, tournament?.teamA.color, tournament?.teamA.logo,
-      tournament?.teamB.name, tournament?.teamB.shortName, tournament?.teamB.color, tournament?.teamB.logo]);
 
   // Send short name + text field to vMix when values change
   useEffect(() => {
@@ -257,9 +237,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
     const plw = allWidgets.find(w => w.id === linkedId);
     if (!plw) return [];
     const plCfg = plw.config;
-    const t = tournaments.find(t2 => t2.id === plCfg.linkedTournamentId);
-    const side: 'A' | 'B' = plCfg.teamSide ?? 'A';
-    const team = side === 'A' ? t?.teamA : t?.teamB;
+    const team = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
     const players = team?.players ?? [];
     const assigned = new Set(
       [...(plCfg.starters ?? []), ...(plCfg.subs ?? [])].filter(Boolean) as string[]
@@ -272,12 +250,12 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const squadA = useMemo(
     () => resolveSquad(config.linkedPlayerListA ?? ''),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [config.linkedPlayerListA, allWidgets, tournaments]
+    [config.linkedPlayerListA, allWidgets, teamDbTeams]
   );
   const squadB = useMemo(
     () => resolveSquad(config.linkedPlayerListB ?? ''),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [config.linkedPlayerListB, allWidgets, tournaments]
+    [config.linkedPlayerListB, allWidgets, teamDbTeams]
   );
 
   const teamAColor = dc.teamAColor ?? '#e74c3c';
@@ -286,7 +264,47 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const handleColorChange = (team: 'A' | 'B', color: string) => {
     const field = team === 'A' ? 'teamAColor' : 'teamBColor';
     updateWidgetConfig(widgetId, { [field]: color });
-    if (tournament) updateTeam(tournament.id, team, { color });
+  };
+
+  // Fills name + short name + color + logo together from a saved team pick.
+  const handleTeamPick = (team: 'A' | 'B', picked: { name: string; shortName?: string; color: string; logo?: string }) => {
+    const patch = team === 'A'
+      ? { teamAName: picked.name, teamAShortName: picked.shortName ?? '', teamAColor: picked.color, teamALogo: picked.logo ?? '' }
+      : { teamBName: picked.name, teamBShortName: picked.shortName ?? '', teamBColor: picked.color, teamBLogo: picked.logo ?? '' };
+    updateWidgetConfig(widgetId, patch);
+  };
+
+  const handleLogoPick = (team: 'A' | 'B', logo: string) => {
+    const field = team === 'A' ? 'teamALogo' : 'teamBLogo';
+    updateWidgetConfig(widgetId, { [field]: logo });
+  };
+
+  // Snapshots the current matchup into the saved results list (powers the
+  // "recent-matches" widget) — doesn't touch the live score/log, just records it.
+  const [savedFlash, setSavedFlash] = useState(false);
+  const saveResult = () => {
+    addResult(buildResultFromConfig(dc));
+    updateWidgetConfig(widgetId, { lastSavedSignature: computeMatchSignature(dc) });
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1200);
+  };
+
+  // Applies a scheduled fixture's team details + competition/round to this
+  // scoreboard in one click — the reverse of saveResult (schedule → board,
+  // rather than board → results). Score is left untouched (starts fresh).
+  // Guards against silently losing the outgoing match: auto-saves it if it
+  // was never saved, or confirms before overwriting if it already was.
+  const loadScheduledMatch = (m: ScheduledMatch) => {
+    if (!guardScoreboardOverwrite(dc, addResult)) return;
+    updateWidgetConfig(widgetId, {
+      competition: m.competition ?? '',
+      subtitle: m.round ?? '',
+      teamAName: m.teamAName, teamAShortName: m.teamAShortName ?? '', teamAColor: m.teamAColor, teamALogo: m.teamALogo ?? '',
+      teamBName: m.teamBName, teamBShortName: m.teamBShortName ?? '', teamBColor: m.teamBColor, teamBLogo: m.teamBLogo ?? '',
+      scoreA: 0, scoreB: 0,
+      lastSavedSignature: '',
+    });
+    markSent(m.id);
   };
 
   const handleScore = (team: 'A' | 'B', value: number, label: string) => {
@@ -355,8 +373,8 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
       {/* ── Header: LIVE pill + competition ──────────────────────── */}
       <div className="wgt-score-top">
         <div className="wgt-score-live-pill">
-          <span className="wgt-score-live-dot" />
-          LIVE
+          <span className="wgt-score-live-dot" style={{ background: liveStatus.color, animation: liveStatus.pulse ? undefined : 'none' }} />
+          {liveStatus.label}
         </div>
         {isLinked ? (
           <>
@@ -381,17 +399,41 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
             />
           </>
         )}
+        {!isLinked && (
+          <div style={{ display: 'flex', gap: 4, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
+            <MatchSchedulePicker onPick={loadScheduledMatch} />
+            <button
+              className={`wgt-score-save-btn${savedFlash ? ' wgt-score-save-btn--flash' : ''}`}
+              title="Save this result to Latest Results"
+              onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); saveResult(); }}
+              onClick={e => e.stopPropagation()}
+            >{savedFlash ? '✓ Saved' : '💾 Save Result'}</button>
+          </div>
+        )}
       </div>
 
       {/* ── Matchup: Team A | Score | Team B ─────────────────────── */}
       <div className="wgt-score-matchup">
         {/* Team A */}
         <div className="wgt-score-mteam">
-          <div className="wgt-score-mlogo-wrap">
-            {dc.teamALogo
-              ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamALogo)} alt="" />
-              : <div className="wgt-score-mlogo-ph" style={{ background: teamAColor }} />
-            }
+          <div className="wgt-score-mlogo-wrap" onClick={e => e.stopPropagation()}>
+            {isLinked ? (
+              dc.teamALogo
+                ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamALogo)} alt="" />
+                : <div className="wgt-score-mlogo-ph" style={{ background: teamAColor }} />
+            ) : (
+              <LogoUrlPicker
+                compact
+                value={dc.teamALogo ?? ''}
+                onChange={logo => handleLogoPick('A', logo)}
+                thumbSize={{ w: 54, h: 54 }}
+                thumbContent={
+                  dc.teamALogo
+                    ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamALogo)} alt="" />
+                    : <div className="wgt-score-mlogo-ph" style={{ background: teamAColor }} />
+                }
+              />
+            )}
             {!isLinked && (
               <input
                 type="color"
@@ -408,14 +450,21 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
               {dc.teamAName ?? 'Team A'}
             </span>
           ) : (
-            <input
-              className="wgt-score-mname"
-              value={config.teamAName ?? ''}
-              placeholder="Team A"
-              style={{ color: teamAColor, fontSize: config.nameFontSize ?? 14 }}
-              onChange={e => updateWidgetConfig(widgetId, { teamAName: e.target.value })}
-              onClick={e => e.stopPropagation()}
-            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: '100%', minWidth: 0 }} onClick={e => e.stopPropagation()}>
+              <input
+                className="wgt-score-mname"
+                value={config.teamAName ?? ''}
+                placeholder="Team A"
+                style={{ color: teamAColor, fontSize: config.nameFontSize ?? 14, width: 'auto', flex: '1 1 auto', minWidth: 0 }}
+                onChange={e => updateWidgetConfig(widgetId, { teamAName: e.target.value })}
+              />
+              <div style={{ flexShrink: 0 }}>
+                <TeamPicker
+                  onPick={picked => handleTeamPick('A', picked)}
+                  current={{ name: config.teamAName, shortName: config.teamAShortName, color: teamAColor, logo: dc.teamALogo }}
+                />
+              </div>
+            </div>
           )}
           {isLinked
             ? (dc.teamAShortName ? <span className="wgt-score-mshort" style={{ color: teamAColor }}>{dc.teamAShortName}</span> : null)
@@ -437,11 +486,24 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
 
         {/* Team B */}
         <div className="wgt-score-mteam wgt-score-mteam--b">
-          <div className="wgt-score-mlogo-wrap">
-            {dc.teamBLogo
-              ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamBLogo)} alt="" />
-              : <div className="wgt-score-mlogo-ph" style={{ background: teamBColor }} />
-            }
+          <div className="wgt-score-mlogo-wrap" onClick={e => e.stopPropagation()}>
+            {isLinked ? (
+              dc.teamBLogo
+                ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamBLogo)} alt="" />
+                : <div className="wgt-score-mlogo-ph" style={{ background: teamBColor }} />
+            ) : (
+              <LogoUrlPicker
+                compact
+                value={dc.teamBLogo ?? ''}
+                onChange={logo => handleLogoPick('B', logo)}
+                thumbSize={{ w: 54, h: 54 }}
+                thumbContent={
+                  dc.teamBLogo
+                    ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamBLogo)} alt="" />
+                    : <div className="wgt-score-mlogo-ph" style={{ background: teamBColor }} />
+                }
+              />
+            )}
             {!isLinked && (
               <input
                 type="color"
@@ -458,14 +520,21 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
               {dc.teamBName ?? 'Team B'}
             </span>
           ) : (
-            <input
-              className="wgt-score-mname"
-              value={config.teamBName ?? ''}
-              placeholder="Team B"
-              style={{ color: teamBColor, fontSize: config.nameFontSize ?? 14 }}
-              onChange={e => updateWidgetConfig(widgetId, { teamBName: e.target.value })}
-              onClick={e => e.stopPropagation()}
-            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: '100%', minWidth: 0 }} onClick={e => e.stopPropagation()}>
+              <input
+                className="wgt-score-mname"
+                value={config.teamBName ?? ''}
+                placeholder="Team B"
+                style={{ color: teamBColor, fontSize: config.nameFontSize ?? 14, width: 'auto', flex: '1 1 auto', minWidth: 0 }}
+                onChange={e => updateWidgetConfig(widgetId, { teamBName: e.target.value })}
+              />
+              <div style={{ flexShrink: 0 }}>
+                <TeamPicker
+                  onPick={picked => handleTeamPick('B', picked)}
+                  current={{ name: config.teamBName, shortName: config.teamBShortName, color: teamBColor, logo: dc.teamBLogo }}
+                />
+              </div>
+            </div>
           )}
           {isLinked
             ? (dc.teamBShortName ? <span className="wgt-score-mshort" style={{ color: teamBColor }}>{dc.teamBShortName}</span> : null)

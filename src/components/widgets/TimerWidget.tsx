@@ -159,7 +159,9 @@ export function TimerWidget({ widgetId, config, h }: Props) {
       ? (dc.afterEtCurrentMs ?? 0)
       : inExtraTime
         ? (dc.etCurrentMs ?? 0)
-        : accumulatedMs;
+        : inBreak
+          ? (dc.breakCurrentMs ?? 0)
+          : accumulatedMs;
 
   const breakMs = inFinalPlay
     ? displayMs
@@ -335,11 +337,11 @@ export function TimerWidget({ widgetId, config, h }: Props) {
   const secondaryBtn = (() => {
     if (mainBtn.kind !== 'play-pause') {
       if (regularComplete || etComplete || afterEtComplete) {
-        return { icon: '↺', lbl: 'Reset', fn: () => resetWidgetTimer(widgetId) };
+        return { icon: '↺', lbl: 'Reset', fn: () => resetWidgetTimer(widgetId), color: '#7b8cde' };
       }
       return null;
     }
-    if (inBreak || etInBreak) return { icon: '⏭', lbl: 'Skip', fn: () => skipWidgetBreak(widgetId) };
+    if (inBreak || etInBreak) return { icon: '⏭', lbl: 'Skip', fn: () => skipWidgetBreak(widgetId), color: '#e67e22' };
     return {
       icon: '⏹',
       lbl: (inAfterEt ? `End ${afterEtLabel}` : inExtraTime ? etEndLabel : endLabel).replace('⏹ ', ''),
@@ -348,6 +350,7 @@ export function TimerWidget({ widgetId, config, h }: Props) {
         if (inFinalPlay) fireFinalPlayEnd();
         else if (!inExtraTime && !inAfterEt) firePeriodEnd();
       },
+      color: '#e74c3c',
     };
   })();
 
@@ -392,13 +395,13 @@ export function TimerWidget({ widgetId, config, h }: Props) {
               )}
             </div>
             {/* Main time — 2/3 */}
-            {inFinalPlay || inExtraTime || inAfterEt ? (
+            {inFinalPlay || inExtraTime || inAfterEt || inBreak ? (
               <div className="wgt-tc-time-area wgt-tc-time-area--fp">
                 {/* Period/base time shrinks to reference */}
                 <div className="wgt-tc-fp-period" style={{ fontSize: Math.floor(timeFontSize * 0.36) }}>
                   {display}
                 </div>
-                {/* ET / afterET / FP counter — counts from 0:00, no prefix */}
+                {/* ET / afterET / FP / break counter — grows in beside the shrunk period reference */}
                 <div className="wgt-tc-time wgt-tc-time--fp" style={{ fontSize: timeFontSize }}>
                   {formatTime(activeMs, config.format ?? dc.format ?? 'mm:ss')}
                 </div>
@@ -486,7 +489,7 @@ export function TimerWidget({ widgetId, config, h }: Props) {
 
             {/* Secondary (Break / Next Period) */}
             {secondaryBtn && (
-              <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: '#7b8cde', boxShadow: '0 3px 10px #7b8cde55' }} onClick={secondaryBtn.fn}>
+              <button className="wgt-tc-play" style={{ fontSize: playFontSize, background: secondaryBtn.color, boxShadow: `0 3px 10px ${secondaryBtn.color}55` }} onClick={secondaryBtn.fn}>
                 <span className="wgt-tc-play-circle">{secondaryBtn.icon}</span>
                 <span className="wgt-tc-play-lbl">{secondaryBtn.lbl}</span>
               </button>

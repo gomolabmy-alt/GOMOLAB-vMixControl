@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useContext } from 'react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
-import { useTournamentStore } from '../../stores/tournamentStore';
+import { useTeamDbStore } from '../../stores/teamDbStore';
 import type { TimelineEvent, TimelineEventType } from '../../types/canvas';
 
 interface Props { widgetId: string; config: Record<string, any>; }
@@ -173,7 +173,7 @@ export function TimelineWidget({ widgetId, config }: Props) {
   const ctx = useContext(CanvasActionContext);
   const { pages, addTimelineEvent, deleteTimelineEvent } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
-  const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
 
   const [adding, setAdding] = useState(false);
   const [detail, setDetail] = useState('');
@@ -204,8 +204,7 @@ export function TimelineWidget({ widgetId, config }: Props) {
     const plw = allWidgets.find(w => w.id === listId);
     if (!plw) return [];
     const plCfg = plw.config;
-    const t = tournaments.find(t2 => t2.id === plCfg.linkedTournamentId);
-    const teamData = (plCfg.teamSide ?? 'A') === 'A' ? t?.teamA : t?.teamB;
+    const teamData = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
     const assigned = new Set([...(plCfg.starters ?? []), ...(plCfg.subs ?? [])].filter(Boolean) as string[]);
     return (teamData?.players ?? [])
       .filter((p: any) => assigned.has(p.id))

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
-import { useTournamentStore } from '../../stores/tournamentStore';
+import { useTeamDbStore } from '../../stores/teamDbStore';
 
 interface Props {
   widgetId: string;
@@ -43,7 +43,7 @@ interface Player { id: string; name: string; jerseyNo: string; }
 
 export function ScoreLowerThirdWidget({ config }: Props) {
   const { pages, patchScoreLogEntry } = useCanvasStore();
-  const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
   const { getClient, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
 
   const allWidgets = pages.flatMap(p => p.widgets);
@@ -75,9 +75,7 @@ export function ScoreLowerThirdWidget({ config }: Props) {
     const plw = allWidgets.find(w => w.id === linkedId);
     if (!plw) return [];
     const plCfg = plw.config;
-    const t = tournaments.find(t2 => t2.id === plCfg.linkedTournamentId);
-    const side: 'A' | 'B' = plCfg.teamSide ?? 'A';
-    const team = side === 'A' ? t?.teamA : t?.teamB;
+    const team = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
     const players = team?.players ?? [];
     const assigned = new Set(
       [...(plCfg.starters ?? []), ...(plCfg.subs ?? [])].filter(Boolean) as string[]

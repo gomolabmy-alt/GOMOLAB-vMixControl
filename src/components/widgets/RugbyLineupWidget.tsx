@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo, useCallback, useContext } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
-import { useTournamentStore } from '../../stores/tournamentStore';
+import { useTeamDbStore } from '../../stores/teamDbStore';
 import type { Player } from '../../types/tournament';
 import { CanvasActionContext } from '../../lib/canvasContext';
 
@@ -57,17 +57,15 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h }: Props) {
   const ctx = useContext(CanvasActionContext);
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const pages = store.pages; // always use main canvas pages for player data lookups
-  const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
 
   const teamColor: string  = cfg.teamColor  ?? '#3498db';
   const fieldColor: string = cfg.fieldColor ?? '#2d7a3a';
   const players: RPlayer[] = (cfg.players?.length === 15) ? cfg.players : buildDefaultPlayers(teamColor);
-  const side: 'A' | 'B'   = cfg.teamSide ?? 'A';
 
-  // Resolve team name and available players from linked tournament
-  const linkedTournament = useMemo(() =>
-    tournaments.find(t => t.id === cfg.linkedTournamentId), [tournaments, cfg.linkedTournamentId]);
-  const linkedTeam = side === 'A' ? linkedTournament?.teamA : linkedTournament?.teamB;
+  // Resolve team name and available players from the linked saved team
+  const linkedTeam = useMemo(() =>
+    teamDbTeams.find(t => t.id === cfg.linkedTeamId), [teamDbTeams, cfg.linkedTeamId]);
   const teamName: string = linkedTeam?.name ?? cfg.teamName ?? 'Team Name';
 
   const [layoutEdit, setLayoutEdit]     = useState(false);
@@ -135,7 +133,7 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h }: Props) {
     return overrides;
   }, [linkedPlw, linkedTeam]);
 
-  // Available players: from linked tournament team, then fall back to any player-list widget
+  // Available players: from the linked saved team, then fall back to any player-list widget
   const availablePlayers = useMemo((): Player[] => {
     if (linkedTeam?.players?.length) return linkedTeam.players;
     const seen = new Set<string>();
@@ -143,25 +141,17 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h }: Props) {
     for (const page of pages) {
       for (const widget of page.widgets) {
         if (widget.type !== 'player-list') continue;
-        const t = tournaments.find(t => t.id === widget.config.linkedTournamentId);
-        const wSide: 'A' | 'B' = widget.config.teamSide ?? 'A';
-        const team = wSide === 'A' ? t?.teamA : t?.teamB;
+        const team = teamDbTeams.find(t => t.id === widget.config.linkedTeamId);
         for (const p of team?.players ?? []) {
           if (!seen.has(p.id)) { seen.add(p.id); result.push(p); }
         }
       }
     }
     return result;
-  }, [linkedTeam, pages, tournaments]);
+  }, [linkedTeam, pages, teamDbTeams]);
 
   const startEdit = (num: number) => { setEditing(num); setDraft(getPlayer(num).name); setColorPicking(null); };
   const commitEdit = () => { if (editing !== null) { updatePlayer(editing, { name: draft }); setEditing(null); } };
-
-  // Switch team side — update team name accordingly
-  const switchSide = (newSide: 'A' | 'B') => {
-    const newTeam = newSide === 'A' ? linkedTournament?.teamA : linkedTournament?.teamB;
-    updateWidgetConfig(widgetId, { teamSide: newSide, ...(newTeam ? { teamName: newTeam.name } : {}) });
-  };
 
   const setTeamColorAll = (color: string) => {
     const updated = players.map(p => ({ ...p, jerseyColor: color }));
@@ -194,23 +184,7 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h }: Props) {
             onChange={e => setTeamColorAll(e.target.value)} />
         </label>
 
-        {linkedTournament ? (
-          <div className="rugby-side-toggle">
-            <button
-              className={`rugby-side-btn${side === 'A' ? ' rugby-side-btn--active' : ''}`}
-              onClick={e => { e.stopPropagation(); switchSide('A'); }}
-              style={{ '--sc': linkedTournament.teamA.color } as React.CSSProperties}
-            >A</button>
-            <span className="rugby-lineup-team-name">{teamName}</span>
-            <button
-              className={`rugby-side-btn${side === 'B' ? ' rugby-side-btn--active' : ''}`}
-              onClick={e => { e.stopPropagation(); switchSide('B'); }}
-              style={{ '--sc': linkedTournament.teamB.color } as React.CSSProperties}
-            >B</button>
-          </div>
-        ) : (
-          <span className="rugby-lineup-team-name">{teamName}</span>
-        )}
+        <span className="rugby-lineup-team-name">{teamName}</span>
 
         <button
           className={`rugby-layout-btn${layoutEdit ? ' rugby-layout-btn--active' : ''}`}

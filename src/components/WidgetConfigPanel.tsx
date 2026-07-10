@@ -3,12 +3,21 @@ import { createPortal } from 'react-dom';
 import { useCanvasStore } from '../stores/canvasStore';
 import { useVmixStore } from '../stores/vmixStore';
 import { useTournamentStore } from '../stores/tournamentStore';
+import { useTeamDbStore } from '../stores/teamDbStore';
 import { WIDGET_TYPE_ICONS, WIDGET_TYPE_LABELS } from '../types/canvas';
 import type { CanvasWidget } from '../types/canvas';
 import { INPUT_TYPE_LABELS } from '../types/vmix';
 import type { VmixInput } from '../types/vmix';
 import { LogoUrlPicker } from './LogoUrlPicker';
 import { resolveImageUrl } from '../lib/imageUrl';
+import { useMatchResultsStore } from '../stores/matchResultsStore';
+
+// Label for a player-list widget in a picker dropdown — shows the linked
+// saved team's name (teamDbStore), falling back to a short widget id.
+function plWidgetLabel(w: { id: string; config: Record<string, any> }, teamDbTeams: { id: string; name: string }[]): string {
+  const t = teamDbTeams.find(t2 => t2.id === w.config.linkedTeamId);
+  return t ? t.name : `Widget ${w.id.slice(0, 6)}`;
+}
 
 function msToFormatStr(ms: number, format: string): string {
   const totalSec = Math.floor((ms ?? 0) / 1000);
@@ -485,6 +494,8 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
   const pages = pagesOverride ? [...store.pages, ...pagesOverride] : store.pages;
   const { vmixState, globalVariables, getClient } = useVmixStore();
   const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
+  const { results: savedMatchResults, clearResults: clearMatchResults } = useMatchResultsStore();
   const cfg = widget.config;
   const up = (patch: Record<string, any>) => updateWidgetConfig(widget.id, patch);
   const [panelExpandedId, setPanelExpandedId] = useState<string | null>(null);
@@ -1052,7 +1063,6 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
       case 'scoreboard': {
         const allScoreboardWidgets = pages.flatMap(p => p.widgets).filter(w => w.type === 'scoreboard' && w.id !== widget.id);
-        const linkedTournament = tournaments.find(t => t.id === cfg.linkedTournamentId);
         return (
         <>
           <CollapsibleSection label="Link to Scoreboard">
@@ -1068,51 +1078,11 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               <p className="timer-db-hint">This widget mirrors the selected scoreboard. Controls are hidden — score from the source widget.</p>
             )}
           </CollapsibleSection>
-          <CollapsibleSection label="Tournament Database">
-            <Field label="Link Tournament">
-              <select
-                className="field-input"
-                value={cfg.linkedTournamentId ?? ''}
-                onChange={e => {
-                  const t = tournaments.find(t => t.id === e.target.value);
-                  up({
-                    linkedTournamentId: e.target.value,
-                    ...(t ? {
-                      teamAName:  t.teamA.name,
-                      teamBName:  t.teamB.name,
-                      teamAColor: t.teamA.color,
-                      teamBColor: t.teamB.color,
-                    } : {}),
-                  });
-                }}
-              >
-                <option value="">— none (manual) —</option>
-                {tournaments.map(t => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
-            </Field>
-          </CollapsibleSection>
 
           <CollapsibleSection label="Teams">
-          {linkedTournament ? (
-            /* Read-only display when linked to DB */
-            <div className="scoreboard-db-teams">
-              <div className="scoreboard-db-team">
-                <span className="scoreboard-db-dot" style={{ background: linkedTournament.teamA.color }} />
-                <span className="scoreboard-db-name">{linkedTournament.teamA.name}</span>
-                <span className="scoreboard-db-badge">DB</span>
-              </div>
-              <div className="scoreboard-db-team">
-                <span className="scoreboard-db-dot" style={{ background: linkedTournament.teamB.color }} />
-                <span className="scoreboard-db-name">{linkedTournament.teamB.name}</span>
-                <span className="scoreboard-db-badge">DB</span>
-              </div>
-              <p className="scoreboard-db-hint">Edit team names and colors in the Tournament DB (🏆 DB in the status bar).</p>
-            </div>
-          ) : (
-            /* Editable when no tournament linked */
-            <>
+            <p className="app-settings-hint" style={{ margin: '0 0 6px' }}>
+              Use the 👥 team picker on the scoreboard itself to pull from the Team DB, or edit directly here.
+            </p>
               <Field label="Team A Name">
                 <input className="field-input" value={cfg.teamAName ?? 'Team A'} onChange={e => up({ teamAName: e.target.value })} />
               </Field>
@@ -1131,8 +1101,6 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               <Field label="Team B Logo">
                 <LogoUrlPicker value={cfg.teamBLogo ?? ''} onChange={url => up({ teamBLogo: url })} placeholder="Team B logo URL" />
               </Field>
-            </>
-          )}
           </CollapsibleSection>
 
           <CollapsibleSection label="Match Info">
@@ -1344,7 +1312,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               <select className="field-input" value={cfg.linkedPlayerListA ?? ''} onChange={e => up({ linkedPlayerListA: e.target.value })}>
                 <option value="">— none —</option>
                 {pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list')).map(w => (
-                  <option key={w.id} value={w.id}>{w.config.teamSide === 'B' ? 'Team B' : 'Team A'} — Player List</option>
+                  <option key={w.id} value={w.id}>{plWidgetLabel(w, teamDbTeams)}</option>
                 ))}
               </select>
             </Field>
@@ -1352,7 +1320,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               <select className="field-input" value={cfg.linkedPlayerListB ?? ''} onChange={e => up({ linkedPlayerListB: e.target.value })}>
                 <option value="">— none —</option>
                 {pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list')).map(w => (
-                  <option key={w.id} value={w.id}>{w.config.teamSide === 'B' ? 'Team B' : 'Team A'} — Player List</option>
+                  <option key={w.id} value={w.id}>{plWidgetLabel(w, teamDbTeams)}</option>
                 ))}
               </select>
             </Field>
@@ -1474,11 +1442,9 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               <Field label="Linked Player List">
                 <select className="field-input" value={cfg.linkedPlayerListId ?? ''} onChange={e => up({ linkedPlayerListId: e.target.value })}>
                   <option value="">— select player list —</option>
-                  {playerListWidgets.map(w => {
-                    const t = tournaments.find(t2 => t2.id === w.config.linkedTournamentId);
-                    const label = t ? `${t.name} (${w.config.teamSide ?? 'A'})` : `Widget ${w.id.slice(0, 6)}`;
-                    return <option key={w.id} value={w.id}>{label}</option>;
-                  })}
+                  {playerListWidgets.map(w => (
+                    <option key={w.id} value={w.id}>{plWidgetLabel(w, teamDbTeams)}</option>
+                  ))}
                 </select>
               </Field>
               <Field label="Linked Scoreboard (for score summary)">
@@ -1527,10 +1493,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
       case 'sin-bin-lower-third': {
         const playerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
-        const plLabel = (w: any) => {
-          const t = tournaments.find(t2 => t2.id === w.config.linkedTournamentId);
-          return t ? `${t.name} — ${w.config.teamSide === 'B' ? 'Team B' : 'Team A'}` : `Widget ${w.id.slice(0, 6)}`;
-        };
+        const plLabel = (w: any) => plWidgetLabel(w, teamDbTeams);
         return (
           <>
             <CollapsibleSection label="Team">
@@ -1979,6 +1942,18 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               />
             </Field>
           )}
+          {(cfg.periods ?? 1) > 1 && (cfg.breakDurationMs ?? 0) > 0 && (
+            <Field label="Break Direction">
+              <div className="tm-timer-mode-toggle">
+                {([['down','Count Down'],['up','Count Up']] as [string,string][]).map(([val, lbl]) => (
+                  <button key={val}
+                    className={`tm-timer-mode-btn ${(cfg.breakCountMode ?? 'down') === val ? 'tm-timer-mode-btn--active' : ''}`}
+                    onClick={() => up({ breakCountMode: val })}
+                  >{lbl}</button>
+                ))}
+              </div>
+            </Field>
+          )}
           </CollapsibleSection>
           {/* ── Extra Time ── */}
           <CollapsibleSection label="Extra Time">
@@ -2334,6 +2309,57 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         </>
       );
 
+      case 'recent-matches': return (
+        <>
+          <Field label="Title">
+            <input className="field-input" value={cfg.title ?? ''} placeholder="Latest Results"
+              onChange={e => up({ title: e.target.value })} />
+          </Field>
+          <Field label="Max results shown">
+            <input type="number" className="field-input" min={1} max={50} value={cfg.maxResults ?? 8}
+              onChange={e => up({ maxResults: Math.max(1, parseInt(e.target.value) || 8) })} />
+          </Field>
+          <Field label="Group by competition">
+            <input type="checkbox" checked={cfg.groupByCompetition ?? true}
+              onChange={e => up({ groupByCompetition: e.target.checked })} />
+          </Field>
+          <Field label="Show date">
+            <input type="checkbox" checked={cfg.showDate ?? true}
+              onChange={e => up({ showDate: e.target.checked })} />
+          </Field>
+          <Field label={`Saved results (${savedMatchResults.length})`}>
+            <button
+              className="btn btn--ghost btn--small"
+              disabled={savedMatchResults.length === 0}
+              onClick={() => { if (confirm('Delete all saved match results? This cannot be undone.')) clearMatchResults(); }}
+            >Clear All</button>
+          </Field>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+            Results are added from a scoreboard widget's "💾 Save Result" button.
+          </div>
+        </>
+      );
+
+      case 'match-schedule': return (
+        <>
+          <Field label="Title">
+            <input className="field-input" value={cfg.title ?? ''} placeholder="Upcoming Matches"
+              onChange={e => up({ title: e.target.value })} />
+          </Field>
+          <Field label="Send To Scoreboard">
+            <select className="field-input" value={cfg.linkedScoreboardId ?? ''} onChange={e => up({ linkedScoreboardId: e.target.value })}>
+              <option value="">— none —</option>
+              {pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard')).map(w => (
+                <option key={w.id} value={w.id}>{w.config.name || `Scoreboard (${w.config.teamAName || 'A'} vs ${w.config.teamBName || 'B'})`}</option>
+              ))}
+            </select>
+          </Field>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+            Manage fixtures in 🏆 DB → Schedule. Sent matches grey out here automatically.
+          </div>
+        </>
+      );
+
       case 'input-tally': return (
         <>
           {renderInputPicker(
@@ -2534,40 +2560,28 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
       case 'player-list': {
         const timerWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'timer'));
         const timelineWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'timeline'));
-        const selectedTournament = tournaments.find(t => t.id === cfg.linkedTournamentId);
         const hasPlaytime = Object.keys(cfg.accumulated ?? {}).length > 0 || (cfg.onField ?? []).length > 0;
+        const scopedTeams = cfg.linkedTournamentId
+          ? teamDbTeams.filter(t => t.tournamentId === cfg.linkedTournamentId)
+          : teamDbTeams;
         return (
           <>
             <Field label="Tournament">
               <select className="field-input" value={cfg.linkedTournamentId ?? ''} onChange={e => up({ linkedTournamentId: e.target.value })}>
-                <option value="">— select tournament —</option>
+                <option value="">— select tournament (for periods/settings) —</option>
                 {tournaments.map(t => (
                   <option key={t.id} value={t.id}>{t.name}</option>
                 ))}
               </select>
             </Field>
-            {selectedTournament && (
-              <Field label="Team">
-                <div className="team-side-picker">
-                  <button
-                    className={`team-side-btn ${(cfg.teamSide ?? 'A') === 'A' ? 'team-side-btn--active' : ''}`}
-                    style={{ '--tc': selectedTournament.teamA.color } as React.CSSProperties}
-                    onClick={() => up({ teamSide: 'A' })}
-                  >
-                    <span className="team-side-dot" style={{ background: selectedTournament.teamA.color }} />
-                    {selectedTournament.teamA.name}
-                  </button>
-                  <button
-                    className={`team-side-btn ${(cfg.teamSide ?? 'A') === 'B' ? 'team-side-btn--active' : ''}`}
-                    style={{ '--tc': selectedTournament.teamB.color } as React.CSSProperties}
-                    onClick={() => up({ teamSide: 'B' })}
-                  >
-                    <span className="team-side-dot" style={{ background: selectedTournament.teamB.color }} />
-                    {selectedTournament.teamB.name}
-                  </button>
-                </div>
-              </Field>
-            )}
+            <Field label="Team">
+              <select className="field-input" value={cfg.linkedTeamId ?? ''} onChange={e => up({ linkedTeamId: e.target.value })}>
+                <option value="">— select team —</option>
+                {scopedTeams.map(t => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </Field>
             <Field label="Player Highlight Widget">
               <select className="field-input" value={cfg.linkedPlayerHighlightId ?? ''} onChange={e => up({ linkedPlayerHighlightId: e.target.value })}>
                 <option value="">— none —</option>
@@ -2730,38 +2744,34 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         const allPlayerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
         const timerWidgets2 = pages.flatMap(p => p.widgets.filter(w => w.type === 'timer'));
         const timelineWidgets2 = pages.flatMap(p => p.widgets.filter(w => w.type === 'timeline'));
-        const selectedTournament2 = tournaments.find(t => t.id === cfg.linkedTournamentId);
+        const scopedTeams2 = cfg.linkedTournamentId
+          ? teamDbTeams.filter(t => t.tournamentId === cfg.linkedTournamentId)
+          : teamDbTeams;
         return (
           <>
             <Field label="Player List Widget">
               <select className="field-input" value={cfg.linkedPlayerListId ?? ''} onChange={e => {
                 const plw = allPlayerListWidgets.find(w => w.id === e.target.value);
-                up({ linkedPlayerListId: e.target.value, linkedTournamentId: plw?.config.linkedTournamentId ?? cfg.linkedTournamentId, teamSide: plw?.config.teamSide ?? cfg.teamSide });
+                up({ linkedPlayerListId: e.target.value, linkedTournamentId: plw?.config.linkedTournamentId ?? cfg.linkedTournamentId, linkedTeamId: plw?.config.linkedTeamId ?? cfg.linkedTeamId });
               }}>
                 <option value="">— select widget —</option>
-                {allPlayerListWidgets.map(w => <option key={w.id} value={w.id}>{w.config.linkedTournamentId ? tournaments.find(t => t.id === w.config.linkedTournamentId)?.name ?? w.id : w.id} ({w.config.teamSide ?? 'A'})</option>)}
+                {allPlayerListWidgets.map(w => <option key={w.id} value={w.id}>{plWidgetLabel(w, teamDbTeams)}</option>)}
               </select>
             </Field>
             {!cfg.linkedPlayerListId && (
               <>
                 <Field label="Tournament">
                   <select className="field-input" value={cfg.linkedTournamentId ?? ''} onChange={e => up({ linkedTournamentId: e.target.value })}>
-                    <option value="">— select tournament —</option>
+                    <option value="">— select tournament (for periods/settings) —</option>
                     {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </Field>
-                {selectedTournament2 && (
-                  <Field label="Team">
-                    <div className="team-side-picker">
-                      <button className={`team-side-btn ${(cfg.teamSide ?? 'A') === 'A' ? 'team-side-btn--active' : ''}`} style={{ '--tc': selectedTournament2.teamA.color } as React.CSSProperties} onClick={() => up({ teamSide: 'A' })}>
-                        <span className="team-side-dot" style={{ background: selectedTournament2.teamA.color }} />{selectedTournament2.teamA.name}
-                      </button>
-                      <button className={`team-side-btn ${(cfg.teamSide ?? 'A') === 'B' ? 'team-side-btn--active' : ''}`} style={{ '--tc': selectedTournament2.teamB.color } as React.CSSProperties} onClick={() => up({ teamSide: 'B' })}>
-                        <span className="team-side-dot" style={{ background: selectedTournament2.teamB.color }} />{selectedTournament2.teamB.name}
-                      </button>
-                    </div>
-                  </Field>
-                )}
+                <Field label="Team">
+                  <select className="field-input" value={cfg.linkedTeamId ?? ''} onChange={e => up({ linkedTeamId: e.target.value })}>
+                    <option value="">— select team —</option>
+                    {scopedTeams2.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </Field>
               </>
             )}
             <Field label="Linked Timer">
@@ -2831,10 +2841,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
       case 'card-display': {
         const playerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
-        const plLabel = (w: { id: string; config: Record<string, any> }) => {
-          const t = tournaments.find(t => t.id === w.config.linkedTournamentId);
-          return t ? `${t.name} (${w.config.teamSide ?? 'A'})` : w.id;
-        };
+        const plLabel = (w: { id: string; config: Record<string, any> }) => plWidgetLabel(w, teamDbTeams);
         return (
           <>
             <Field label="Team A — Player List">
@@ -2910,10 +2917,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
       case 'card-lower-third': {
         const playerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
-        const plLabel = (w: any) => {
-          const t = tournaments.find(t2 => t2.id === w.config.linkedTournamentId);
-          return t ? `${t.name} — ${w.config.teamSide === 'B' ? 'Team B' : 'Team A'}` : `Widget ${w.id.slice(0, 6)}`;
-        };
+        const plLabel = (w: any) => plWidgetLabel(w, teamDbTeams);
         return (
           <>
             <CollapsibleSection label="Teams">
@@ -3239,9 +3243,10 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
       case 'rugby-lineup': {
         const allPlayerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
-        const linkedT = tournaments.find(t => t.id === cfg.linkedTournamentId);
-        const side: 'A' | 'B' = cfg.teamSide ?? 'A';
-        const linkedTeam = side === 'A' ? linkedT?.teamA : linkedT?.teamB;
+        const scopedTeams3 = cfg.linkedTournamentId
+          ? teamDbTeams.filter(t => t.tournamentId === cfg.linkedTournamentId)
+          : teamDbTeams;
+        const linkedTeam = teamDbTeams.find(t => t.id === cfg.linkedTeamId);
         const loadFromTournament = () => {
           if (!linkedTeam) return;
           const currentPlayers: any[] = cfg.players ?? [];
@@ -3262,17 +3267,14 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   up({
                     linkedPlayerListId: e.target.value || undefined,
                     linkedTournamentId: plw?.config.linkedTournamentId ?? cfg.linkedTournamentId,
-                    teamSide: plw?.config.teamSide ?? cfg.teamSide,
+                    linkedTeamId: plw?.config.linkedTeamId ?? cfg.linkedTeamId,
                   });
                 }}
               >
                 <option value="">— none (manual names) —</option>
-                {allPlayerListWidgets.map(w => {
-                  const t = tournaments.find(t => t.id === w.config.linkedTournamentId);
-                  const s: 'A' | 'B' = w.config.teamSide ?? 'A';
-                  const team = s === 'A' ? t?.teamA : t?.teamB;
-                  return <option key={w.id} value={w.id}>{team?.name ?? w.id} ({s})</option>;
-                })}
+                {allPlayerListWidgets.map(w => (
+                  <option key={w.id} value={w.id}>{plWidgetLabel(w, teamDbTeams)}</option>
+                ))}
               </select>
             </Field>
             <Field label="Tournament">
@@ -3282,36 +3284,22 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                 {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             </Field>
-            {linkedT && (
-              <>
-                <Field label="Team">
-                  <div className="team-side-picker">
-                    <button
-                      className={`team-side-btn ${side === 'A' ? 'team-side-btn--active' : ''}`}
-                      style={{ '--tc': linkedT.teamA.color } as React.CSSProperties}
-                      onClick={() => up({ teamSide: 'A', teamName: linkedT.teamA.name })}
-                    >
-                      <span className="team-side-dot" style={{ background: linkedT.teamA.color }} />
-                      {linkedT.teamA.name}
-                    </button>
-                    <button
-                      className={`team-side-btn ${side === 'B' ? 'team-side-btn--active' : ''}`}
-                      style={{ '--tc': linkedT.teamB.color } as React.CSSProperties}
-                      onClick={() => up({ teamSide: 'B', teamName: linkedT.teamB.name })}
-                    >
-                      <span className="team-side-dot" style={{ background: linkedT.teamB.color }} />
-                      {linkedT.teamB.name}
-                    </button>
-                  </div>
-                </Field>
-                {linkedTeam && !cfg.linkedPlayerListId && (
-                  <Field label="Players">
-                    <button className="btn btn--secondary btn--small" onClick={loadFromTournament}>
-                      Load names from {linkedTeam.name}
-                    </button>
-                  </Field>
-                )}
-              </>
+            <Field label="Team">
+              <select className="field-input" value={cfg.linkedTeamId ?? ''}
+                onChange={e => {
+                  const t = teamDbTeams.find(t2 => t2.id === e.target.value);
+                  up({ linkedTeamId: e.target.value, ...(t ? { teamName: t.name } : {}) });
+                }}>
+                <option value="">— select team —</option>
+                {scopedTeams3.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </Field>
+            {linkedTeam && !cfg.linkedPlayerListId && (
+              <Field label="Players">
+                <button className="btn btn--secondary btn--small" onClick={loadFromTournament}>
+                  Load names from {linkedTeam.name}
+                </button>
+              </Field>
             )}
           </>
         );

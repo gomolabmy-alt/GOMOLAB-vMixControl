@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
-import { useTournamentStore } from '../../stores/tournamentStore';
+import { useTeamDbStore } from '../../stores/teamDbStore';
 
 interface Props {
   widgetId: string;
@@ -34,14 +34,13 @@ const CARD_LABEL: Record<RugbyCard, string> = {
   red:    'Red Card',
 };
 
-function resolveCardPlayers(allWidgets: any[], tournaments: any[], linkedId: string): CardPlayer[] {
+function resolveCardPlayers(allWidgets: any[], teamDbTeams: any[], linkedId: string): CardPlayer[] {
   const plw = allWidgets.find(w => w.id === linkedId);
   if (!plw) return [];
 
   const plCfg = plw.config;
-  const tournament = tournaments.find(t => t.id === plCfg.linkedTournamentId);
   const side: 'A' | 'B' = plCfg.teamSide ?? 'A';
-  const team = side === 'A' ? tournament?.teamA : tournament?.teamB;
+  const team = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
   const players: any[] = team?.players ?? [];
   const playerCards: Record<string, RugbyCard[]> = plCfg.playerCards ?? {};
 
@@ -79,13 +78,13 @@ function resolveCardPlayers(allWidgets: any[], tournaments: any[], linkedId: str
 
 export function CardLowerThirdWidget({ config }: Props) {
   const { pages } = useCanvasStore();
-  const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
   const { client, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
 
   const allWidgets = pages.flatMap(p => p.widgets);
 
-  const teamAPlayers = resolveCardPlayers(allWidgets, tournaments, config.linkedPlayerListA ?? '');
-  const teamBPlayers = resolveCardPlayers(allWidgets, tournaments, config.linkedPlayerListB ?? '');
+  const teamAPlayers = resolveCardPlayers(allWidgets, teamDbTeams, config.linkedPlayerListA ?? '');
+  const teamBPlayers = resolveCardPlayers(allWidgets, teamDbTeams, config.linkedPlayerListB ?? '');
   const allCardPlayers = [...teamAPlayers, ...teamBPlayers];
 
   const [selectedId, setSelectedId] = useState<string | null>(null);

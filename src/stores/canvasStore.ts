@@ -31,6 +31,16 @@ const _isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in wi
 const _runWallStart: Record<string, number> = {};   // epoch ms when segment started
 const _runGameMs: Record<string, number> = {};      // game ms at that moment
 
+// Separate anchor for the half-time/break countdown. Previously break shared
+// _runWallStart/_runGameMs with the main game clock, which meant every
+// transition (and every consumer — pause, adjust, resume) had to correctly
+// know which phase it was re-anchoring; missing one produced corrupted
+// values (e.g. pausing during a break wrote a bogus number into the main
+// clock's currentMs instead of breakCurrentMs). Now break has its own slot
+// that can never collide with the main clock's.
+const _breakWallStart: Record<string, number> = {};
+const _breakGameMs: Record<string, number> = {};
+
 // Per-widget metadata for the Rust tick driver.
 const _tickMsMap: Record<string, number> = {};      // nominal tick interval
 const _lastTickAt: Record<string, number> = {};     // epoch ms of last tick fire
@@ -63,6 +73,8 @@ function stopWorkerInterval(widgetId: string) {
   // Clear wall-clock anchor and tick driver state
   delete _runWallStart[widgetId];
   delete _runGameMs[widgetId];
+  delete _breakWallStart[widgetId];
+  delete _breakGameMs[widgetId];
   delete _lastTickAt[widgetId];
   delete _tickMsMap[widgetId];
 }
@@ -759,6 +771,8 @@ export const useCanvasStore = create<CanvasStore>()(
             // Clear wall-clock anchor so no stale data remains
             delete _runWallStart[widgetId];
             delete _runGameMs[widgetId];
+            delete _breakWallStart[widgetId];
+            delete _breakGameMs[widgetId];
             delete _lastTickAt[widgetId];
             delete _tickMsMap[widgetId];
             const ints = { ...get().timerIntervals };
@@ -849,27 +863,40 @@ export const useCanvasStore = create<CanvasStore>()(
                   finalPlayPendingNext: true,
                 });
               } else {
-                stopInterval();
+                // Keep the tick loop running straight through the transition —
+                // period end no longer stops the timer and waits for a manual
+                // "Resume" click. Re-anchor the wall clock to the new phase's
+                // starting value so the very next tick computes correctly.
                 if (breakMs > 0) {
+                  // Break can count down to 0 (time remaining) or up from 0
+                  // (elapsed break time) per cfg.breakCountMode — operator choice.
+                  const breakStartMs = cfg.breakCountMode === 'up' ? 0 : breakMs;
+                  _breakWallStart[widgetId] = Date.now();
+                  _breakGameMs[widgetId] = breakStartMs;
                   updateWidgetConfig(widgetId, {
-                    // Freeze display at official period end; store next-period start for startWidgetTimer
+                    // Freeze display at official period end; store next-period start for skipWidgetBreak
                     currentMs: periodEndMs,
                     resumeMs: nextCurrentMs,
                     resumePeriodStartMs: nextPeriodStartMs,
                     periodStartMs: nextPeriodStartMs,
                     inBreak: true,
-                    breakCurrentMs: breakMs,
-                    running: false,
+                    breakCurrentMs: breakStartMs,
                   });
+                  // Push the "Half Time"/"Break" period label immediately —
+                  // previously this only went out on the next main-period
+                  // tick, which never happens while inBreak is true, so the
+                  // label field stayed stuck on the last period's text.
+                  timerSendAll(triggerClient, { ...cfg, inBreak: true }, formatTime(breakStartMs, cfg.format));
                 } else {
+                  _runWallStart[widgetId] = Date.now();
+                  _runGameMs[widgetId] = nextCurrentMs;
                   updateWidgetConfig(widgetId, {
-                    currentMs: periodEndMs,
-                    resumeMs: nextCurrentMs,
-                    resumePeriodStartMs: nextPeriodStartMs,
+                    currentMs: nextCurrentMs,
+                    resumeMs: null,
+                    resumePeriodStartMs: null,
                     periodStartMs: nextPeriodStartMs,
                     currentPeriod: currentPeriod + 1,
                     inBreak: false,
-                    running: false,
                   });
                 }
               }
@@ -877,6 +904,16 @@ export const useCanvasStore = create<CanvasStore>()(
               const finalMs = cfg.mode === 'countdown' ? 0 : periods * cfg.durationMs;
               const { client } = useVmixStore.getState();
               timerSendAll(client, cfg, formatTime(finalMs, cfg.format));
+              // The widget's own display recomputes total elapsed time as
+              // (min(currentPeriod, periods) - 1) * durationMs + currentMs for
+              // count-up + reset mode — i.e. currentMs is expected to hold only
+              // the LAST period's local elapsed time, not the grand total, or
+              // the total gets added on top of itself (e.g. 40 + 80 = 120
+              // instead of 80). Continue mode and countdown mode don't do that
+              // extra addition, so they store the real total/zero as-is.
+              const currentMsAtFullTime = cfg.mode === 'countdown'
+                ? 0
+                : cfg.periodMode === 'continue' ? finalMs : cfg.durationMs;
               if (cfg.finalPlayEnabled) {
                 // Keep worker running for Final Play count-up; re-anchor
                 // wall-clock so the Final Play counter starts from 0, not
@@ -884,25 +921,31 @@ export const useCanvasStore = create<CanvasStore>()(
                 _runWallStart[widgetId] = Date.now();
                 _runGameMs[widgetId] = 0;
                 updateWidgetConfig(widgetId, {
-                  currentMs: finalMs, running: true,
+                  currentMs: currentMsAtFullTime, running: true,
                   currentPeriod: periods + 1,
                   inFinalPlay: true, finalPlayMs: 0,
                 });
               } else {
                 stopInterval();
                 updateWidgetConfig(widgetId, {
-                  currentMs: finalMs, running: false,
+                  currentMs: currentMsAtFullTime, running: false,
                   currentPeriod: periods + 1,
                 });
               }
             }
           }
 
-          // Only the host machine actually drives the tick loop and sends to vMix.
-          // Other connected controllers (remote devices/tabs) broadcast start/pause/adjust
-          // actions above but must not independently re-drive the same timer — running a
-          // tick loop on every peer caused competing sends and skipped vMix updates.
-          if (syncClient.isHost) {
+          // Only the real Tauri app instance drives the tick loop and sends to
+          // vMix. Deliberately checking _isTauriApp here, not syncClient.isHost:
+          // isHost is also true for a plain browser tab hitting localhost in
+          // dev mode (so the UI can be previewed without the Tauri app), and a
+          // stray dev-server tab left open was found still independently
+          // ticking a stale in-memory timer, fighting the real app's state.
+          // Other connected controllers (remote devices/tabs) broadcast
+          // start/pause/adjust actions above but must not independently
+          // re-drive the same timer — running a tick loop on every peer caused
+          // competing sends and skipped vMix updates.
+          if (_isTauriApp) {
           timerTickHandlers[widgetId] = () => {
             const cfg = findWidgetConfig(widgetId);
             if (!cfg || !cfg.running) return;
@@ -915,13 +958,27 @@ export const useCanvasStore = create<CanvasStore>()(
               const etDurationMs = cfg.etDurationMs ?? 300000;
 
               if (cfg.etInBreak) {
-                const nextBreak = Math.max(0, (cfg.etBreakCurrentMs ?? 0) - tickMs);
-                if (nextBreak <= 0) {
-                  stopInterval();
+                const etBreakDurationMs = cfg.etBreakDurationMs ?? 0;
+                const etBreakUp = cfg.breakCountMode === 'up';
+                const ebWallStart = _runWallStart[widgetId];
+                const ebGameStart = _runGameMs[widgetId];
+                const nextBreak = (ebWallStart !== undefined && ebGameStart !== undefined)
+                  ? (etBreakUp
+                      ? Math.min(etBreakDurationMs, ebGameStart + (Date.now() - ebWallStart))
+                      : Math.max(0, ebGameStart - (Date.now() - ebWallStart)))
+                  : (etBreakUp
+                      ? Math.min(etBreakDurationMs, (cfg.etBreakCurrentMs ?? 0) + tickMs)
+                      : Math.max(0, (cfg.etBreakCurrentMs ?? 0) - tickMs));
+                const etBreakDone = etBreakUp ? nextBreak >= etBreakDurationMs : nextBreak <= 0;
+                if (etBreakDone) {
+                  // Auto-continue into the next ET period instead of stopping.
+                  const startMs = cfg.mode === 'countdown' ? etDurationMs : 0;
+                  _runWallStart[widgetId] = Date.now();
+                  _runGameMs[widgetId] = startMs;
                   updateWidgetConfig(widgetId, {
                     etInBreak: false, etBreakCurrentMs: 0,
-                    etCurrentPeriod: etCurrentPeriod + 1, running: false,
-                    etCurrentMs: cfg.mode === 'countdown' ? etDurationMs : 0,
+                    etCurrentPeriod: etCurrentPeriod + 1,
+                    etCurrentMs: startMs,
                     etPeriodStartMs: 0,
                   });
                   sendMiniTimer(client, cfg, 0);
@@ -977,16 +1034,21 @@ export const useCanvasStore = create<CanvasStore>()(
                 const etEndMs = cfg.mode === 'countdown' ? 0 : periodEnd;
                 if (etCurrentPeriod < etPeriods) {
                   const etBreakMs = cfg.etBreakDurationMs ?? 0;
-                  stopInterval();
+                  // Keep running straight through, same as the main-period
+                  // break transition above — no manual restart required.
                   if (etBreakMs > 0) {
+                    _runWallStart[widgetId] = Date.now();
+                    _runGameMs[widgetId] = etBreakMs;
                     updateWidgetConfig(widgetId, {
                       etCurrentMs: nextEtMs, etPeriodStartMs: nextEtPeriodStartMs,
-                      etInBreak: true, etBreakCurrentMs: etBreakMs, running: false,
+                      etInBreak: true, etBreakCurrentMs: etBreakMs,
                     });
                   } else {
+                    _runWallStart[widgetId] = Date.now();
+                    _runGameMs[widgetId] = nextEtMs;
                     updateWidgetConfig(widgetId, {
                       etCurrentMs: nextEtMs, etPeriodStartMs: nextEtPeriodStartMs,
-                      etCurrentPeriod: etCurrentPeriod + 1, etInBreak: false, running: false,
+                      etCurrentPeriod: etCurrentPeriod + 1, etInBreak: false,
                     });
                   }
                 } else {
@@ -1073,7 +1135,7 @@ export const useCanvasStore = create<CanvasStore>()(
                   const breakMs2 = cfg.breakDurationMs ?? 0;
                   if (breakMs2 > 0) {
                     stopInterval();
-                    updateWidgetConfig(widgetId, { ...base, inBreak: true, breakCurrentMs: breakMs2 });
+                    updateWidgetConfig(widgetId, { ...base, inBreak: true, breakCurrentMs: cfg.breakCountMode === 'up' ? 0 : breakMs2 });
                   } else {
                     stopInterval();
                     updateWidgetConfig(widgetId, {
@@ -1099,30 +1161,51 @@ export const useCanvasStore = create<CanvasStore>()(
 
             // ── Normal tick ─────────────────────────────────────────────────
             if (cfg.inBreak) {
-              const bWallStart = _runWallStart[widgetId];
-              const bGameStart = _runGameMs[widgetId];
+              const breakDurationMs = cfg.breakDurationMs ?? 0;
+              const breakUp = cfg.breakCountMode === 'up';
+              const bWallStart = _breakWallStart[widgetId];
+              const bGameStart = _breakGameMs[widgetId];
               const nextBreak = (bWallStart !== undefined && bGameStart !== undefined)
-                ? Math.max(0, bGameStart - (Date.now() - bWallStart))
-                : Math.max(0, (cfg.breakCurrentMs ?? 0) - tickMs);
-              if (nextBreak <= 0) {
-                stopInterval();
+                ? (breakUp
+                    ? Math.min(breakDurationMs, bGameStart + (Date.now() - bWallStart))
+                    : Math.max(0, bGameStart - (Date.now() - bWallStart)))
+                : (breakUp
+                    ? Math.min(breakDurationMs, (cfg.breakCurrentMs ?? 0) + tickMs)
+                    : Math.max(0, (cfg.breakCurrentMs ?? 0) - tickMs));
+              const breakDone = breakUp ? nextBreak >= breakDurationMs : nextBreak <= 0;
+              if (breakDone) {
+                // Break ends — auto-continue straight into the next period
+                // instead of stopping and waiting for a manual restart.
                 const nextPeriod = (cfg.currentPeriod ?? 1) + 1;
                 logToLinkedTimelines(widgetId, getPeriodStartLabel(cfg.periods ?? 1, nextPeriod), '');
+                const startMs = cfg.resumeMs ?? (cfg.mode === 'countdown' ? cfg.durationMs : 0);
+                _runWallStart[widgetId] = Date.now();
+                _runGameMs[widgetId] = startMs;
+                delete _breakWallStart[widgetId];
+                delete _breakGameMs[widgetId];
                 updateWidgetConfig(widgetId, {
                   inBreak: false,
                   breakCurrentMs: 0,
                   currentPeriod: nextPeriod,
-                  running: false,
+                  currentMs: startMs,
+                  periodStartMs: cfg.resumePeriodStartMs ?? 0,
+                  resumeMs: null,
+                  resumePeriodStartMs: null,
                 });
                 if (client && cfg.breakVmixInputKey && cfg.breakFieldName) {
                   client.setTextField(cfg.breakVmixInputKey, cfg.breakFieldName, formatTime(0, cfg.format));
                 }
+                timerSendAll(client, { ...cfg, inBreak: false, currentPeriod: nextPeriod }, formatTime(startMs, cfg.format));
                 sendMiniTimer(client, cfg, 0);
               } else {
                 updateWidgetConfig(widgetId, { breakCurrentMs: nextBreak });
                 if (client && cfg.breakVmixInputKey && cfg.breakFieldName) {
                   client.setTextField(cfg.breakVmixInputKey, cfg.breakFieldName, formatTime(nextBreak, cfg.format));
                 }
+                // Also push through the main vmixInputs targets so the period
+                // label field ("Half Time") stays live-refreshed during the
+                // break, not just at the moment the break started.
+                timerSendAll(client, cfg, formatTime(nextBreak, cfg.format));
                 sendMiniTimer(client, cfg, nextBreak);
               }
               return;
@@ -1188,22 +1271,28 @@ export const useCanvasStore = create<CanvasStore>()(
           if (_isTauriApp) {
             // Rust 100ms ticks drive this timer; set wall-clock anchor so the
             // tick handler can compute accurate game time even after sleep.
-            // Break and Final Play each need their own counter anchored to their
-            // own starting value, not the game clock.
-            let startMs: number;
+            // Break has its own anchor slot (_breakWallStart/_breakGameMs),
+            // separate from the main clock's, so resuming a manually-paused
+            // break can never clobber or be clobbered by the main timer's anchor.
             if (config.inBreak) {
-              startMs = config.breakCurrentMs ?? 0;
-            } else if (config.inFinalPlay) {
-              startMs = config.finalPlayMs ?? 0;
-            } else if (config.inExtraTime) {
-              startMs = config.etCurrentMs ?? 0;
-            } else if (config.resumeMs !== undefined && config.resumeMs !== null) {
-              startMs = config.resumeMs;
+              _breakWallStart[widgetId] = Date.now();
+              _breakGameMs[widgetId] = config.breakCurrentMs ?? 0;
             } else {
-              startMs = config.currentMs;
+              let startMs: number;
+              if (config.inFinalPlay) {
+                startMs = config.finalPlayMs ?? 0;
+              } else if (config.inExtraTime && config.etInBreak) {
+                startMs = config.etBreakCurrentMs ?? 0;
+              } else if (config.inExtraTime) {
+                startMs = config.etCurrentMs ?? 0;
+              } else if (config.resumeMs !== undefined && config.resumeMs !== null) {
+                startMs = config.resumeMs;
+              } else {
+                startMs = config.currentMs;
+              }
+              _runWallStart[widgetId] = Date.now();
+              _runGameMs[widgetId] = startMs;
             }
-            _runWallStart[widgetId] = Date.now();
-            _runGameMs[widgetId] = startMs;
             _lastTickAt[widgetId] = Date.now();
           } else {
             // Browser mode: keep using Web Worker
@@ -1218,23 +1307,74 @@ export const useCanvasStore = create<CanvasStore>()(
 
         pauseWidgetTimer: (widgetId) => {
           syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'pauseWidgetTimer', args: [widgetId] });
-          // Snapshot accurate wall-clock time before stopping the tick source
-          const wallStart = _runWallStart[widgetId];
-          const gameStart = _runGameMs[widgetId];
+          // Snapshot accurate wall-clock time before stopping the tick source.
+          // Each phase has its own anchor + config field to patch — using the
+          // wrong one (e.g. always writing currentMs) previously corrupted
+          // whichever phase wasn't the main clock when pausing mid-break/ET/etc.
           const cfg = findWidgetConfig(widgetId);
           let pausePatch: Record<string, any> = { running: false };
-          if (cfg && wallStart !== undefined && gameStart !== undefined) {
-            const elapsed = Date.now() - wallStart;
-            const pausedMs = cfg.mode === 'countdown'
-              ? Math.max(0, gameStart - elapsed)
-              : gameStart + elapsed;
-            pausePatch = { running: false, currentMs: pausedMs };
+          if (cfg) {
+            if (cfg.inBreak) {
+              const wallStart = _breakWallStart[widgetId];
+              const gameStart = _breakGameMs[widgetId];
+              if (wallStart !== undefined && gameStart !== undefined) {
+                const elapsed = Date.now() - wallStart;
+                const breakDurationMs = cfg.breakDurationMs ?? 0;
+                const pausedMs = cfg.breakCountMode === 'up'
+                  ? Math.min(breakDurationMs, gameStart + elapsed)
+                  : Math.max(0, gameStart - elapsed);
+                pausePatch = { running: false, breakCurrentMs: pausedMs };
+              }
+            } else if (cfg.inFinalPlay) {
+              const wallStart = _runWallStart[widgetId];
+              const gameStart = _runGameMs[widgetId];
+              if (wallStart !== undefined && gameStart !== undefined) {
+                pausePatch = { running: false, finalPlayMs: gameStart + (Date.now() - wallStart) };
+              }
+            } else if (cfg.inAfterEt) {
+              const wallStart = _runWallStart[widgetId];
+              const gameStart = _runGameMs[widgetId];
+              if (wallStart !== undefined && gameStart !== undefined) {
+                const elapsed = Date.now() - wallStart;
+                const pausedMs = cfg.mode === 'countdown' ? Math.max(0, gameStart - elapsed) : gameStart + elapsed;
+                pausePatch = { running: false, afterEtCurrentMs: pausedMs };
+              }
+            } else if (cfg.inExtraTime && cfg.etInBreak) {
+              const wallStart = _runWallStart[widgetId];
+              const gameStart = _runGameMs[widgetId];
+              if (wallStart !== undefined && gameStart !== undefined) {
+                const elapsed = Date.now() - wallStart;
+                const etBreakDurationMs = cfg.etBreakDurationMs ?? 0;
+                const pausedMs = cfg.breakCountMode === 'up'
+                  ? Math.min(etBreakDurationMs, gameStart + elapsed)
+                  : Math.max(0, gameStart - elapsed);
+                pausePatch = { running: false, etBreakCurrentMs: pausedMs };
+              }
+            } else if (cfg.inExtraTime) {
+              const wallStart = _runWallStart[widgetId];
+              const gameStart = _runGameMs[widgetId];
+              if (wallStart !== undefined && gameStart !== undefined) {
+                const elapsed = Date.now() - wallStart;
+                const pausedMs = cfg.mode === 'countdown' ? Math.max(0, gameStart - elapsed) : gameStart + elapsed;
+                pausePatch = { running: false, etCurrentMs: pausedMs };
+              }
+            } else {
+              const wallStart = _runWallStart[widgetId];
+              const gameStart = _runGameMs[widgetId];
+              if (wallStart !== undefined && gameStart !== undefined) {
+                const elapsed = Date.now() - wallStart;
+                const pausedMs = cfg.mode === 'countdown' ? Math.max(0, gameStart - elapsed) : gameStart + elapsed;
+                pausePatch = { running: false, currentMs: pausedMs };
+              }
+            }
           }
           // Stop tick source
           if (!_isTauriApp) timerWorker.postMessage({ type: 'stop', widgetId });
           delete timerTickHandlers[widgetId];
           delete _runWallStart[widgetId];
           delete _runGameMs[widgetId];
+          delete _breakWallStart[widgetId];
+          delete _breakGameMs[widgetId];
           delete _lastTickAt[widgetId];
           delete _tickMsMap[widgetId];
           const ints = { ...get().timerIntervals };
@@ -1275,11 +1415,18 @@ export const useCanvasStore = create<CanvasStore>()(
           const config = findWidgetConfig(widgetId);
           if (!config) return;
 
-          // Re-anchor the wall-clock so the next Tauri tick doesn't overwrite the jump
-          const reanchor = (next: number) => {
+          // Re-anchor the wall-clock so the next Tauri tick doesn't overwrite
+          // the jump. Break uses its own anchor slot (_breakWallStart/
+          // _breakGameMs), separate from the main clock's — see pauseWidgetTimer.
+          const reanchor = (next: number, useBreakAnchor = false) => {
             if (config.running && _isTauriApp) {
-              _runGameMs[widgetId] = next;
-              _runWallStart[widgetId] = Date.now();
+              if (useBreakAnchor) {
+                _breakGameMs[widgetId] = next;
+                _breakWallStart[widgetId] = Date.now();
+              } else {
+                _runGameMs[widgetId] = next;
+                _runWallStart[widgetId] = Date.now();
+              }
             }
           };
 
@@ -1304,7 +1451,7 @@ export const useCanvasStore = create<CanvasStore>()(
           } else if (config.inBreak) {
             const next = Math.max(0, (config.breakCurrentMs ?? 0) + deltaMs);
             updateWidgetConfig(widgetId, { breakCurrentMs: next });
-            reanchor(next);
+            reanchor(next, true);
           } else {
             const next = Math.max(0, config.currentMs + deltaMs);
             updateWidgetConfig(widgetId, { currentMs: next });
@@ -1368,7 +1515,7 @@ export const useCanvasStore = create<CanvasStore>()(
             if (pendingNext) {
               const breakMs = cfg.breakDurationMs ?? 0;
               if (breakMs > 0) {
-                updateWidgetConfig(widgetId, { ...base, inBreak: true, breakCurrentMs: breakMs });
+                updateWidgetConfig(widgetId, { ...base, inBreak: true, breakCurrentMs: cfg.breakCountMode === 'up' ? 0 : breakMs });
               } else {
                 updateWidgetConfig(widgetId, {
                   ...base,
@@ -1406,7 +1553,7 @@ export const useCanvasStore = create<CanvasStore>()(
                 updateWidgetConfig(widgetId, {
                   etOverrunning: false, running: false,
                   etCurrentMs: nextEtMs, etPeriodStartMs: nextEtPeriodStartMs,
-                  etInBreak: true, etBreakCurrentMs: etBreakMs,
+                  etInBreak: true, etBreakCurrentMs: cfg.breakCountMode === 'up' ? 0 : etBreakMs,
                 });
               } else {
                 updateWidgetConfig(widgetId, {
@@ -1443,13 +1590,16 @@ export const useCanvasStore = create<CanvasStore>()(
                 currentMs: periodEndMs, resumeMs: nextCurrentMs,
                 resumePeriodStartMs: nextPeriodStartMs,
                 periodStartMs: nextPeriodStartMs,
-                inBreak: true, breakCurrentMs: breakMs,
+                inBreak: true, breakCurrentMs: cfg.breakCountMode === 'up' ? 0 : breakMs,
               });
             } else {
+              // No break — advance straight into the next period's actual
+              // starting value, not the previous period's frozen end value
+              // (which would double-count via (period-1)*duration + currentMs).
               updateWidgetConfig(widgetId, {
                 overrunning: false, running: false,
-                currentMs: periodEndMs, resumeMs: nextCurrentMs,
-                resumePeriodStartMs: nextPeriodStartMs,
+                currentMs: nextCurrentMs, resumeMs: null,
+                resumePeriodStartMs: null,
                 periodStartMs: nextPeriodStartMs,
                 currentPeriod: currentPeriod + 1, inBreak: false,
               });
@@ -1460,9 +1610,17 @@ export const useCanvasStore = create<CanvasStore>()(
             const fullTimeMs = cfg.mode === 'countdown' ? 0 : periods * cfg.durationMs;
             const fullTimeStr = formatTime(fullTimeMs, cfg.format ?? 'mm:ss');
             logToLinkedTimelines(widgetId, getPeriodEndLabel(periods, currentPeriod), fullTimeStr);
+            // See the matching comment in periodDone(): for count-up + reset
+            // mode the display re-adds (periods-1)*duration on top of
+            // currentMs, so currentMs must hold only the last period's local
+            // time here, not the grand total, or it double-counts (120
+            // instead of 80).
+            const currentMsAtFullTime = cfg.mode === 'countdown'
+              ? 0
+              : cfg.periodMode === 'continue' ? fullTimeMs : cfg.durationMs;
             updateWidgetConfig(widgetId, {
               overrunning: false, running: false,
-              currentMs: fullTimeMs,
+              currentMs: currentMsAtFullTime,
               currentPeriod: periods + 1,
             });
           }
@@ -1494,13 +1652,26 @@ export const useCanvasStore = create<CanvasStore>()(
           const nextPeriod = (config.currentPeriod ?? 1) + 1;
           const periods = config.periods ?? 1;
           logToLinkedTimelines(widgetId, getPeriodStartLabel(periods, nextPeriod), '');
-          // currentMs and periodStartMs already set correctly when entering break
+          // currentMs was frozen at the PREVIOUS period's end value when break
+          // started (to display "period ended at 40:00" during the break) —
+          // it was never reset to the next period's actual starting value.
+          // Left as-is, the display (currentPeriod-1)*duration + currentMs
+          // double-counts the elapsed period (e.g. 1*40 + 40 = 80 instead of
+          // 1*40 + 0 = 40). Apply the same startMs the auto-continue tick path
+          // uses, instead of deferring it to whenever Play is next pressed.
+          const startMs = config.resumeMs ?? (config.mode === 'countdown' ? config.durationMs : 0);
           updateWidgetConfig(widgetId, {
             inBreak: false,
             breakCurrentMs: 0,
             currentPeriod: nextPeriod,
+            currentMs: startMs,
+            periodStartMs: config.resumePeriodStartMs ?? 0,
+            resumeMs: null,
+            resumePeriodStartMs: null,
             running: false,
           });
+          const { client } = useVmixStore.getState();
+          timerSendAll(client, { ...config, inBreak: false, currentPeriod: nextPeriod }, formatTime(startMs, config.format));
         },
 
         startFinalPlay: (widgetId) => {
@@ -1594,7 +1765,10 @@ export const useCanvasStore = create<CanvasStore>()(
         resetWidgetScore: async (widgetId) => {
           const config = findWidgetConfig(widgetId);
           if (!config) return;
-          updateWidgetConfig(widgetId, { scoreA: 0, scoreB: 0 });
+          // Also clear scoreLog/cards — the center stat pill (tries/cards
+          // tally) is derived from them, so leaving them behind after a
+          // reset would show stale counts alongside a zeroed score.
+          updateWidgetConfig(widgetId, { scoreA: 0, scoreB: 0, scoreLog: [], cardsA: [], cardsB: [] });
           {
             const { client } = useVmixStore.getState();
             const targets = config.vmixInputs?.length

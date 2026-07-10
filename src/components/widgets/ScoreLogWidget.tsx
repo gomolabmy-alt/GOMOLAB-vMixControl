@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useContext } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useVmixStore } from '../../stores/vmixStore';
-import { useTournamentStore } from '../../stores/tournamentStore';
+import { useTeamDbStore } from '../../stores/teamDbStore';
 import { buildActionSummary } from '../../utils/scoreActions';
 
 interface Props {
@@ -64,7 +64,7 @@ export function ScoreLogWidget({ config }: Props) {
   const { pages } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { getClient, vmixSyncVersion } = useVmixStore();
-  const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
   const [activeHighlightKey, setActiveHighlightKey] = useState('');
 
   const allWidgets = pages.flatMap(p => p.widgets);
@@ -113,9 +113,8 @@ export function ScoreLogWidget({ config }: Props) {
     const plWidgetId = row.team === 'A' ? sbCfg.linkedPlayerListA : sbCfg.linkedPlayerListB;
     const plWidget = plWidgetId ? allWidgets.find(w => w.id === plWidgetId) : null;
     const plCfg = plWidget?.config ?? {};
-    const tournament = tournaments.find(t => t.id === plCfg.linkedTournamentId);
     const side: 'A' | 'B' = plCfg.teamSide ?? row.team;
-    const teamData = side === 'A' ? tournament?.teamA : tournament?.teamB;
+    const teamData = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
     const player = teamData?.players?.find(
       (p: any) => (row.jerseyNo && p.jerseyNo === row.jerseyNo) || (row.scorer && p.name === row.scorer)
     );

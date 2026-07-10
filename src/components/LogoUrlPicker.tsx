@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { useTournamentStore } from '../stores/tournamentStore';
+import { useTeamDbStore } from '../stores/teamDbStore';
 import { resolveImageUrl } from '../lib/imageUrl';
 
 const isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -12,9 +12,15 @@ interface Props {
   placeholder?: string;
   /** Compact mode: shows a thumbnail button instead of a text input row */
   compact?: boolean;
+  /** Compact mode only: custom thumbnail content (e.g. a colored placeholder
+   *  box matching a team's color) instead of the default image/icon. Click
+   *  behavior (opens the picker) is unchanged. */
+  thumbContent?: React.ReactNode;
+  /** Compact mode only: size of the clickable thumbnail box, in px. */
+  thumbSize?: { w: number; h: number };
 }
 
-export function LogoUrlPicker({ value, onChange, placeholder, compact }: Props) {
+export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbContent, thumbSize }: Props) {
   const [showLibrary, setShowLibrary] = useState(false);
   const [images, setImages] = useState<ImageInfo[]>([]);
   const [loading, setLoading] = useState(false);
@@ -121,22 +127,25 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact }: Props) 
   );
 
   if (compact) {
+    const w = thumbSize?.w ?? 48;
+    const h = thumbSize?.h ?? 36;
     return (
       <div ref={anchorRef} style={{ position: 'relative', display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <div
           className="tm-team-logo-thumb-wrap"
           onClick={() => setShowLibrary(v => !v)}
-          style={{ cursor: 'pointer', position: 'relative', width: 48, height: 36,
+          style={thumbContent ? { cursor: 'pointer', position: 'relative', width: w, height: h, overflow: 'hidden' } : {
+            cursor: 'pointer', position: 'relative', width: w, height: h,
             border: '1px dashed var(--border)', borderRadius: 4, background: '#111',
             display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}
           title={value ? 'Change logo' : 'Pick logo'}
         >
-          {value
+          {thumbContent ?? (value
             ? <img src={resolveImageUrl(value)} alt="logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
             : <span style={{ fontSize: 18, opacity: 0.4 }}>🖼</span>
-          }
+          )}
         </div>
-        {value && (
+        {value && !thumbContent && (
           <button className="tm-team-logo-clear" title="Remove logo" onClick={() => onChange('')}>×</button>
         )}
         <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileChange} />
@@ -182,7 +191,7 @@ interface DbPickerProps {
 }
 
 export function LogoDbPicker({ value, onChange, quickUrls = [] }: DbPickerProps) {
-  const { tournaments } = useTournamentStore();
+  const { teams } = useTeamDbStore();
   const [open, setOpen] = useState(false);
   const popupRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
@@ -199,9 +208,8 @@ export function LogoDbPicker({ value, onChange, quickUrls = [] }: DbPickerProps)
 
   // Collect all team logos from the database
   const dbLogos: Array<{ label: string; url: string }> = [];
-  for (const t of tournaments) {
-    if (t.teamA.logo) dbLogos.push({ label: `${t.teamA.name} (${t.name})`, url: t.teamA.logo });
-    if (t.teamB.logo) dbLogos.push({ label: `${t.teamB.name} (${t.name})`, url: t.teamB.logo });
+  for (const t of teams) {
+    if (t.logo) dbLogos.push({ label: t.name, url: t.logo });
   }
 
   const allOptions = [

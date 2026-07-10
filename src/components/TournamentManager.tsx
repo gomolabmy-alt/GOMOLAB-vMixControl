@@ -1,10 +1,14 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useTournamentStore } from '../stores/tournamentStore';
 import { useCanvasStore } from '../stores/canvasStore';
 import type { Tournament, SportType } from '../types/tournament';
 import { SPORT_LABELS, SPORT_POSITIONS, SPORT_DEFAULTS } from '../types/tournament';
 import type { Player } from '../types/tournament';
 import { LogoUrlPicker } from './LogoUrlPicker';
+import { useTeamDbStore } from '../stores/teamDbStore';
+import { useMatchScheduleStore } from '../stores/matchScheduleStore';
+import { useMatchResultsStore } from '../stores/matchResultsStore';
+import { resolveImageUrl } from '../lib/imageUrl';
 
 // ── Import / Export helpers ───────────────────────────────────────────────────
 
@@ -67,17 +71,11 @@ function AddTournamentForm({ onDone }: { onDone: (id: string) => void }) {
   const { addTournament } = useTournamentStore();
   const [name, setName] = useState('');
   const [sport, setSport] = useState<SportType>('football');
-  const [teamAName, setTeamAName] = useState('');
-  const [teamBName, setTeamBName] = useState('');
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
-    const id = addTournament({
-      name: name.trim(), sport,
-      teamAName: teamAName.trim() || 'Team A',
-      teamBName: teamBName.trim() || 'Team B',
-    });
+    const id = addTournament({ name: name.trim(), sport });
     onDone(id);
   };
 
@@ -96,14 +94,6 @@ function AddTournamentForm({ onDone }: { onDone: (id: string) => void }) {
             {SPORT_TYPES.map(s => <option key={s} value={s}>{SPORT_LABELS[s]}</option>)}
           </select>
         </div>
-        <div className="tm-form-row">
-          <label className="tm-form-label">Team A</label>
-          <input className="tm-input" placeholder="Team A name" value={teamAName} onChange={e => setTeamAName(e.target.value)} />
-        </div>
-        <div className="tm-form-row">
-          <label className="tm-form-label">Team B</label>
-          <input className="tm-input" placeholder="Team B name" value={teamBName} onChange={e => setTeamBName(e.target.value)} />
-        </div>
         <div className="tm-form-actions">
           <button className="tm-btn tm-btn--primary" type="submit" disabled={!name.trim()}>
             Create Tournament
@@ -115,20 +105,18 @@ function AddTournamentForm({ onDone }: { onDone: (id: string) => void }) {
 }
 
 // ── Player row ────────────────────────────────────────────────────────────────
-function PlayerRow({ player, tournamentId, side, sport, onDelete }: {
-  player: Player; tournamentId: string; side: 'A' | 'B';
-  sport: SportType; onDelete: () => void;
+function PlayerRow({ player, sport, onUpdate, onDelete }: {
+  player: Player; sport: SportType;
+  onUpdate: (patch: Partial<Omit<Player, 'id'>>) => void;
+  onDelete: () => void;
 }) {
-  const { updatePlayer } = useTournamentStore();
   const [editing, setEditing] = useState(false);
   const [jersey, setJersey] = useState(player.jerseyNo);
   const [name, setName] = useState(player.name);
   const [pos, setPos] = useState(player.position);
 
   const save = () => {
-    updatePlayer(tournamentId, side, player.id, {
-      jerseyNo: jersey.trim(), name: name.trim() || player.name, position: pos.trim(),
-    });
+    onUpdate({ jerseyNo: jersey.trim(), name: name.trim() || player.name, position: pos.trim() });
     setEditing(false);
   };
 
@@ -169,10 +157,9 @@ function PlayerRow({ player, tournamentId, side, sport, onDelete }: {
 }
 
 // ── Add-player row ────────────────────────────────────────────────────────────
-function AddPlayerRow({ tournamentId, side, sport }: {
-  tournamentId: string; side: 'A' | 'B'; sport: SportType;
+function AddPlayerRow({ sport, onAdd }: {
+  sport: SportType; onAdd: (p: Omit<Player, 'id'>) => void;
 }) {
-  const { addPlayer } = useTournamentStore();
   const [jersey, setJersey] = useState('');
   const [name, setName] = useState('');
   const [pos, setPos] = useState('');
@@ -180,7 +167,7 @@ function AddPlayerRow({ tournamentId, side, sport }: {
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
-    addPlayer(tournamentId, side, { jerseyNo: jersey.trim(), name: name.trim(), position: pos.trim() });
+    onAdd({ jerseyNo: jersey.trim(), name: name.trim(), position: pos.trim() });
     setJersey(''); setName(''); setPos('');
   };
 
@@ -194,8 +181,8 @@ function AddPlayerRow({ tournamentId, side, sport }: {
         onChange={e => setName(e.target.value)} placeholder="Player name…" />
       <input className="tm-pl-cell tm-pl-cell--pos tm-input" value={pos}
         onChange={e => setPos(e.target.value)} placeholder="Pos"
-        list={`pos-add-${side}`} />
-      <datalist id={`pos-add-${side}`}>
+        list="pos-add-team" />
+      <datalist id="pos-add-team">
         {positions.map(p => <option key={p} value={p} />)}
       </datalist>
       <div className="tm-pl-cell tm-pl-cell--actions">
@@ -304,23 +291,36 @@ function SettingsBar({ tournament, onApply }: { tournament: Tournament; onApply:
   );
 }
 
-// ── Team column ───────────────────────────────────────────────────────────────
 interface ImportPreview { players: Omit<Player, 'id'>[]; }
 
-function TeamColumn({ tournament, side }: { tournament: Tournament; side: 'A' | 'B' }) {
-  const { updateTeam, deletePlayer, addPlayer, replaceTeamPlayers } = useTournamentStore();
-  const team = side === 'A' ? tournament.teamA : tournament.teamB;
-  const [editName, setEditName] = useState(false);
-  const [nameVal, setNameVal] = useState(team.name);
-  const [shortVal, setShortVal] = useState(team.shortName ?? '');
+// ── Players tab: manage a team's roster, scoped to the selected tournament ────
+function PlayersPanel({ tournamentId }: { tournamentId: string }) {
+  const { teams: allTeams, addPlayer, updatePlayer, deletePlayer, replaceTeamPlayers } = useTeamDbStore();
+  const teams = useMemo(() => allTeams.filter(t => t.tournamentId === tournamentId), [allTeams, tournamentId]);
+  const [selectedTeamId, setSelectedTeamId] = useState(teams[0]?.id ?? '');
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const sorted = [...team.players].sort((a, b) => {
+  useEffect(() => {
+    if (!teams.find(t => t.id === selectedTeamId)) setSelectedTeamId(teams[0]?.id ?? '');
+  }, [teams, selectedTeamId]);
+
+  if (teams.length === 0) {
+    return (
+      <div className="tm-win-content" style={{ padding: 16 }}>
+        <div className="tm-win-placeholder">
+          <span>No teams in this tournament yet — add one in the 👥 Teams tab first, then manage its roster here.</span>
+        </div>
+      </div>
+    );
+  }
+
+  const team = teams.find(t => t.id === selectedTeamId);
+  const sorted = team ? [...team.players].sort((a, b) => {
     const n1 = parseInt(a.jerseyNo) || 999;
     const n2 = parseInt(b.jerseyNo) || 999;
     return n1 !== n2 ? n1 - n2 : a.name.localeCompare(b.name);
-  });
+  }) : [];
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -337,149 +337,521 @@ function TeamColumn({ tournament, side }: { tournament: Tournament; side: 'A' | 
   };
 
   const confirmImport = (mode: 'replace' | 'append') => {
-    if (!importPreview) return;
+    if (!importPreview || !team) return;
     if (mode === 'replace') {
-      replaceTeamPlayers(tournament.id, side, importPreview.players);
+      replaceTeamPlayers(team.id, importPreview.players);
     } else {
-      importPreview.players.forEach(p => addPlayer(tournament.id, side, p));
+      importPreview.players.forEach(p => addPlayer(team.id, p));
     }
     setImportPreview(null);
   };
 
   return (
-    <div className="tm-team-col">
-      {/* Team header */}
-      <div className="tm-team-col-header" style={{ '--tc': team.color } as React.CSSProperties}>
-        <input
-          type="color"
-          className="tm-color-swatch"
-          value={team.color}
-          title="Team color"
-          onChange={e => updateTeam(tournament.id, side, { color: e.target.value })}
-        />
-        <div className="tm-team-logo-wrap">
-          <LogoUrlPicker
-            compact
-            value={team.logo ?? ''}
-            onChange={url => updateTeam(tournament.id, side, { logo: url || undefined })}
-          />
+    <div className="tm-win-body">
+      {/* Left: team list */}
+      <div className="tm-win-sidebar">
+        <div className="tm-sidebar-list">
+          {teams.map(t => (
+            <div
+              key={t.id}
+              className={`tm-tourn-item ${t.id === selectedTeamId ? 'tm-tourn-item--active' : ''}`}
+              onClick={() => setSelectedTeamId(t.id)}
+            >
+              <span className="tm-tourn-sport-tag">{t.players.length} player{t.players.length !== 1 ? 's' : ''}</span>
+              <span className="tm-tourn-item-name">{t.name}</span>
+            </div>
+          ))}
         </div>
-        <div className="tm-team-name-wrap">
-          {editName ? (
-            <input
-              className="tm-team-name-edit"
-              value={nameVal}
-              autoFocus
-              onChange={e => setNameVal(e.target.value)}
-              onBlur={() => {
-                updateTeam(tournament.id, side, { name: nameVal.trim() || team.name });
-                setEditName(false);
-              }}
-              onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-            />
-          ) : (
-            <span className="tm-team-col-name" onClick={() => { setNameVal(team.name); setEditName(true); }}>
-              {team.name}
-            </span>
-          )}
-          <input
-            className="tm-team-shortname"
-            value={shortVal}
-            placeholder="Short"
-            title="Short name (e.g. MCI, LIV)"
-            onChange={e => setShortVal(e.target.value)}
-            onBlur={() => updateTeam(tournament.id, side, { shortName: shortVal.trim() })}
-            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-          />
-        </div>
-        <span className="tm-team-col-count">{team.players.length}</span>
       </div>
 
-      {/* Import / Export toolbar */}
-      <div className="tm-io-bar">
-        <button
-          className="tm-io-btn"
-          title="Import players from CSV / TSV / TXT"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          ↑ Import
-        </button>
-        <button
-          className="tm-io-btn"
-          title="Export players as CSV (Excel compatible)"
-          onClick={() => exportTeamCSV(team.players, team.name)}
-          disabled={team.players.length === 0}
-        >
-          ↓ Export CSV
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".csv,.tsv,.txt"
-          style={{ display: 'none' }}
-          onChange={handleFileChange}
-        />
-      </div>
-
-      {/* Import preview */}
-      {importPreview && (
-        <div className="tm-import-preview">
-          <div className="tm-import-preview-title">
-            Found <strong>{importPreview.players.length}</strong> players
-          </div>
-          <div className="tm-import-preview-list">
-            {importPreview.players.slice(0, 5).map((p, i) => (
-              <div key={i} className="tm-import-preview-row">
-                <span className="tm-import-preview-jersey">{p.jerseyNo || '—'}</span>
-                <span className="tm-import-preview-name">{p.name}</span>
-                {p.position && <span className="tm-import-preview-pos">{p.position}</span>}
+      {/* Right: roster */}
+      <div className="tm-win-content">
+        {team && (
+          <div className="tm-team-col">
+            <div className="tm-team-col-header" style={{ '--tc': team.color } as React.CSSProperties}>
+              <div className="tm-team-logo-wrap">
+                {team.logo
+                  ? <img src={resolveImageUrl(team.logo)} alt="" style={{ width: 32, height: 32, objectFit: 'contain', borderRadius: '50%' }} />
+                  : <div style={{ width: 32, height: 32, borderRadius: '50%', background: team.color }} />}
               </div>
-            ))}
-            {importPreview.players.length > 5 && (
-              <div className="tm-import-preview-more">+{importPreview.players.length - 5} more…</div>
+              <span className="tm-team-col-name">{team.name}</span>
+              <span className="tm-team-col-count">{team.players.length}</span>
+            </div>
+
+            {/* Import / Export toolbar */}
+            <div className="tm-io-bar">
+              <button className="tm-io-btn" title="Import players from CSV / TSV / TXT" onClick={() => fileInputRef.current?.click()}>
+                ↑ Import
+              </button>
+              <button
+                className="tm-io-btn"
+                title="Export players as CSV (Excel compatible)"
+                onClick={() => exportTeamCSV(team.players, team.name)}
+                disabled={team.players.length === 0}
+              >
+                ↓ Export CSV
+              </button>
+              <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt" style={{ display: 'none' }} onChange={handleFileChange} />
+            </div>
+
+            {/* Import preview */}
+            {importPreview && (
+              <div className="tm-import-preview">
+                <div className="tm-import-preview-title">
+                  Found <strong>{importPreview.players.length}</strong> players
+                </div>
+                <div className="tm-import-preview-list">
+                  {importPreview.players.slice(0, 5).map((p, i) => (
+                    <div key={i} className="tm-import-preview-row">
+                      <span className="tm-import-preview-jersey">{p.jerseyNo || '—'}</span>
+                      <span className="tm-import-preview-name">{p.name}</span>
+                      {p.position && <span className="tm-import-preview-pos">{p.position}</span>}
+                    </div>
+                  ))}
+                  {importPreview.players.length > 5 && (
+                    <div className="tm-import-preview-more">+{importPreview.players.length - 5} more…</div>
+                  )}
+                </div>
+                <div className="tm-import-preview-actions">
+                  <button className="tm-io-btn tm-io-btn--danger" onClick={() => confirmImport('replace')}>Replace all</button>
+                  <button className="tm-io-btn tm-io-btn--ok" onClick={() => confirmImport('append')}>Append</button>
+                  <button className="tm-io-btn" onClick={() => setImportPreview(null)}>Cancel</button>
+                </div>
+              </div>
             )}
+
+            {/* Column headers */}
+            <div className="tm-pl-header-row">
+              <span className="tm-pl-cell tm-pl-cell--jersey">#</span>
+              <span className="tm-pl-cell tm-pl-cell--name">Name</span>
+              <span className="tm-pl-cell tm-pl-cell--pos">Pos</span>
+              <span className="tm-pl-cell tm-pl-cell--actions" />
+            </div>
+
+            {/* Players */}
+            <div className="tm-pl-list">
+              {sorted.map(p => (
+                <PlayerRow
+                  key={p.id}
+                  player={p}
+                  sport="custom"
+                  onUpdate={patch => updatePlayer(team.id, p.id, patch)}
+                  onDelete={() => deletePlayer(team.id, p.id)}
+                />
+              ))}
+              {sorted.length === 0 && <div className="tm-pl-empty">No players — add below</div>}
+            </div>
+
+            {/* Add row pinned at bottom */}
+            <div className="tm-pl-add-footer">
+              <AddPlayerRow sport="custom" onAdd={p => addPlayer(team.id, p)} />
+            </div>
           </div>
-          <div className="tm-import-preview-actions">
-            <button className="tm-io-btn tm-io-btn--danger" onClick={() => confirmImport('replace')}>
-              Replace all
-            </button>
-            <button className="tm-io-btn tm-io-btn--ok" onClick={() => confirmImport('append')}>
-              Append
-            </button>
-            <button className="tm-io-btn" onClick={() => setImportPreview(null)}>
-              Cancel
-            </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Teams tab: teams belonging to the selected tournament (a competition can
+// hold any number of teams — pick 2 of them per fixture in the Schedule tab) ──
+function TeamsPanel({ tournamentId }: { tournamentId: string }) {
+  const { teams: allTeams, addTeam, updateTeam, deleteTeam } = useTeamDbStore();
+  const teams = useMemo(() => allTeams.filter(t => t.tournamentId === tournamentId), [allTeams, tournamentId]);
+
+  const handleAdd = () => {
+    addTeam({ name: 'New Team', color: '#3498db', tournamentId });
+  };
+
+  if (teams.length === 0) {
+    return (
+      <div className="tm-win-content" style={{ padding: 16 }}>
+        <div className="tm-win-placeholder">
+          <span>No teams in this tournament yet.</span>
+        </div>
+        <button className="tm-sidebar-new-btn" style={{ marginTop: 12 }} onClick={handleAdd}>＋ Add Team</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <button className="tm-sidebar-new-btn" onClick={handleAdd}>＋ Add Team</button>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
+        {teams.map(t => (
+          <div key={t.id} style={{
+            display: 'flex', alignItems: 'center', gap: 10, padding: 10,
+            background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8,
+          }}>
+            <LogoUrlPicker
+              compact
+              value={t.logo ?? ''}
+              onChange={logo => updateTeam(t.id, { logo })}
+              thumbSize={{ w: 44, h: 44 }}
+            />
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <input
+                className="tm-input"
+                value={t.name}
+                placeholder="Team name"
+                onChange={e => updateTeam(t.id, { name: e.target.value })}
+                style={{ fontSize: 12 }}
+              />
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <input
+                  className="tm-input"
+                  value={t.shortName ?? ''}
+                  placeholder="Short"
+                  onChange={e => updateTeam(t.id, { shortName: e.target.value })}
+                  style={{ fontSize: 11, width: 60 }}
+                />
+                <input
+                  type="color"
+                  value={t.color}
+                  title="Team color"
+                  onChange={e => updateTeam(t.id, { color: e.target.value })}
+                  style={{ width: 24, height: 24, padding: 0, border: 'none', background: 'none', cursor: 'pointer' }}
+                />
+              </div>
+            </div>
+            <button
+              className="btn btn--ghost btn--small"
+              title="Delete team"
+              onClick={() => deleteTeam(t.id)}
+              style={{ color: 'var(--text-muted)', alignSelf: 'flex-start' }}
+            >×</button>
           </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Schedule tab: upcoming fixtures, pickable from a scoreboard's "Load Match" ─
+// Redesigned to match a fixture-card reference (sportyblocks-style): no bordered
+// input boxes — every text field is a plain label that becomes editable on
+// double-click, matching the clean list-of-cards look.
+
+function getTzAbbrev(): string {
+  const parts = new Date().toLocaleTimeString('en-US', { timeZoneName: 'short' }).split(' ');
+  return parts[parts.length - 1] || '';
+}
+
+function formatTimeDisplay(time?: string): string {
+  if (!time) return '—';
+  const m = time.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return time;
+  let h = parseInt(m[1], 10);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12; if (h === 0) h = 12;
+  return `${h}:${m[2]}${ampm}`;
+}
+
+function ScheduleTeamPicker({ side, tournamentId, onPick }: {
+  side: 'A' | 'B'; tournamentId?: string;
+  onPick: (t: { name: string; shortName?: string; color: string; logo?: string }) => void;
+}) {
+  const { teams: allTeams } = useTeamDbStore();
+  const teams = useMemo(() => tournamentId ? allTeams.filter(t => t.tournamentId === tournamentId) : allTeams, [allTeams, tournamentId]);
+  const [open, setOpen] = useState(false);
+  const popupRef = useRef<HTMLDivElement>(null);
+  const anchorRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (popupRef.current && !popupRef.current.contains(e.target as Node) &&
+          anchorRef.current && !anchorRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-flex' }}>
+      <button ref={anchorRef} className="tm-sched-pick-btn" title={`Pick saved team for side ${side}`}
+        onClick={() => setOpen(v => !v)}>👥</button>
+      {open && (
+        <div ref={popupRef} style={{
+          position: 'absolute', top: '100%', left: 0, zIndex: 400, marginTop: 4, minWidth: 180, maxHeight: 220,
+          overflowY: 'auto', background: 'var(--bg-1)', border: '1px solid var(--border)', borderRadius: 6,
+          boxShadow: '0 4px 16px rgba(0,0,0,.5)',
+        }}>
+          {teams.length === 0 ? (
+            <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-muted)' }}>No saved teams</div>
+          ) : teams.map(t => (
+            <div key={t.id} onClick={() => { onPick(t); setOpen(false); }}
+              style={{ padding: '5px 8px', fontSize: 11, cursor: 'pointer', color: 'var(--text-secondary)',
+                borderBottom: '1px solid var(--border)' }}>{t.name}</div>
+          ))}
         </div>
       )}
+    </div>
+  );
+}
 
-      {/* Column headers */}
-      <div className="tm-pl-header-row">
-        <span className="tm-pl-cell tm-pl-cell--jersey">#</span>
-        <span className="tm-pl-cell tm-pl-cell--name">Name</span>
-        <span className="tm-pl-cell tm-pl-cell--pos">Pos</span>
-        <span className="tm-pl-cell tm-pl-cell--actions" />
+// Plain label that turns into an <input> on double-click, and commits on blur/Enter.
+function EditableText({ value, onChange, placeholder, className }: {
+  value: string; onChange: (v: string) => void; placeholder?: string; className?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const ref = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) requestAnimationFrame(() => { ref.current?.focus(); ref.current?.select(); });
+  }, [editing]);
+
+  const commit = () => { setEditing(false); if (draft !== value) onChange(draft); };
+
+  if (editing) {
+    return (
+      <input
+        ref={ref}
+        className={`tm-sched-edit-input ${className ?? ''}`}
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') { setDraft(value); setEditing(false); }
+        }}
+      />
+    );
+  }
+
+  return (
+    <span className={`tm-sched-editable ${className ?? ''}`} onDoubleClick={() => { setDraft(value); setEditing(true); }} title="Double-click to edit">
+      {value || <span className="tm-sched-placeholder">{placeholder}</span>}
+    </span>
+  );
+}
+
+function EditableDate({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (editing) requestAnimationFrame(() => ref.current?.focus()); }, [editing]);
+
+  const d = value ? new Date(value + 'T00:00:00') : null;
+  const valid = !!d && !isNaN(d.getTime());
+
+  if (editing) {
+    return (
+      <input ref={ref} type="date" className="tm-sched-date-input" value={value}
+        onChange={e => onChange(e.target.value)}
+        onBlur={() => setEditing(false)}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') setEditing(false); }}
+      />
+    );
+  }
+  return (
+    <div className="tm-sched-date" onDoubleClick={() => setEditing(true)} title="Double-click to change date">
+      <span className="tm-sched-date-num">{valid ? d!.getDate() : '—'}</span>
+      <span className="tm-sched-date-dow">{valid ? d!.toLocaleDateString('en-US', { weekday: 'short' }) : ''}</span>
+    </div>
+  );
+}
+
+function EditableTime({ value, onChange }: { value?: string; onChange: (v: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (editing) requestAnimationFrame(() => ref.current?.focus()); }, [editing]);
+  const tz = useMemo(getTzAbbrev, []);
+
+  if (editing) {
+    return (
+      <input ref={ref} type="time" className="tm-sched-time-input" value={value ?? ''}
+        onChange={e => onChange(e.target.value)}
+        onBlur={() => setEditing(false)}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') setEditing(false); }}
+      />
+    );
+  }
+  return (
+    <div className="tm-sched-time" onDoubleClick={() => setEditing(true)} title="Double-click to change time">
+      <span className="tm-sched-time-val">{formatTimeDisplay(value)}</span>
+      <span className="tm-sched-time-tz">{value ? tz : ''}</span>
+    </div>
+  );
+}
+
+function ScheduleBadge({ logo, color }: { logo?: string; color: string }) {
+  return (
+    <div className="tm-sched-badge" style={{ background: logo ? 'transparent' : color }}>
+      {logo && <img src={resolveImageUrl(logo)} alt="" className="tm-sched-badge-img" />}
+    </div>
+  );
+}
+
+function SchedulePanel({ tournament }: { tournament: Tournament }) {
+  const { matches: allMatches, addMatch, updateMatch, deleteMatch } = useMatchScheduleStore();
+  const matches = useMemo(
+    () => allMatches.filter(m => m.tournamentId === tournament.id),
+    [allMatches, tournament.id]
+  );
+
+  // Fixtures always show the CURRENT tournament name — keep the stored
+  // `competition` field in sync (it's what downstream widgets/results read)
+  // so renaming the tournament doesn't leave stale fixtures behind.
+  useEffect(() => {
+    for (const m of matches) {
+      if (m.competition !== tournament.name) updateMatch(m.id, { competition: tournament.name });
+    }
+  }, [tournament.name, matches, updateMatch]);
+
+  const handleAdd = () => {
+    const today = new Date();
+    const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    addMatch({
+      tournamentId: tournament.id, competition: tournament.name,
+      date: dateStr, teamAName: 'Team A', teamAColor: '#e74c3c', teamBName: 'Team B', teamBColor: '#3498db',
+    });
+  };
+
+  const groups = useMemo(() => {
+    const map = new Map<string, typeof matches>();
+    for (const m of matches) {
+      const d = new Date(m.date + 'T00:00:00');
+      const key = isNaN(d.getTime()) ? 'Unscheduled' : d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(m);
+    }
+    return Array.from(map.entries());
+  }, [matches]);
+
+  return (
+    <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <button className="tm-sidebar-new-btn" onClick={handleAdd}>＋ Add Fixture</button>
       </div>
+      {matches.length === 0 ? (
+        <div className="tm-win-placeholder">
+          <span>No fixtures in this tournament yet — add one here, then pick it from a scoreboard's "📅 Load Match" button.</span>
+        </div>
+      ) : (
+        groups.map(([label, rows]) => (
+          <div key={label} className="tm-sched-group">
+            <div className="tm-sched-group-title">{label}</div>
+            <div className="tm-sched-rows">
+              {rows.map(m => (
+                <div key={m.id} className="tm-sched-row">
+                  <EditableDate value={m.date} onChange={date => updateMatch(m.id, { date })} />
+                  <div className="tm-sched-divider" />
 
-      {/* Players */}
-      <div className="tm-pl-list">
-        {sorted.map(p => (
-          <PlayerRow
-            key={p.id}
-            player={p}
-            tournamentId={tournament.id}
-            side={side}
-            sport={tournament.sport}
-            onDelete={() => deletePlayer(tournament.id, side, p.id)}
-          />
+                  <div className="tm-sched-matchup">
+                    <div className="tm-sched-team">
+                      <LogoUrlPicker compact value={m.teamALogo ?? ''} onChange={logo => updateMatch(m.id, { teamALogo: logo })}
+                        thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamALogo} color={m.teamAColor} />} />
+                      <EditableText className="tm-sched-team-name" value={m.teamAName} placeholder="Team A"
+                        onChange={v => updateMatch(m.id, { teamAName: v })} />
+                      <ScheduleTeamPicker side="A" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamAName: t.name, teamAShortName: t.shortName, teamAColor: t.color, teamALogo: t.logo })} />
+                    </div>
+                    <span className="tm-sched-vs">VS</span>
+                    <div className="tm-sched-team tm-sched-team--b">
+                      <ScheduleTeamPicker side="B" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamBName: t.name, teamBShortName: t.shortName, teamBColor: t.color, teamBLogo: t.logo })} />
+                      <EditableText className="tm-sched-team-name" value={m.teamBName} placeholder="Team B"
+                        onChange={v => updateMatch(m.id, { teamBName: v })} />
+                      <LogoUrlPicker compact value={m.teamBLogo ?? ''} onChange={logo => updateMatch(m.id, { teamBLogo: logo })}
+                        thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamBLogo} color={m.teamBColor} />} />
+                    </div>
+                  </div>
+
+                  <div className="tm-sched-divider" />
+                  <div className="tm-sched-venue">
+                    <EditableText className="tm-sched-venue-name" value={m.venue ?? ''} placeholder="Venue"
+                      onChange={v => updateMatch(m.id, { venue: v })} />
+                    <span className="tm-sched-venue-league" title="Competition (follows this tournament's name)">{tournament.name}</span>
+                  </div>
+
+                  <div className="tm-sched-divider" />
+                  <div className="tm-sched-broadcaster">
+                    <EditableText className="tm-sched-broadcaster-name" value={m.broadcaster ?? ''} placeholder="Broadcaster"
+                      onChange={v => updateMatch(m.id, { broadcaster: v })} />
+                    <span className="tm-sched-broadcaster-label">Watch on</span>
+                  </div>
+
+                  <div className="tm-sched-divider" />
+                  <EditableTime value={m.time} onChange={time => updateMatch(m.id, { time })} />
+
+                  <button className="tm-sched-del" title="Delete fixture" onClick={() => deleteMatch(m.id)}>×</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+// ── Results tab: saved match results belonging to the selected tournament ─────
+// Populated by a scoreboard's "💾 Save Result" (or the auto-save-on-overwrite
+// guard) — this tab just surfaces what's already been recorded.
+function ResultsPanel({ tournamentId }: { tournamentId: string }) {
+  const { results: allResults, deleteResult } = useMatchResultsStore();
+  const results = useMemo(
+    () => allResults.filter(r => r.tournamentId === tournamentId),
+    [allResults, tournamentId]
+  );
+
+  if (results.length === 0) {
+    return (
+      <div className="tm-win-content" style={{ padding: 16 }}>
+        <div className="tm-win-placeholder">
+          <span>No saved results yet for this tournament — use "💾 Save Result" on a linked scoreboard widget.</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {results.map(r => (
+          <div key={r.id} style={{
+            display: 'flex', alignItems: 'center', gap: 10, padding: 10,
+            background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8,
+          }}>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)', width: 84, flexShrink: 0 }}>{r.date}</span>
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+              {r.teamALogo
+                ? <img src={resolveImageUrl(r.teamALogo)} alt="" style={{ width: 24, height: 24, objectFit: 'contain', borderRadius: '50%', flexShrink: 0 }} />
+                : <span style={{ width: 10, height: 10, borderRadius: '50%', background: r.teamAColor, flexShrink: 0 }} />}
+              <span style={{ fontSize: 12, fontWeight: r.scoreA > r.scoreB ? 700 : 400, color: 'var(--text-primary)' }}>
+                {r.teamAShortName || r.teamAName}
+              </span>
+              <strong style={{ fontSize: 13, color: 'var(--text-primary)' }}>{r.scoreA} – {r.scoreB}</strong>
+              <span style={{ fontSize: 12, fontWeight: r.scoreB > r.scoreA ? 700 : 400, color: 'var(--text-primary)' }}>
+                {r.teamBShortName || r.teamBName}
+              </span>
+              {r.teamBLogo
+                ? <img src={resolveImageUrl(r.teamBLogo)} alt="" style={{ width: 24, height: 24, objectFit: 'contain', borderRadius: '50%', flexShrink: 0 }} />
+                : <span style={{ width: 10, height: 10, borderRadius: '50%', background: r.teamBColor, flexShrink: 0 }} />}
+            </div>
+            {r.round && <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>{r.round}</span>}
+            <button className="btn btn--ghost btn--small" title="Delete result"
+              onClick={() => deleteResult(r.id)} style={{ color: 'var(--text-muted)', flexShrink: 0 }}>×</button>
+          </div>
         ))}
-        {sorted.length === 0 && <div className="tm-pl-empty">No players — add below</div>}
       </div>
+    </div>
+  );
+}
 
-      {/* Add row pinned at bottom */}
-      <div className="tm-pl-add-footer">
-        <AddPlayerRow tournamentId={tournament.id} side={side} sport={tournament.sport} />
-      </div>
+// ── Small persistent tournament picker shown atop tournament-scoped tabs ──────
+function TournamentScopeHeader({ tournaments, selectedId, onSelect }: {
+  tournaments: Tournament[]; selectedId: string; onSelect: (id: string) => void;
+}) {
+  return (
+    <div className="tm-scope-header">
+      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>🏆 Tournament:</span>
+      <select className="tm-input" style={{ fontSize: 12, maxWidth: 260, flex: 'none' }}
+        value={selectedId} onChange={e => onSelect(e.target.value)}>
+        {tournaments.length === 0 && <option value="">— none —</option>}
+        {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+      </select>
     </div>
   );
 }
@@ -521,104 +893,68 @@ export function TournamentManager({ onClose }: Props) {
   const [editTournName, setEditTournName] = useState(false);
   const [tournNameVal, setTournNameVal] = useState('');
   const [applyStatus, setApplyStatus] = useState('');
+  const [tab, setTab] = useState<'tournaments' | 'teams' | 'players' | 'schedule' | 'results'>('tournaments');
+  const { teams } = useTeamDbStore();
+  const { matches: scheduledMatches } = useMatchScheduleStore();
+  const { results: savedResults } = useMatchResultsStore();
 
+  // Apply-to-Canvas now only resets a linked TIMER's period/duration/mode —
+  // team/roster population for scoreboards and player-lists happens per-fixture
+  // (Schedule tab's "Send to Scoreboard", and each widget's own 👥 team picker)
+  // since a tournament can hold many teams, not a fixed Team A/B pair.
   const applyToCanvas = () => {
     if (!selected) return;
     const s = selected.settings ?? SPORT_DEFAULTS[selected.sport];
     const allWidgets = pages.flatMap(p => p.widgets);
     const linkedTimerIds = new Set<string>();
-    const linkedScoreboardIds = new Set<string>();
     let count = 0;
 
-    // Pass 1: all widgets directly linked to this tournament
     allWidgets.forEach(w => {
       if (w.config.linkedTournamentId !== selected.id) return;
+      if (w.type !== 'timer' || w.config.running) return;
 
-      if (w.type === 'timer' && !w.config.running) {
-        const tMode = s.timerMode ?? 'countup';
-        const startMs = tMode === 'countdown' ? s.periodDurationMs : 0;
-        updateWidgetConfig(w.id, {
-          // Timing config from tournament
-          periods:             s.periods,
-          durationMs:          s.periodDurationMs,
-          breakDurationMs:     s.halfTimeDurationMs,
-          mode:                tMode,
-          // Reset match state
-          currentMs:           startMs,
-          currentPeriod:       1,
-          periodStartMs:       0,
-          inBreak:             false,
-          breakCurrentMs:      0,
-          overrunning:         false,
-          resumeMs:            null,
-          resumePeriodStartMs: null,
-          // Reset extra time state (keep ET config like etDurationMs, extraTimePeriods)
-          inExtraTime:         false,
-          etCurrentPeriod:     1,
-          etCurrentMs:         w.config.etDurationMs ?? 300000,
-          etPeriodStartMs:     0,
-          etInBreak:           false,
-          etBreakCurrentMs:    0,
-          etOverrunning:       false,
-          // Reset after-ET state
-          inAfterEt:           false,
-          afterEtCurrentMs:    w.config.afterEtDurationMs ?? 0,
-          afterEtOverrunning:  false,
-          // Reset final-play state
-          inFinalPlay:         false,
-          finalPlayMs:         0,
-          finalPlayPendingNext: false,
-        });
-        linkedTimerIds.add(w.id);
-        count++;
-      }
-
-      if (w.type === 'scoreboard') {
-        updateWidgetConfig(w.id, {
-          teamAName:      selected.teamA.name,
-          teamBName:      selected.teamB.name,
-          teamAShortName: selected.teamA.shortName ?? '',
-          teamBShortName: selected.teamB.shortName ?? '',
-          teamAColor:     selected.teamA.color,
-          teamBColor:     selected.teamB.color,
-          teamALogo:      selected.teamA.logo ?? '',
-          teamBLogo:      selected.teamB.logo ?? '',
-          scoreA:         0,
-          scoreB:         0,
-          scoreLog:       [],
-          cardsA:         [],
-          cardsB:         [],
-        });
-        linkedScoreboardIds.add(w.id);
-        count++;
-      }
-
-      if (w.type === 'player-list') {
-        const side = (w.config.teamSide ?? 'A') as 'A' | 'B';
-        const team = side === 'A' ? selected.teamA : selected.teamB;
-        const players = team.players ?? [];
-        // First maxOnField players become starters, rest become subs
-        const starters = players.slice(0, s.maxOnField);
-        const subs     = players.slice(s.maxOnField);
-        updateWidgetConfig(w.id, {
-          maxOnField:      s.maxOnField,
-          starters,
-          subs,
-          onField:         [],
-          entries:         {},
-          accumulated:     {},
-          subbedOnPlayers: [],
-        });
-        count++;
-      }
+      const tMode = s.timerMode ?? 'countup';
+      const startMs = tMode === 'countdown' ? s.periodDurationMs : 0;
+      updateWidgetConfig(w.id, {
+        // Timing config from tournament
+        periods:             s.periods,
+        durationMs:          s.periodDurationMs,
+        breakDurationMs:     s.halfTimeDurationMs,
+        mode:                tMode,
+        // Reset match state
+        currentMs:           startMs,
+        currentPeriod:       1,
+        periodStartMs:       0,
+        inBreak:             false,
+        breakCurrentMs:      0,
+        overrunning:         false,
+        resumeMs:            null,
+        resumePeriodStartMs: null,
+        // Reset extra time state (keep ET config like etDurationMs, extraTimePeriods)
+        inExtraTime:         false,
+        etCurrentPeriod:     1,
+        etCurrentMs:         w.config.etDurationMs ?? 300000,
+        etPeriodStartMs:     0,
+        etInBreak:           false,
+        etBreakCurrentMs:    0,
+        etOverrunning:       false,
+        // Reset after-ET state
+        inAfterEt:           false,
+        afterEtCurrentMs:    w.config.afterEtDurationMs ?? 0,
+        afterEtOverrunning:  false,
+        // Reset final-play state
+        inFinalPlay:         false,
+        finalPlayMs:         0,
+        finalPlayPendingNext: false,
+      });
+      linkedTimerIds.add(w.id);
+      count++;
     });
 
-    // Pass 2: clear timeline events linked to any of the above timers/scoreboards
+    // Clear timeline events linked to any of the above timers
     allWidgets.forEach(w => {
       if (w.type !== 'timeline') return;
-      const timerLinked = w.config.linkedTimerWidgetId && linkedTimerIds.has(w.config.linkedTimerWidgetId);
-      const boardLinked = w.config.linkedScoreboardId && linkedScoreboardIds.has(w.config.linkedScoreboardId);
-      if (timerLinked || boardLinked) {
+      if (w.config.linkedTimerWidgetId && linkedTimerIds.has(w.config.linkedTimerWidgetId)) {
         updateWidgetConfig(w.id, { events: [] });
         count++;
       }
@@ -640,6 +976,15 @@ export function TournamentManager({ onClose }: Props) {
     setEditTournName(false);
   };
 
+  // Scoped to whichever tournament is currently selected — Teams/Players/
+  // Schedule/Results all derive from this one piece of state, so picking a
+  // different tournament (Tournaments tab, or the scope picker on those
+  // tabs) instantly changes what they show.
+  const scopedTeams = useMemo(() => selected ? teams.filter(t => t.tournamentId === selected.id) : [], [teams, selected]);
+  const scopedPlayerCount = useMemo(() => scopedTeams.reduce((n, t) => n + t.players.length, 0), [scopedTeams]);
+  const scopedMatches = useMemo(() => selected ? scheduledMatches.filter(m => m.tournamentId === selected.id) : [], [scheduledMatches, selected]);
+  const scopedResults = useMemo(() => selected ? savedResults.filter(r => r.tournamentId === selected.id) : [], [savedResults, selected]);
+
   return (
     <>
       {/* Subtle backdrop — click to close */}
@@ -660,7 +1005,69 @@ export function TournamentManager({ onClose }: Props) {
           </div>
         </div>
 
+        {/* Tab bar */}
+        <div style={{ display: 'flex', gap: 2, padding: '6px 10px 0', borderBottom: '1px solid var(--border)' }}>
+          <button
+            onClick={() => setTab('tournaments')}
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+              background: 'transparent', color: tab === 'tournaments' ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: tab === 'tournaments' ? '2px solid var(--accent)' : '2px solid transparent',
+            }}
+          >🏆 Tournaments</button>
+          <button
+            onClick={() => setTab('teams')}
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+              background: 'transparent', color: tab === 'teams' ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: tab === 'teams' ? '2px solid var(--accent)' : '2px solid transparent',
+            }}
+          >👥 Teams{scopedTeams.length > 0 ? ` (${scopedTeams.length})` : ''}</button>
+          <button
+            onClick={() => setTab('players')}
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+              background: 'transparent', color: tab === 'players' ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: tab === 'players' ? '2px solid var(--accent)' : '2px solid transparent',
+            }}
+          >🎽 Players{scopedPlayerCount > 0 ? ` (${scopedPlayerCount})` : ''}</button>
+          <button
+            onClick={() => setTab('schedule')}
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+              background: 'transparent', color: tab === 'schedule' ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: tab === 'schedule' ? '2px solid var(--accent)' : '2px solid transparent',
+            }}
+          >📅 Schedule{scopedMatches.length > 0 ? ` (${scopedMatches.length})` : ''}</button>
+          <button
+            onClick={() => setTab('results')}
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+              background: 'transparent', color: tab === 'results' ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: tab === 'results' ? '2px solid var(--accent)' : '2px solid transparent',
+            }}
+          >🏁 Results{scopedResults.length > 0 ? ` (${scopedResults.length})` : ''}</button>
+        </div>
+
         {/* Main area */}
+        {tab === 'teams' || tab === 'players' || tab === 'schedule' || tab === 'results' ? (
+          <div className="tm-win-body--scoped">
+            <TournamentScopeHeader tournaments={tournaments} selectedId={selectedId} onSelect={selectTournament} />
+            {!selected ? (
+              <div className="tm-win-placeholder">
+                <span>Create a tournament first in the 🏆 Tournaments tab.</span>
+              </div>
+            ) : tab === 'teams' ? (
+              <TeamsPanel tournamentId={selected.id} />
+            ) : tab === 'players' ? (
+              <PlayersPanel tournamentId={selected.id} />
+            ) : tab === 'schedule' ? (
+              <SchedulePanel tournament={selected} />
+            ) : (
+              <ResultsPanel tournamentId={selected.id} />
+            )}
+          </div>
+        ) : (
         <div className="tm-win-body">
           {/* Left: tournament list */}
           <div className="tm-win-sidebar">
@@ -728,7 +1135,7 @@ export function TournamentManager({ onClose }: Props) {
                   <button
                     className="tm-btn tm-btn--danger"
                     onClick={() => {
-                      if (!confirm(`Delete "${selected.name}" and all its players?`)) return;
+                      if (!confirm(`Delete "${selected.name}"? Its teams, players, fixtures, and results stay saved but will no longer be linked to a tournament.`)) return;
                       deleteTournament(selected.id);
                       const next = tournaments.find(t => t.id !== selected.id);
                       setSelectedId(next?.id ?? '');
@@ -740,11 +1147,20 @@ export function TournamentManager({ onClose }: Props) {
                 {/* Period / time settings */}
                 <SettingsBar tournament={selected} onApply={applyToCanvas} />
 
-                {/* Both teams side by side */}
-                <div className="tm-teams-area">
-                  <TeamColumn tournament={selected} side="A" />
-                  <div className="tm-teams-divider" />
-                  <TeamColumn tournament={selected} side="B" />
+                {/* Quick summary + jump-to links for this tournament's related data */}
+                <div style={{ display: 'flex', gap: 8, padding: '12px 16px', flexWrap: 'wrap' }}>
+                  <button className="tm-sidebar-new-btn" onClick={() => setTab('teams')}>
+                    👥 {scopedTeams.length} team{scopedTeams.length !== 1 ? 's' : ''}
+                  </button>
+                  <button className="tm-sidebar-new-btn" onClick={() => setTab('players')}>
+                    🎽 {scopedPlayerCount} player{scopedPlayerCount !== 1 ? 's' : ''}
+                  </button>
+                  <button className="tm-sidebar-new-btn" onClick={() => setTab('schedule')}>
+                    📅 {scopedMatches.length} fixture{scopedMatches.length !== 1 ? 's' : ''}
+                  </button>
+                  <button className="tm-sidebar-new-btn" onClick={() => setTab('results')}>
+                    🏁 {scopedResults.length} result{scopedResults.length !== 1 ? 's' : ''}
+                  </button>
                 </div>
               </div>
             )}
@@ -756,19 +1172,25 @@ export function TournamentManager({ onClose }: Props) {
             )}
           </div>
         </div>
+        )}
 
         {/* Status bar */}
         <div className="tm-win-statusbar">
-          <span>{tournaments.length} tournament{tournaments.length !== 1 ? 's' : ''}</span>
-          {selected && (
-            <span>
-              {selected.teamA.name}: {selected.teamA.players.length} players
-              &nbsp;·&nbsp;
-              {selected.teamB.name}: {selected.teamB.players.length} players
-            </span>
+          {tab === 'teams' ? (
+            <span>{scopedTeams.length} team{scopedTeams.length !== 1 ? 's' : ''}{selected ? ` in ${selected.name}` : ''}</span>
+          ) : tab === 'players' ? (
+            <span>{scopedPlayerCount} player{scopedPlayerCount !== 1 ? 's' : ''} across {scopedTeams.length} team{scopedTeams.length !== 1 ? 's' : ''}</span>
+          ) : tab === 'schedule' ? (
+            <span>{scopedMatches.length} fixture{scopedMatches.length !== 1 ? 's' : ''}{selected ? ` in ${selected.name}` : ''}</span>
+          ) : tab === 'results' ? (
+            <span>{scopedResults.length} result{scopedResults.length !== 1 ? 's' : ''}{selected ? ` in ${selected.name}` : ''}</span>
+          ) : (
+            <>
+              <span>{tournaments.length} tournament{tournaments.length !== 1 ? 's' : ''}</span>
+              {applyStatus && <span className="tm-apply-status">{applyStatus}</span>}
+              <span style={{ marginLeft: 'auto', opacity: 0.4, fontSize: 10 }}>double-click row to edit</span>
+            </>
           )}
-          {applyStatus && <span className="tm-apply-status">{applyStatus}</span>}
-          <span style={{ marginLeft: 'auto', opacity: 0.4, fontSize: 10 }}>double-click row to edit</span>
         </div>
       </div>
     </>

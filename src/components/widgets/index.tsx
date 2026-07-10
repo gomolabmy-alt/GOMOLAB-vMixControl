@@ -26,6 +26,8 @@ import { RugbyLineupWidget } from './RugbyLineupWidget';
 import { CardLowerThirdWidget } from './CardLowerThirdWidget';
 import { PomodoroWidget } from './PomodoroWidget';
 import { ImageDisplayWidget } from './ImageDisplayWidget';
+import { RecentMatchesWidget } from './RecentMatchesWidget';
+import { MatchScheduleWidget } from './MatchScheduleWidget';
 
 interface Props {
   widget: CanvasWidget;
@@ -64,6 +66,8 @@ export function WidgetRenderer({ widget }: Props) {
     case 'card-lower-third':   content = <CardLowerThirdWidget widgetId={id} {...sharedProps} />; break;
     case 'pomodoro':           content = <PomodoroWidget {...sharedProps} />; break;
     case 'image-display':      content = <ImageDisplayWidget config={config} />; break;
+    case 'recent-matches':     content = <RecentMatchesWidget {...sharedProps} />; break;
+    case 'match-schedule':     content = <MatchScheduleWidget widgetId={id} {...sharedProps} />; break;
     default:            content = <div style={{ padding: 8, fontSize: 11 }}>Unknown widget</div>;
   }
 

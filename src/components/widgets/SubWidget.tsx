@@ -1,7 +1,7 @@
 import { useState, useMemo, useContext } from 'react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
-import { useTournamentStore } from '../../stores/tournamentStore';
+import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import type { Player } from '../../types/tournament';
 
@@ -27,7 +27,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
   const ctx = useContext(CanvasActionContext);
   const { pages, addTimelineEvent } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
-  const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
   const { getClient } = useVmixStore();
 
   const [selOut, setSelOut] = useState<string | null>(null);
@@ -35,9 +35,8 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [lastSub, setLastSub] = useState<{ out: string; in: string } | null>(null);
 
-  const tournament = tournaments.find(t => t.id === cfg.linkedTournamentId);
   const side: 'A' | 'B' = cfg.teamSide ?? 'A';
-  const team = side === 'A' ? tournament?.teamA : tournament?.teamB;
+  const team = teamDbTeams.find(t => t.id === cfg.linkedTeamId);
   const players: Player[] = team?.players ?? [];
 
   const playerListWidget = cfg.linkedPlayerListId
@@ -162,8 +161,8 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
         <span className="wgt-sub-title">Quick Sub</span>
       </div>
 
-      {!tournament ? (
-        <div className="wgt-sub-empty">Link a tournament in ⚙</div>
+      {!team ? (
+        <div className="wgt-sub-empty">Link a team in ⚙</div>
       ) : !playerListWidget ? (
         <div className="wgt-sub-empty">Link a Player List widget in ⚙</div>
       ) : confirm ? (

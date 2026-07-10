@@ -2,6 +2,7 @@ import { useState, useMemo, useCallback, useEffect, useRef, useContext } from 'r
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTournamentStore } from '../../stores/tournamentStore';
+import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { SPORT_DEFAULTS, DEFAULT_STAFF_ROLES } from '../../types/tournament';
 import type { Player, StaffMember } from '../../types/tournament';
@@ -34,7 +35,8 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       highlightedSide:       side,
     });
   };
-  const { tournaments, updatePlayer, updateTeam, updateStaffMember } = useTournamentStore();
+  const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams, updatePlayer, updateTeam, updateStaffMember } = useTeamDbStore();
   const { getClient, vmixState, vmixSyncVersion } = useVmixStore();
 
   // Slot assignment picker
@@ -44,9 +46,11 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
   // Card picker: which card type is being assigned
   const [cardPicker, setCardPicker] = useState<'yellow' | 'orange' | 'red' | null>(null);
 
+  // Tournament link is now settings-only (maxOnField/maxSubs/etc); team
+  // identity + roster comes directly from the linked SavedTeam (teamDbStore).
   const tournament = tournaments.find(t => t.id === cfg.linkedTournamentId);
   const side: 'A' | 'B' = cfg.teamSide ?? 'A';
-  const team = side === 'A' ? tournament?.teamA : tournament?.teamB;
+  const team = teamDbTeams.find(t => t.id === cfg.linkedTeamId);
   const players: Player[] = team?.players ?? [];
 
   const timerWidget = cfg.linkedTimerWidgetId
@@ -622,7 +626,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
     if (card === 'orange') rowClass += ' wgt-pl-row--hia';
     if (dismissed)         rowClass += ' wgt-pl-row--dismissed';
 
-    const canEdit = !!tournament;
+    const canEdit = !!team;
 
     return (
       <div key={player.id} className={rowClass}>
@@ -651,7 +655,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
               if (!canEdit) return;
               const jersey = e.target.value.trim();
               const role = specialRole(jersey);
-              updatePlayer(tournament!.id, side, player.id, {
+              updatePlayer(team!.id, player.id, {
                 jerseyNo: jersey,
                 ...(role && !player.position ? { position: role } : {}),
               });
@@ -673,7 +677,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
             readOnly={!canEdit}
             onBlur={e => {
               const name = e.target.value.trim();
-              if (canEdit) updatePlayer(tournament!.id, side, player.id, { name });
+              if (canEdit) updatePlayer(team!.id, player.id, { name });
               const vmixIdx = isStarter ? slotIdx + 1 : maxOnField + slotIdx + 1;
               syncName(vmixIdx, player.id, { name });
             }}
@@ -858,7 +862,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
           </span>
           <span className="wgt-pl-max-num">/{maxOnField}</span>
         </span>
-        {tournament && (
+        {team && (
           <div className="wgt-pl-card-btns" onClick={e => e.stopPropagation()}>
             <button
               className={`wgt-pl-card-btn wgt-pl-card-btn--yellow${cardPicker === 'yellow' ? ' wgt-pl-card-btn--active' : ''}`}
@@ -910,8 +914,8 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
         </div>
       )}
 
-      {!tournament ? (
-        <div className="wgt-pl-empty">Link a tournament in config</div>
+      {!team ? (
+        <div className="wgt-pl-empty">Link a team in config</div>
       ) : (
         <div className="wgt-pl-body">
 
@@ -1011,7 +1015,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                         onBlur={e => {
                           const jersey = e.target.value.trim();
                           const role = specialRole(jersey);
-                          updatePlayer(tournament!.id, side, player.id, {
+                          updatePlayer(team!.id, player.id, {
                             jerseyNo: jersey,
                             ...(role && !player.position ? { position: role } : {}),
                           });
@@ -1027,7 +1031,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                         className="wgt-pl-name wgt-pl-name--inp"
                         defaultValue={player.name}
                         placeholder="Name"
-                        onBlur={e => updatePlayer(tournament!.id, side, player.id, { name: e.target.value.trim() })}
+                        onBlur={e => updatePlayer(team!.id, player.id, { name: e.target.value.trim() })}
                         onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
                         onClick={e => e.stopPropagation()}
                       />
@@ -1055,12 +1059,12 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                           <button
                             className="wgt-pl-btn wgt-pl-btn--role"
                             title="Set as Manager"
-                            onClick={() => updatePlayer(tournament!.id, side, player.id, { jerseyNo: 'MNG', position: 'Manager' })}
+                            onClick={() => updatePlayer(team!.id, player.id, { jerseyNo: 'MNG', position: 'Manager' })}
                           >+MNG</button>
                           <button
                             className="wgt-pl-btn wgt-pl-btn--role"
                             title="Set as Head Coach"
-                            onClick={() => updatePlayer(tournament!.id, side, player.id, { jerseyNo: 'HC', position: 'Head Coach' })}
+                            onClick={() => updatePlayer(team!.id, player.id, { jerseyNo: 'HC', position: 'Head Coach' })}
                           >+HC</button>
                         </>
                       )}
@@ -1073,7 +1077,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
           )}
 
           {/* Staff section */}
-          {tournament && (() => {
+          {team && (() => {
             const defaultStaff: StaffMember[] = DEFAULT_STAFF_ROLES.map(role => ({
               id: role.toLowerCase().replace(/\s+/g, '-'), role, name: '',
             }));
@@ -1102,9 +1106,9 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
             const handleStaffBlur = (memberId: string, name: string) => {
               if (!initialized) {
                 const full = defaultStaff.map(s => s.id === memberId ? { ...s, name } : s);
-                updateTeam(tournament.id, side, { staff: full });
+                updateTeam(team.id, { staff: full });
               } else {
-                updateStaffMember(tournament.id, side, memberId, name);
+                updateStaffMember(team.id, memberId, name);
               }
             };
 

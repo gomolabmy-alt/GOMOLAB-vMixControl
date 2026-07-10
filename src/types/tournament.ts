@@ -24,21 +24,13 @@ export interface StaffMember {
 
 export const DEFAULT_STAFF_ROLES = ['Head Coach', 'Manager', 'Medic'];
 
-export interface Team {
-  name: string;
-  shortName?: string;
-  color: string;
-  logo?: string;
-  players: Player[];
-  staff?: StaffMember[];
-}
-
+// A Tournament is a competition/league container — it no longer owns a fixed
+// Team A / Team B. Teams belong to a tournament via SavedTeam.tournamentId
+// (teamDbStore) and can be any number; widgets reference a specific team by id.
 export interface Tournament {
   id: string;
   name: string;
   sport: SportType;
-  teamA: Team;
-  teamB: Team;
   settings: TournamentSettings;
   createdAt: number;
 }

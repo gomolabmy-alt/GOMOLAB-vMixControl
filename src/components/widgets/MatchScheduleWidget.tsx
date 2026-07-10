@@ -1,0 +1,153 @@
+import { useMemo, useState, useEffect } from 'react';
+import { useCanvasStore } from '../../stores/canvasStore';
+import { useMatchScheduleStore } from '../../stores/matchScheduleStore';
+import { useMatchResultsStore } from '../../stores/matchResultsStore';
+import { resolveImageUrl } from '../../lib/imageUrl';
+import { guardScoreboardOverwrite } from '../../utils/scoreboardSnapshot';
+
+interface Props {
+  widgetId: string;
+  config: Record<string, any>;
+  w: number;
+  h: number;
+}
+
+// Parses "YYYY-MM-DD" + an optional loose time string ("20:30", "8:30 PM", "8:30pm")
+// into a local-timezone epoch ms, so lateness compares against the local system clock.
+function parseScheduledDateTime(date: string, time?: string): number | null {
+  const dm = date?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!dm) return null;
+  const [, y, mo, d] = dm;
+  let hours = 0, minutes = 0;
+  if (time) {
+    const tm = time.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?$/);
+    if (tm) {
+      hours = parseInt(tm[1], 10);
+      minutes = parseInt(tm[2], 10);
+      const ampm = tm[3]?.toUpperCase();
+      if (ampm === 'PM' && hours < 12) hours += 12;
+      if (ampm === 'AM' && hours === 12) hours = 0;
+    }
+  }
+  return new Date(Number(y), Number(mo) - 1, Number(d), hours, minutes, 0, 0).getTime();
+}
+
+function formatLate(ms: number): string {
+  const totalMin = Math.max(0, Math.floor(ms / 60000));
+  if (totalMin < 60) return `${totalMin}m`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h < 24) return `${h}h ${m}m`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
+}
+
+export function MatchScheduleWidget({ config }: Props) {
+  const { pages, updateWidgetConfig } = useCanvasStore();
+  const { matches, markSent, unmarkSent } = useMatchScheduleStore();
+  const { addResult } = useMatchResultsStore();
+  const title: string = config.title ?? 'Upcoming Matches';
+
+  const allWidgets = useMemo(() => pages.flatMap(p => p.widgets), [pages]);
+  const targetScoreboard = config.linkedScoreboardId
+    ? allWidgets.find(w => w.id === config.linkedScoreboardId && w.type === 'scoreboard')
+    : null;
+
+  const sentCount = matches.filter(m => m.sentAt).length;
+
+  // Ticks the "how late" durations forward against the local system clock.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  const sendToScoreboard = (m: typeof matches[number]) => {
+    if (!targetScoreboard) return;
+    // Protects the outgoing match on the target scoreboard: auto-saves it if
+    // it was never saved, or confirms before overwriting if it already was.
+    if (!guardScoreboardOverwrite(targetScoreboard.config, addResult)) return;
+    updateWidgetConfig(targetScoreboard.id, {
+      competition: m.competition ?? '',
+      subtitle: m.round ?? '',
+      teamAName: m.teamAName, teamAShortName: m.teamAShortName ?? '', teamAColor: m.teamAColor, teamALogo: m.teamALogo ?? '',
+      teamBName: m.teamBName, teamBShortName: m.teamBShortName ?? '', teamBColor: m.teamBColor, teamBLogo: m.teamBLogo ?? '',
+      scoreA: 0, scoreB: 0,
+      lastSavedSignature: '',
+    });
+    markSent(m.id);
+  };
+
+  return (
+    <div className="wgt-ms">
+      <div className="wgt-ms-header">
+        <span>{title}</span>
+        {matches.length > 0 && <span className="wgt-ms-count">{sentCount}/{matches.length} sent</span>}
+      </div>
+      {matches.length === 0 ? (
+        <div className="wgt-ms-empty">No scheduled matches yet — add fixtures in 🏆 DB → Schedule</div>
+      ) : (
+        // fade-y: content dissolves into the top/bottom edge instead of
+        // clipping abruptly, via a mask-image gradient on the scroll container.
+        <div className="wgt-ms-list wgt-ms-fade-y">
+          {matches.map(m => {
+            const scheduledTs = parseScheduledDateTime(m.date, m.time);
+            const isLate = !m.sentAt && scheduledTs !== null && now > scheduledTs;
+            const lateStr = isLate ? formatLate(now - scheduledTs!) : null;
+
+            return (
+              <div key={m.id} className={`wgt-ms-row${m.sentAt ? ' wgt-ms-row--sent' : ''}${isLate ? ' wgt-ms-row--late' : ''}`}>
+                <div className="wgt-ms-row-meta">
+                  <span className="wgt-ms-date">{m.date}{m.time ? ` · ${m.time}` : ''}</span>
+                  {m.competition && <span className="wgt-ms-comp">{m.competition}{m.round ? ` — ${m.round}` : ''}</span>}
+                </div>
+
+                {isLate && (
+                  <div className="wgt-ms-late-badge">⏰ LATE — {lateStr} behind schedule</div>
+                )}
+
+                <div className="wgt-ms-row-matchup">
+                  <div className="wgt-ms-team">
+                    {m.teamALogo
+                      ? <img className="wgt-ms-logo" src={resolveImageUrl(m.teamALogo)} alt="" />
+                      : <div className="wgt-ms-logo-ph" style={{ background: m.teamAColor }} />}
+                    <span className="wgt-ms-team-name">{m.teamAShortName || m.teamAName}</span>
+                  </div>
+                  <span className="wgt-ms-vs">vs</span>
+                  <div className="wgt-ms-team wgt-ms-team--b">
+                    <span className="wgt-ms-team-name">{m.teamBShortName || m.teamBName}</span>
+                    {m.teamBLogo
+                      ? <img className="wgt-ms-logo" src={resolveImageUrl(m.teamBLogo)} alt="" />
+                      : <div className="wgt-ms-logo-ph" style={{ background: m.teamBColor }} />}
+                  </div>
+                </div>
+
+                {(m.venue || m.broadcaster) && (
+                  <div className="wgt-ms-footer">
+                    {m.venue && <span>{m.venue}</span>}
+                    {m.broadcaster && <span>{m.broadcaster}</span>}
+                  </div>
+                )}
+
+                {m.sentAt ? (
+                  <button className="wgt-ms-send wgt-ms-send--sent" onClick={() => unmarkSent(m.id)} title="Mark as not sent">
+                    ✓ Sent — click to undo
+                  </button>
+                ) : (
+                  <button
+                    className={`wgt-ms-send${isLate ? ' wgt-ms-send--late' : ''}`}
+                    onClick={() => sendToScoreboard(m)}
+                    disabled={!targetScoreboard}
+                    title={targetScoreboard ? 'Send this matchup to the linked scoreboard' : 'Link a scoreboard in ⚙ config first'}
+                  >
+                    {targetScoreboard ? '→ Send to Scoreboard' : 'No scoreboard linked'}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

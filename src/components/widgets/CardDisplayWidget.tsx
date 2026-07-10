@@ -1,6 +1,6 @@
 import { useMemo, useEffect, useCallback } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
-import { useTournamentStore } from '../../stores/tournamentStore';
+import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
 
 interface Props {
@@ -29,7 +29,7 @@ const CARD_LABEL: Record<ActiveCard, string> = {
 
 export function CardDisplayWidget({ config: cfg }: Props) {
   const { pages } = useCanvasStore();
-  const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
   const { getClient, vmixSyncVersion } = useVmixStore();
 
   const allWidgets = useMemo(() => pages.flatMap(p => p.widgets), [pages]);
@@ -39,9 +39,7 @@ export function CardDisplayWidget({ config: cfg }: Props) {
     if (!plw) return { name: '—', color: '#888', entries: [] };
 
     const plCfg = plw.config;
-    const tournament = tournaments.find(t => t.id === plCfg.linkedTournamentId);
-    const side: 'A' | 'B' = plCfg.teamSide ?? 'A';
-    const team = side === 'A' ? tournament?.teamA : tournament?.teamB;
+    const team = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
     const players = team?.players ?? [];
     const playerCards: Record<string, RugbyCard[]> = plCfg.playerCards ?? {};
     const sinBinEntries: Record<string, number> = plCfg.sinBinEntries ?? {};
@@ -64,8 +62,8 @@ export function CardDisplayWidget({ config: cfg }: Props) {
     return { name: team?.name ?? '—', color: team?.color ?? '#888', entries };
   }
 
-  const teamA = useMemo(() => resolveTeam(cfg.linkedPlayerListA ?? ''), [cfg.linkedPlayerListA, allWidgets, tournaments]);
-  const teamB = useMemo(() => resolveTeam(cfg.linkedPlayerListB ?? ''), [cfg.linkedPlayerListB, allWidgets, tournaments]);
+  const teamA = useMemo(() => resolveTeam(cfg.linkedPlayerListA ?? ''), [cfg.linkedPlayerListA, allWidgets, teamDbTeams]);
+  const teamB = useMemo(() => resolveTeam(cfg.linkedPlayerListB ?? ''), [cfg.linkedPlayerListB, allWidgets, teamDbTeams]);
 
   const showNames: boolean = cfg.showNames !== false;
 
