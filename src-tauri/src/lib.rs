@@ -91,6 +91,8 @@ pub fn run() {
             commands::set_sleep_block,
             commands::open_image_dialog,
             commands::save_image,
+            commands::rename_image,
+            commands::import_image,
             commands::list_images,
             commands::delete_image,
             commands::get_images_base_url,

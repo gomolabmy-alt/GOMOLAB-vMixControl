@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { useTournamentStore } from '../stores/tournamentStore';
 import { useCanvasStore } from '../stores/canvasStore';
 import type { Tournament, SportType } from '../types/tournament';
@@ -6,9 +7,10 @@ import { SPORT_LABELS, SPORT_POSITIONS, SPORT_DEFAULTS } from '../types/tourname
 import type { Player } from '../types/tournament';
 import { LogoUrlPicker } from './LogoUrlPicker';
 import { useTeamDbStore } from '../stores/teamDbStore';
-import { useMatchScheduleStore } from '../stores/matchScheduleStore';
-import { useMatchResultsStore } from '../stores/matchResultsStore';
+import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
+import { useMatchResultsStore, type SavedMatchResult } from '../stores/matchResultsStore';
 import { resolveImageUrl } from '../lib/imageUrl';
+import { guardScoreboardOverwrite, buildLoadMatchPatch } from '../utils/scoreboardSnapshot';
 
 // ── Import / Export helpers ───────────────────────────────────────────────────
 
@@ -28,29 +30,56 @@ function exportTeamCSV(players: Player[], teamName: string) {
   URL.revokeObjectURL(url);
 }
 
+// Builds and downloads a CSV file from a header row + data rows, quoting
+// every cell — shared by the Schedule and Results tab exporters below.
+function downloadCSV(header: string[], rows: string[][], filename: string) {
+  const escape = (v: string) => `"${(v ?? '').replace(/"/g, '""')}"`;
+  const csv = [header, ...rows].map(row => row.map(escape).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportFixturesCSV(matches: ScheduledMatch[], tournamentName: string) {
+  // Same column order the CSV importer expects, so an exported file can be
+  // re-imported (or edited in Excel and brought back in) without remapping.
+  const header = ['Date', 'Time', 'Team A', 'Team B', 'Venue', 'Broadcaster', 'Round'];
+  const rows = matches.map(m => [m.date, m.time ?? '', m.teamAName, m.teamBName, m.venue ?? '', m.broadcaster ?? '', m.round ?? '']);
+  downloadCSV(header, rows, `${tournamentName.replace(/[^a-z0-9]/gi, '_')}_schedule.csv`);
+}
+
+function exportResultsCSV(results: SavedMatchResult[], tournamentName: string) {
+  const header = ['Date', 'Round', 'Team A', 'Score A', 'Score B', 'Team B'];
+  const rows = results.map(r => [r.date, r.round ?? '', r.teamAName, String(r.scoreA), String(r.scoreB), r.teamBName]);
+  downloadCSV(header, rows, `${tournamentName.replace(/[^a-z0-9]/gi, '_')}_results.csv`);
+}
+
+// Basic quoted-CSV / TSV row splitter, shared by every file importer below.
+function splitDelimitedRow(line: string, sep: string): string[] {
+  if (sep === '\t') return line.split('\t').map(c => c.trim());
+  const cols: string[] = [];
+  let cur = '', inQ = false;
+  for (const ch of line) {
+    if (ch === '"') { inQ = !inQ; }
+    else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ''; }
+    else { cur += ch; }
+  }
+  cols.push(cur.trim());
+  return cols;
+}
+
 function parsePlayerFile(text: string): Omit<Player, 'id'>[] {
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   if (!lines.length) return [];
-
   const sep = lines[0].includes('\t') ? '\t' : ',';
-
-  function splitRow(line: string): string[] {
-    if (sep === '\t') return line.split('\t').map(c => c.trim());
-    // Basic quoted-CSV split
-    const cols: string[] = [];
-    let cur = '', inQ = false;
-    for (const ch of line) {
-      if (ch === '"') { inQ = !inQ; }
-      else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ''; }
-      else { cur += ch; }
-    }
-    cols.push(cur.trim());
-    return cols;
-  }
 
   const result: Omit<Player, 'id'>[] = [];
   for (const line of lines) {
-    const [col0 = '', col1 = '', col2 = ''] = splitRow(line);
+    const [col0 = '', col1 = '', col2 = ''] = splitDelimitedRow(line, sep);
     const jerseyNo = col0.replace(/^"|"$/g, '').trim();
     const name     = col1.replace(/^"|"$/g, '').trim();
     const position = col2.replace(/^"|"$/g, '').trim();
@@ -58,6 +87,33 @@ function parsePlayerFile(text: string): Omit<Player, 'id'>[] {
     if (!name || /^(name|player|full.?name)$/i.test(name)) continue;
     if (/^(#|no\.?|jersey|number|num)$/i.test(jerseyNo)) continue;
     result.push({ jerseyNo, name, position });
+  }
+  return result;
+}
+
+interface ParsedFixtureRow {
+  date: string; time?: string; teamAName: string; teamBName: string;
+  venue?: string; broadcaster?: string; round?: string;
+}
+
+// Expected columns: Date (YYYY-MM-DD), Time, Team A, Team B, Venue, Broadcaster, Round.
+// Only Date + both team names are required; the rest may be left blank.
+function parseFixtureFile(text: string): ParsedFixtureRow[] {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return [];
+  const sep = lines[0].includes('\t') ? '\t' : ',';
+
+  const result: ParsedFixtureRow[] = [];
+  for (const line of lines) {
+    const cols = splitDelimitedRow(line, sep).map(c => c.replace(/^"|"$/g, '').trim());
+    const [date = '', time = '', teamAName = '', teamBName = '', venue = '', broadcaster = '', round = ''] = cols;
+    if (/^date$/i.test(date)) continue; // header row
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    if (!teamAName || !teamBName) continue;
+    result.push({
+      date, time: time || undefined, teamAName, teamBName,
+      venue: venue || undefined, broadcaster: broadcaster || undefined, round: round || undefined,
+    });
   }
   return result;
 }
@@ -490,6 +546,7 @@ function TeamsPanel({ tournamentId }: { tournamentId: string }) {
               value={t.logo ?? ''}
               onChange={logo => updateTeam(t.id, { logo })}
               thumbSize={{ w: 44, h: 44 }}
+              tournamentId={tournamentId}
             />
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
               <input
@@ -549,6 +606,10 @@ function formatTimeDisplay(time?: string): string {
   return `${h}:${m[2]}${ampm}`;
 }
 
+// Rendered via a portal into document.body, positioned above its anchor
+// button with fixed coordinates: fixture rows have overflow:hidden (for the
+// rounded-card layout), which would silently clip an absolutely-positioned
+// popup nested inside them — a portal escapes that, same fix as TeamPicker.
 function ScheduleTeamPicker({ side, tournamentId, onPick }: {
   side: 'A' | 'B'; tournamentId?: string;
   onPick: (t: { name: string; shortName?: string; color: string; logo?: string }) => void;
@@ -556,6 +617,7 @@ function ScheduleTeamPicker({ side, tournamentId, onPick }: {
   const { teams: allTeams } = useTeamDbStore();
   const teams = useMemo(() => tournamentId ? allTeams.filter(t => t.tournamentId === tournamentId) : allTeams, [allTeams, tournamentId]);
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLButtonElement>(null);
 
@@ -569,15 +631,25 @@ function ScheduleTeamPicker({ side, tournamentId, onPick }: {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
+  const toggle = () => {
+    if (!open && anchorRef.current) {
+      const r = anchorRef.current.getBoundingClientRect();
+      // Open upward, anchored just above the button, so it's never clipped
+      // by the fixture row's own layout regardless of where it sits on screen.
+      setPos({ left: r.left, bottom: window.innerHeight - r.top + 6 });
+    }
+    setOpen(v => !v);
+  };
+
   return (
     <div style={{ position: 'relative', display: 'inline-flex' }}>
       <button ref={anchorRef} className="tm-sched-pick-btn" title={`Pick saved team for side ${side}`}
-        onClick={() => setOpen(v => !v)}>👥</button>
-      {open && (
-        <div ref={popupRef} style={{
-          position: 'absolute', top: '100%', left: 0, zIndex: 400, marginTop: 4, minWidth: 180, maxHeight: 220,
+        onClick={e => { e.stopPropagation(); toggle(); }}>👥</button>
+      {open && pos && createPortal(
+        <div ref={popupRef} onClick={e => e.stopPropagation()} style={{
+          position: 'fixed', left: pos.left, bottom: pos.bottom, zIndex: 10000, minWidth: 180, maxHeight: 220,
           overflowY: 'auto', background: 'var(--bg-1)', border: '1px solid var(--border)', borderRadius: 6,
-          boxShadow: '0 4px 16px rgba(0,0,0,.5)',
+          boxShadow: '0 -4px 16px rgba(0,0,0,.5)',
         }}>
           {teams.length === 0 ? (
             <div style={{ padding: '8px 10px', fontSize: 11, color: 'var(--text-muted)' }}>No saved teams</div>
@@ -586,7 +658,8 @@ function ScheduleTeamPicker({ side, tournamentId, onPick }: {
               style={{ padding: '5px 8px', fontSize: 11, cursor: 'pointer', color: 'var(--text-secondary)',
                 borderBottom: '1px solid var(--border)' }}>{t.name}</div>
           ))}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -685,12 +758,103 @@ function ScheduleBadge({ logo, color }: { logo?: string; color: string }) {
   );
 }
 
+// Per-fixture "Send to Scoreboard" — lets a fixture be pushed straight from
+// the DB's Schedule tab, without needing the on-canvas Upcoming Matches
+// widget. Mirrors MatchScheduleWidget's send logic (same guard + patch).
+function ScoreboardSendButton({ match, scoreboards, onSend }: {
+  match: ScheduledMatch;
+  scoreboards: { id: string; label?: string }[];
+  onSend: (targetId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+  const anchorRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (popupRef.current && !popupRef.current.contains(e.target as Node) &&
+          anchorRef.current && !anchorRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  if (match.sentAt) {
+    return <span className="tm-sched-sent-tag" title="Already sent to a scoreboard">✓ Sent</span>;
+  }
+  if (scoreboards.length === 0) {
+    return <button className="tm-sched-send-btn" disabled title="No scoreboard widget on the canvas">→ Send</button>;
+  }
+  if (scoreboards.length === 1) {
+    return (
+      <button className="tm-sched-send-btn" title="Send this fixture to the scoreboard" onClick={() => onSend(scoreboards[0].id)}>
+        → Send
+      </button>
+    );
+  }
+
+  const toggle = () => {
+    if (!open && anchorRef.current) {
+      const r = anchorRef.current.getBoundingClientRect();
+      setPos({ left: r.left, bottom: window.innerHeight - r.top + 6 });
+    }
+    setOpen(v => !v);
+  };
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-flex' }}>
+      <button ref={anchorRef} className="tm-sched-send-btn" title="Pick which scoreboard to send to" onClick={toggle}>→ Send</button>
+      {open && pos && createPortal(
+        <div ref={popupRef} style={{
+          position: 'fixed', left: pos.left, bottom: pos.bottom, zIndex: 10000, minWidth: 170, maxHeight: 220,
+          overflowY: 'auto', background: 'var(--bg-1)', border: '1px solid var(--border)', borderRadius: 6,
+          boxShadow: '0 -4px 16px rgba(0,0,0,.5)',
+        }}>
+          {scoreboards.map(sb => (
+            <div key={sb.id} onClick={() => { onSend(sb.id); setOpen(false); }}
+              style={{ padding: '6px 10px', fontSize: 11, cursor: 'pointer', color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)' }}>
+              {sb.label || sb.id}
+            </div>
+          ))}
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
 function SchedulePanel({ tournament }: { tournament: Tournament }) {
-  const { matches: allMatches, addMatch, updateMatch, deleteMatch } = useMatchScheduleStore();
+  const { matches: allMatches, addMatch, updateMatch, deleteMatch, markSent } = useMatchScheduleStore();
+  const { teams: allTeams } = useTeamDbStore();
+  const { pages, updateWidgetConfig, resetWidgetTimer } = useCanvasStore();
+  const { addResult } = useMatchResultsStore();
   const matches = useMemo(
     () => allMatches.filter(m => m.tournamentId === tournament.id),
     [allMatches, tournament.id]
   );
+  const scoreboards = useMemo(
+    () => pages.flatMap(p => p.widgets).filter(w => w.type === 'scoreboard').map(w => ({ id: w.id, label: w.label })),
+    [pages]
+  );
+  const sendToScoreboard = (m: typeof matches[number], targetId: string) => {
+    const allWidgets = pages.flatMap(p => p.widgets);
+    const target = allWidgets.find(w => w.id === targetId);
+    if (!target) return;
+    if (!guardScoreboardOverwrite(target.config, addResult)) return;
+    updateWidgetConfig(target.id, buildLoadMatchPatch(m));
+    // A new match starting means the previous one's clock shouldn't carry over.
+    if (target.config.linkedTimerWidgetId) resetWidgetTimer(target.config.linkedTimerWidgetId);
+    markSent(m.id);
+  };
+  const scopedTeams = useMemo(
+    () => allTeams.filter(t => t.tournamentId === tournament.id),
+    [allTeams, tournament.id]
+  );
+
+  const [importPreview, setImportPreview] = useState<ParsedFixtureRow[] | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Fixtures always show the CURRENT tournament name — keep the stored
   // `competition` field in sync (it's what downstream widgets/results read)
@@ -710,6 +874,44 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
     });
   };
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const text = ev.target?.result as string;
+      const rows = parseFixtureFile(text);
+      if (rows.length > 0) setImportPreview(rows);
+      else alert('No valid fixtures found in file.\n\nExpected columns: Date (YYYY-MM-DD), Time, Team A, Team B, Venue, Broadcaster, Round\nFormats: CSV, TSV, or plain text');
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // Resolves a team name against this tournament's saved teams (case-insensitive)
+  // so an imported fixture picks up the right color/logo/short name automatically.
+  const resolveTeam = (name: string, fallbackColor: string) => {
+    const t = scopedTeams.find(t2 => t2.name.trim().toLowerCase() === name.trim().toLowerCase());
+    return {
+      name, shortName: t?.shortName, color: t?.color ?? fallbackColor, logo: t?.logo,
+    };
+  };
+
+  const confirmImport = () => {
+    if (!importPreview) return;
+    for (const row of importPreview) {
+      const a = resolveTeam(row.teamAName, '#e74c3c');
+      const b = resolveTeam(row.teamBName, '#3498db');
+      addMatch({
+        tournamentId: tournament.id, competition: tournament.name,
+        date: row.date, time: row.time, venue: row.venue, broadcaster: row.broadcaster, round: row.round,
+        teamAName: a.name, teamAShortName: a.shortName, teamAColor: a.color, teamALogo: a.logo,
+        teamBName: b.name, teamBShortName: b.shortName, teamBColor: b.color, teamBLogo: b.logo,
+      });
+    }
+    setImportPreview(null);
+  };
+
   const groups = useMemo(() => {
     const map = new Map<string, typeof matches>();
     for (const m of matches) {
@@ -723,9 +925,42 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
 
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 12 }}>
+        <button className="tm-io-btn" title="Import fixtures from CSV / TSV / TXT" onClick={() => fileInputRef.current?.click()}>
+          ↑ Import
+        </button>
+        <button className="tm-io-btn" title="Export fixtures as CSV (Excel compatible)"
+          onClick={() => exportFixturesCSV(matches, tournament.name)} disabled={matches.length === 0}>
+          ↓ Export CSV
+        </button>
         <button className="tm-sidebar-new-btn" onClick={handleAdd}>＋ Add Fixture</button>
+        <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt" style={{ display: 'none' }} onChange={handleFileChange} />
       </div>
+
+      {importPreview && (
+        <div className="tm-import-preview" style={{ marginBottom: 12 }}>
+          <div className="tm-import-preview-title">
+            Found <strong>{importPreview.length}</strong> fixture{importPreview.length !== 1 ? 's' : ''}
+          </div>
+          <div className="tm-import-preview-list">
+            {importPreview.slice(0, 5).map((row, i) => (
+              <div key={i} className="tm-import-preview-row">
+                <span className="tm-import-preview-jersey">{row.date}</span>
+                <span className="tm-import-preview-name">{row.teamAName} vs {row.teamBName}</span>
+                {row.venue && <span className="tm-import-preview-pos">{row.venue}</span>}
+              </div>
+            ))}
+            {importPreview.length > 5 && (
+              <div className="tm-import-preview-more">+{importPreview.length - 5} more…</div>
+            )}
+          </div>
+          <div className="tm-import-preview-actions">
+            <button className="tm-io-btn tm-io-btn--ok" onClick={confirmImport}>Add {importPreview.length} fixture{importPreview.length !== 1 ? 's' : ''}</button>
+            <button className="tm-io-btn" onClick={() => setImportPreview(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
       {matches.length === 0 ? (
         <div className="tm-win-placeholder">
           <span>No fixtures in this tournament yet — add one here, then pick it from a scoreboard's "📅 Load Match" button.</span>
@@ -736,25 +971,30 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
             <div className="tm-sched-group-title">{label}</div>
             <div className="tm-sched-rows">
               {rows.map(m => (
-                <div key={m.id} className="tm-sched-row">
+                <div key={m.id} className={`tm-sched-row${m.completedAt ? ' tm-sched-row--completed' : ''}`}>
+                  {m.completedAt && <span className="tm-sched-completed-badge">✓ Completed</span>}
                   <EditableDate value={m.date} onChange={date => updateMatch(m.id, { date })} />
                   <div className="tm-sched-divider" />
 
                   <div className="tm-sched-matchup">
                     <div className="tm-sched-team">
                       <LogoUrlPicker compact value={m.teamALogo ?? ''} onChange={logo => updateMatch(m.id, { teamALogo: logo })}
-                        thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamALogo} color={m.teamAColor} />} />
+                        thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamALogo} color={m.teamAColor} />} tournamentId={tournament.id} />
                       <EditableText className="tm-sched-team-name" value={m.teamAName} placeholder="Team A"
                         onChange={v => updateMatch(m.id, { teamAName: v })} />
                       <ScheduleTeamPicker side="A" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamAName: t.name, teamAShortName: t.shortName, teamAColor: t.color, teamALogo: t.logo })} />
                     </div>
-                    <span className="tm-sched-vs">VS</span>
+                    <div className="tm-sched-vs-col">
+                      <span className="tm-sched-vs">VS</span>
+                      <EditableText className="tm-sched-round" value={m.round ?? ''} placeholder="Round"
+                        onChange={v => updateMatch(m.id, { round: v })} />
+                    </div>
                     <div className="tm-sched-team tm-sched-team--b">
                       <ScheduleTeamPicker side="B" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamBName: t.name, teamBShortName: t.shortName, teamBColor: t.color, teamBLogo: t.logo })} />
                       <EditableText className="tm-sched-team-name" value={m.teamBName} placeholder="Team B"
                         onChange={v => updateMatch(m.id, { teamBName: v })} />
                       <LogoUrlPicker compact value={m.teamBLogo ?? ''} onChange={logo => updateMatch(m.id, { teamBLogo: logo })}
-                        thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamBLogo} color={m.teamBColor} />} />
+                        thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamBLogo} color={m.teamBColor} />} tournamentId={tournament.id} />
                     </div>
                   </div>
 
@@ -775,6 +1015,11 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
                   <div className="tm-sched-divider" />
                   <EditableTime value={m.time} onChange={time => updateMatch(m.id, { time })} />
 
+                  <div className="tm-sched-divider" />
+                  <div className="tm-sched-send-col">
+                    <ScoreboardSendButton match={m} scoreboards={scoreboards} onSend={id => sendToScoreboard(m, id)} />
+                  </div>
+
                   <button className="tm-sched-del" title="Delete fixture" onClick={() => deleteMatch(m.id)}>×</button>
                 </div>
               ))}
@@ -789,11 +1034,19 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
 // ── Results tab: saved match results belonging to the selected tournament ─────
 // Populated by a scoreboard's "💾 Save Result" (or the auto-save-on-overwrite
 // guard) — this tab just surfaces what's already been recorded.
-function ResultsPanel({ tournamentId }: { tournamentId: string }) {
-  const { results: allResults, deleteResult } = useMatchResultsStore();
+function formatSavedAt(ms: number): string {
+  const d = new Date(ms);
+  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
+// Same fixture-card layout as the Schedule tab (score in place of "VS",
+// competition/saved-time in place of venue/broadcaster) so a finished match
+// visually reads as the same object moving from one tab to the other.
+function ResultsPanel({ tournament }: { tournament: Tournament }) {
+  const { results: allResults, updateResult, deleteResult } = useMatchResultsStore();
   const results = useMemo(
-    () => allResults.filter(r => r.tournamentId === tournamentId),
-    [allResults, tournamentId]
+    () => allResults.filter(r => r.tournamentId === tournament.id),
+    [allResults, tournament.id]
   );
 
   if (results.length === 0) {
@@ -808,31 +1061,60 @@ function ResultsPanel({ tournamentId }: { tournamentId: string }) {
 
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <button className="tm-io-btn" title="Export results as CSV (Excel compatible)"
+          onClick={() => exportResultsCSV(results, tournament.name)}>
+          ↓ Export CSV
+        </button>
+      </div>
+      <div className="tm-sched-rows">
         {results.map(r => (
-          <div key={r.id} style={{
-            display: 'flex', alignItems: 'center', gap: 10, padding: 10,
-            background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8,
-          }}>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)', width: 84, flexShrink: 0 }}>{r.date}</span>
-            <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
-              {r.teamALogo
-                ? <img src={resolveImageUrl(r.teamALogo)} alt="" style={{ width: 24, height: 24, objectFit: 'contain', borderRadius: '50%', flexShrink: 0 }} />
-                : <span style={{ width: 10, height: 10, borderRadius: '50%', background: r.teamAColor, flexShrink: 0 }} />}
-              <span style={{ fontSize: 12, fontWeight: r.scoreA > r.scoreB ? 700 : 400, color: 'var(--text-primary)' }}>
-                {r.teamAShortName || r.teamAName}
-              </span>
-              <strong style={{ fontSize: 13, color: 'var(--text-primary)' }}>{r.scoreA} – {r.scoreB}</strong>
-              <span style={{ fontSize: 12, fontWeight: r.scoreB > r.scoreA ? 700 : 400, color: 'var(--text-primary)' }}>
-                {r.teamBShortName || r.teamBName}
-              </span>
-              {r.teamBLogo
-                ? <img src={resolveImageUrl(r.teamBLogo)} alt="" style={{ width: 24, height: 24, objectFit: 'contain', borderRadius: '50%', flexShrink: 0 }} />
-                : <span style={{ width: 10, height: 10, borderRadius: '50%', background: r.teamBColor, flexShrink: 0 }} />}
+          <div key={r.id} className="tm-sched-row">
+            <EditableDate value={r.date} onChange={date => updateResult(r.id, { date })} />
+            <div className="tm-sched-divider" />
+
+            <div className="tm-sched-matchup">
+              <div className="tm-sched-team">
+                <div style={{ width: 36, height: 36, flexShrink: 0 }}><ScheduleBadge logo={r.teamALogo} color={r.teamAColor} /></div>
+                <EditableText className="tm-sched-team-name" value={r.teamAShortName || r.teamAName}
+                  onChange={v => updateResult(r.id, r.teamAShortName ? { teamAShortName: v } : { teamAName: v })} />
+              </div>
+              <div className="tm-sched-vs-col">
+                <span className="tm-sched-vs tm-sched-score">
+                  <EditableText value={String(r.scoreA)} onChange={v => updateResult(r.id, { scoreA: Number(v) || 0 })} />
+                  <span className="tm-sched-score-sep">–</span>
+                  <EditableText value={String(r.scoreB)} onChange={v => updateResult(r.id, { scoreB: Number(v) || 0 })} />
+                </span>
+                <EditableText className="tm-sched-round" value={r.round ?? ''} placeholder="Round"
+                  onChange={v => updateResult(r.id, { round: v })} />
+              </div>
+              <div className="tm-sched-team tm-sched-team--b">
+                <EditableText className="tm-sched-team-name" value={r.teamBShortName || r.teamBName}
+                  onChange={v => updateResult(r.id, r.teamBShortName ? { teamBShortName: v } : { teamBName: v })} />
+                <div style={{ width: 36, height: 36, flexShrink: 0 }}><ScheduleBadge logo={r.teamBLogo} color={r.teamBColor} /></div>
+              </div>
             </div>
-            {r.round && <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>{r.round}</span>}
-            <button className="btn btn--ghost btn--small" title="Delete result"
-              onClick={() => deleteResult(r.id)} style={{ color: 'var(--text-muted)', flexShrink: 0 }}>×</button>
+
+            <div className="tm-sched-divider" />
+            <div className="tm-sched-venue">
+              <EditableText className="tm-sched-venue-name" value={r.competition ?? ''} placeholder="Competition"
+                onChange={v => updateResult(r.id, { competition: v })} />
+              <span className="tm-sched-venue-league">{tournament.name}</span>
+            </div>
+
+            <div className="tm-sched-divider" />
+            <div className="tm-sched-time">
+              <span className="tm-sched-time-val">{r.time ? formatTimeDisplay(r.time) : '—'}</span>
+              <span className="tm-sched-time-tz">Kickoff</span>
+            </div>
+
+            <div className="tm-sched-divider" />
+            <div className="tm-sched-time">
+              <span className="tm-sched-time-val">{formatSavedAt(r.savedAt)}</span>
+              <span className="tm-sched-time-tz">End Time</span>
+            </div>
+
+            <button className="tm-sched-del" title="Delete result" onClick={() => deleteResult(r.id)}>×</button>
           </div>
         ))}
       </div>
@@ -892,6 +1174,7 @@ export function TournamentManager({ onClose }: Props) {
   const [addingNew, setAddingNew] = useState(tournaments.length === 0);
   const [editTournName, setEditTournName] = useState(false);
   const [tournNameVal, setTournNameVal] = useState('');
+  const [confirmDeleteTournament, setConfirmDeleteTournament] = useState(false);
   const [applyStatus, setApplyStatus] = useState('');
   const [tab, setTab] = useState<'tournaments' | 'teams' | 'players' | 'schedule' | 'results'>('tournaments');
   const { teams } = useTeamDbStore();
@@ -974,6 +1257,7 @@ export function TournamentManager({ onClose }: Props) {
     setActiveTournament(id);
     setAddingNew(false);
     setEditTournName(false);
+    setConfirmDeleteTournament(false);
   };
 
   // Scoped to whichever tournament is currently selected — Teams/Players/
@@ -1064,7 +1348,7 @@ export function TournamentManager({ onClose }: Props) {
             ) : tab === 'schedule' ? (
               <SchedulePanel tournament={selected} />
             ) : (
-              <ResultsPanel tournamentId={selected.id} />
+              <ResultsPanel tournament={selected} />
             )}
           </div>
         ) : (
@@ -1132,16 +1416,27 @@ export function TournamentManager({ onClose }: Props) {
                       {SPORT_TYPES.map(s => <option key={s} value={s}>{SPORT_LABELS[s]}</option>)}
                     </select>
                   </div>
-                  <button
-                    className="tm-btn tm-btn--danger"
-                    onClick={() => {
-                      if (!confirm(`Delete "${selected.name}"? Its teams, players, fixtures, and results stay saved but will no longer be linked to a tournament.`)) return;
-                      deleteTournament(selected.id);
-                      const next = tournaments.find(t => t.id !== selected.id);
-                      setSelectedId(next?.id ?? '');
-                      if (!next) setAddingNew(false);
-                    }}
-                  >🗑 Delete</button>
+                  {confirmDeleteTournament ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Delete? Teams/fixtures/results stay saved.</span>
+                      <button
+                        className="tm-btn tm-btn--danger"
+                        onClick={() => {
+                          deleteTournament(selected.id);
+                          const next = tournaments.find(t => t.id !== selected.id);
+                          setSelectedId(next?.id ?? '');
+                          if (!next) setAddingNew(false);
+                          setConfirmDeleteTournament(false);
+                        }}
+                      >Confirm</button>
+                      <button className="tm-btn" onClick={() => setConfirmDeleteTournament(false)}>Cancel</button>
+                    </div>
+                  ) : (
+                    <button
+                      className="tm-btn tm-btn--danger"
+                      onClick={() => setConfirmDeleteTournament(true)}
+                    >🗑 Delete</button>
+                  )}
                 </div>
 
                 {/* Period / time settings */}

@@ -26,6 +26,10 @@ export interface ScheduledMatch {
   /** Set when this fixture has been sent to a scoreboard — used to grey it
    *  out and auto-advance the schedule widget's carousel past it. */
   sentAt?: number;
+  /** Set when a result has been saved for this fixture (the scoreboard it was
+   *  sent to had "💾 Save Result" pressed, or auto-saved on overwrite) — marks
+   *  it fully completed, distinct from just having been sent. */
+  completedAt?: number;
 }
 
 interface MatchScheduleStore {
@@ -35,6 +39,10 @@ interface MatchScheduleStore {
   deleteMatch: (id: string) => void;
   markSent: (id: string) => void;
   unmarkSent: (id: string) => void;
+  markCompleted: (id: string) => void;
+  resetAllSent: () => void;
+  clearMatches: () => void;
+  restoreMatches: (matches: unknown[]) => void;
 }
 
 export const useMatchScheduleStore = create<MatchScheduleStore>()(
@@ -62,6 +70,18 @@ export const useMatchScheduleStore = create<MatchScheduleStore>()(
       unmarkSent: (id) => set(s => ({
         matches: s.matches.map(m => m.id === id ? { ...m, sentAt: undefined } : m),
       })),
+
+      markCompleted: (id) => set(s => ({
+        matches: s.matches.map(m => m.id === id ? { ...m, completedAt: Date.now() } : m),
+      })),
+
+      resetAllSent: () => set(s => ({
+        matches: s.matches.map(m => ({ ...m, sentAt: undefined, completedAt: undefined })),
+      })),
+
+      clearMatches: () => set({ matches: [] }),
+
+      restoreMatches: (matches) => set({ matches: matches as ScheduledMatch[] }),
     }),
     {
       name: 'gomolab-match-schedule-v1',

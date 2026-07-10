@@ -1491,6 +1491,7 @@ name = "gomolab-vmix-control"
 version = "1.0.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "futures-util",
  "include_dir",
  "jpeg-encoder",

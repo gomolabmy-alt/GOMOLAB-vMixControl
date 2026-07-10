@@ -26,7 +26,7 @@ function breakLabel(total: number): string {
 export function TimerWidget({ widgetId, config, h }: Props) {
   const store = useCanvasStore();
   const ctx = useContext(CanvasActionContext);
-  const { startWidgetTimer, pauseWidgetTimer, resetWidgetTimer, adjustWidgetTimer, skipWidgetBreak, endWidgetPeriod, startFinalPlay, startExtraTime, startAfterEt, pages, executeAppFunction } = store;
+  const { startWidgetTimer, pauseWidgetTimer, resetWidgetTimer, adjustWidgetTimer, skipWidgetBreak, endWidgetPeriod, jumpToPeriod, startFinalPlay, startExtraTime, startAfterEt, pages, executeAppFunction } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { sendFunction } = useVmixStore();
 
@@ -383,10 +383,24 @@ export function TimerWidget({ widgetId, config, h }: Props) {
             {/* Period label — 1/3 */}
             <div className="wgt-tc-label-col">
               <div className="wgt-tc-icon" style={{ width: iconSize, height: iconSize, fontSize: Math.floor(iconSize * 0.5) }}>{headerIcon}</div>
-              <span className={`wgt-tc-phase${activeOverrunning ? ' wgt-tc-phase--ot' : ''}`}>
-                {headerPhase}
-                {activeOverrunning && !inExtraTime && !inAfterEt && <span className="wgt-tc-ot-tag"> +OT</span>}
-              </span>
+              {!inBreak && !inExtraTime && !inAfterEt && !inFinalPlay && periods > 1 ? (
+                <select
+                  className={`wgt-tc-phase wgt-tc-phase-select${activeOverrunning ? ' wgt-tc-phase--ot' : ''}`}
+                  value={Math.min(currentPeriod, periods)}
+                  title="Jump to a period"
+                  onClick={e => e.stopPropagation()}
+                  onChange={e => jumpToPeriod(widgetId, Number(e.target.value))}
+                >
+                  {Array.from({ length: periods }, (_, i) => i + 1).map(p => (
+                    <option key={p} value={p}>{periodLabel(p, periods)}</option>
+                  ))}
+                </select>
+              ) : (
+                <span className={`wgt-tc-phase${activeOverrunning ? ' wgt-tc-phase--ot' : ''}`}>
+                  {headerPhase}
+                  {activeOverrunning && !inExtraTime && !inAfterEt && <span className="wgt-tc-ot-tag"> +OT</span>}
+                </span>
+              )}
               {headerSub && <span className="wgt-tc-sub">{headerSub}</span>}
               {isLinked && (
                 <span className="wgt-tc-linked" title={`Linked to: ${sourceWidget?.label ?? sourceWidget?.id}`}>

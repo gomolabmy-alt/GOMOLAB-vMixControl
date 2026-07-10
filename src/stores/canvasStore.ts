@@ -278,6 +278,7 @@ interface CanvasStore {
   adjustWidgetTimer: (widgetId: string, deltaMs: number) => void;
   skipWidgetBreak: (widgetId: string) => void;
   endWidgetPeriod: (widgetId: string) => void;
+  jumpToPeriod: (widgetId: string, period: number) => void;
   startFinalPlay: (widgetId: string) => void;
   startExtraTime: (widgetId: string) => void;
   startAfterEt: (widgetId: string) => void;
@@ -862,11 +863,12 @@ export const useCanvasStore = create<CanvasStore>()(
                   inFinalPlay: true, finalPlayMs: 0,
                   finalPlayPendingNext: true,
                 });
-              } else {
-                // Keep the tick loop running straight through the transition —
-                // period end no longer stops the timer and waits for a manual
-                // "Resume" click. Re-anchor the wall clock to the new phase's
-                // starting value so the very next tick computes correctly.
+              } else if (cfg.autoAdvance) {
+                // Auto mode (opt-in, widget setting): keep the tick loop running
+                // straight through the transition — period end doesn't stop the
+                // timer or wait for a manual "Resume" click. Re-anchor the wall
+                // clock to the new phase's starting value so the very next tick
+                // computes correctly.
                 if (breakMs > 0) {
                   // Break can count down to 0 (time remaining) or up from 0
                   // (elapsed break time) per cfg.breakCountMode — operator choice.
@@ -897,6 +899,34 @@ export const useCanvasStore = create<CanvasStore>()(
                     periodStartMs: nextPeriodStartMs,
                     currentPeriod: currentPeriod + 1,
                     inBreak: false,
+                  });
+                }
+              } else {
+                // Manual mode (default): freeze at the transition point and
+                // stop — the operator presses Play/Resume to start the half-time
+                // countdown, and again to start the next period once it ends.
+                stopInterval();
+                if (breakMs > 0) {
+                  const breakStartMs = cfg.breakCountMode === 'up' ? 0 : breakMs;
+                  updateWidgetConfig(widgetId, {
+                    currentMs: periodEndMs,
+                    resumeMs: nextCurrentMs,
+                    resumePeriodStartMs: nextPeriodStartMs,
+                    periodStartMs: nextPeriodStartMs,
+                    inBreak: true,
+                    breakCurrentMs: breakStartMs,
+                    running: false,
+                  });
+                  timerSendAll(triggerClient, { ...cfg, inBreak: true }, formatTime(breakStartMs, cfg.format));
+                } else {
+                  updateWidgetConfig(widgetId, {
+                    currentMs: nextCurrentMs,
+                    resumeMs: null,
+                    resumePeriodStartMs: null,
+                    periodStartMs: nextPeriodStartMs,
+                    currentPeriod: currentPeriod + 1,
+                    inBreak: false,
+                    running: false,
                   });
                 }
               }
@@ -1174,24 +1204,30 @@ export const useCanvasStore = create<CanvasStore>()(
                     : Math.max(0, (cfg.breakCurrentMs ?? 0) - tickMs));
               const breakDone = breakUp ? nextBreak >= breakDurationMs : nextBreak <= 0;
               if (breakDone) {
-                // Break ends — auto-continue straight into the next period
-                // instead of stopping and waiting for a manual restart.
                 const nextPeriod = (cfg.currentPeriod ?? 1) + 1;
                 logToLinkedTimelines(widgetId, getPeriodStartLabel(cfg.periods ?? 1, nextPeriod), '');
                 const startMs = cfg.resumeMs ?? (cfg.mode === 'countdown' ? cfg.durationMs : 0);
-                _runWallStart[widgetId] = Date.now();
-                _runGameMs[widgetId] = startMs;
                 delete _breakWallStart[widgetId];
                 delete _breakGameMs[widgetId];
-                updateWidgetConfig(widgetId, {
-                  inBreak: false,
-                  breakCurrentMs: 0,
-                  currentPeriod: nextPeriod,
-                  currentMs: startMs,
-                  periodStartMs: cfg.resumePeriodStartMs ?? 0,
-                  resumeMs: null,
-                  resumePeriodStartMs: null,
-                });
+                if (cfg.autoAdvance) {
+                  // Auto mode: continue straight into the next period.
+                  _runWallStart[widgetId] = Date.now();
+                  _runGameMs[widgetId] = startMs;
+                  updateWidgetConfig(widgetId, {
+                    inBreak: false, breakCurrentMs: 0, currentPeriod: nextPeriod, currentMs: startMs,
+                    periodStartMs: cfg.resumePeriodStartMs ?? 0, resumeMs: null, resumePeriodStartMs: null,
+                  });
+                } else {
+                  // Manual mode (default): break has ended — freeze at the next
+                  // period's starting value and stop; the operator presses
+                  // Play/Resume to actually start the next period.
+                  stopInterval();
+                  updateWidgetConfig(widgetId, {
+                    inBreak: false, breakCurrentMs: 0, currentPeriod: nextPeriod, currentMs: startMs,
+                    periodStartMs: cfg.resumePeriodStartMs ?? 0, resumeMs: null, resumePeriodStartMs: null,
+                    running: false,
+                  });
+                }
                 if (client && cfg.breakVmixInputKey && cfg.breakFieldName) {
                   client.setTextField(cfg.breakVmixInputKey, cfg.breakFieldName, formatTime(0, cfg.format));
                 }
@@ -1408,6 +1444,42 @@ export const useCanvasStore = create<CanvasStore>()(
           });
           const { client } = useVmixStore.getState();
           timerSendAll(client, config, formatTime(resetMs, config.format));
+          sendOverrunColor(config, client, false);
+        },
+
+        // Jumps directly to the start of any regular period (e.g. picking "Q3"
+        // from a dropdown) instead of only advancing one period at a time via
+        // End/Skip. Always lands paused — the operator presses Play to start it,
+        // matching the manual-by-default period/break flow.
+        jumpToPeriod: (widgetId, period) => {
+          syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'jumpToPeriod', args: [widgetId, period] });
+          const { timerIntervals } = get();
+          if (timerIntervals[widgetId]) stopWorkerInterval(widgetId);
+          const ints = { ...timerIntervals };
+          delete ints[widgetId];
+          set({ timerIntervals: ints });
+          syncSleepBlock(ints);
+          const config = findWidgetConfig(widgetId);
+          if (!config) return;
+          const periods = config.periods ?? 1;
+          const target = Math.max(1, Math.min(period, periods));
+          const carryOver = config.periodMode === 'continue' && config.mode !== 'countdown';
+          const periodStartMs = carryOver ? (target - 1) * config.durationMs : 0;
+          const startMs = config.mode === 'countdown' ? config.durationMs : (carryOver ? periodStartMs : 0);
+          updateWidgetConfig(widgetId, {
+            currentPeriod: target,
+            currentMs: startMs,
+            periodStartMs,
+            running: false,
+            overrunning: false,
+            resumeMs: null, resumePeriodStartMs: null,
+            inBreak: false, breakCurrentMs: 0,
+            inExtraTime: false, etCurrentPeriod: 1, etInBreak: false, etBreakCurrentMs: 0, etOverrunning: false,
+            inAfterEt: false, afterEtOverrunning: false,
+            inFinalPlay: false, finalPlayMs: 0, finalPlayPendingNext: false,
+          });
+          const { client } = useVmixStore.getState();
+          timerSendAll(client, config, formatTime(startMs, config.format));
           sendOverrunColor(config, client, false);
         },
 
@@ -2080,6 +2152,9 @@ export function initCanvasSync() {
         break;
       case 'skipWidgetBreak':
         store.skipWidgetBreak(msg.args[0] as string);
+        break;
+      case 'jumpToPeriod':
+        store.jumpToPeriod(msg.args[0] as string, msg.args[1] as number);
         break;
       case 'startExtraTime':
         store.startExtraTime(msg.args[0] as string);

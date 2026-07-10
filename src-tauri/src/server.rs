@@ -583,10 +583,6 @@ async fn api_upload_image(
             continue;
         }
         if let Ok(data) = field.bytes().await {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
             let stem: String = std::path::Path::new(&filename)
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -594,7 +590,23 @@ async fn api_upload_image(
                 .chars()
                 .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
                 .collect();
-            let name = format!("{}_{}.{}", ts, stem, ext);
+            // Keep the original filename where possible, only suffixing
+            // "_2", "_3", … if that exact name is already taken.
+            let name = {
+                let plain = format!("{}.{}", stem, ext);
+                if !state.images_dir.join(&plain).exists() {
+                    plain
+                } else {
+                    let mut n = 2;
+                    loop {
+                        let candidate = format!("{}_{}.{}", stem, n, ext);
+                        if !state.images_dir.join(&candidate).exists() {
+                            break candidate;
+                        }
+                        n += 1;
+                    }
+                }
+            };
             let dest = state.images_dir.join(&name);
             if std::fs::write(&dest, &data).is_ok() {
                 let url = format!("{}/images/{}", base, name);

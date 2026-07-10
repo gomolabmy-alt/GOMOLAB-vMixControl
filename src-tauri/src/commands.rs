@@ -590,6 +590,24 @@ pub async fn open_image_dialog() -> Result<Option<String>, String> {
     Ok(file.map(|f| f.path().to_string_lossy().to_string()))
 }
 
+// Picks a filename that keeps the original stem where possible, only adding
+// a "_2", "_3", … suffix if a file with that exact name already exists —
+// so the library shows recognizable names instead of a timestamp prefix.
+fn unique_dest_name(dir: &Path, safe_stem: &str, ext: &str) -> String {
+    let plain = format!("{}.{}", safe_stem, ext);
+    if !dir.join(&plain).exists() {
+        return plain;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{}_{}.{}", safe_stem, n, ext);
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 #[tauri::command]
 pub fn save_image(src_path: String, state: State<'_, AppState>) -> Result<SaveImageResult, String> {
     let src = Path::new(&src_path);
@@ -608,17 +626,64 @@ pub fn save_image(src_path: String, state: State<'_, AppState>) -> Result<SaveIm
             }
         })
         .collect();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let name = format!("{}_{}.{}", ts, safe_stem, ext);
+    let name = unique_dest_name(&state.server.images_dir, &safe_stem, ext);
     let dest = state.server.images_dir.join(&name);
     std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
     // Use localhost so the URL remains valid regardless of which network interface
     // is active. setImageField rewrites to the LAN IP when sending to vMix.
     let url = format!("http://localhost:{}/images/{}", state.server.sync_port, name);
     Ok(SaveImageResult { name, url })
+}
+
+#[tauri::command]
+pub fn rename_image(old_name: String, new_name: String, state: State<'_, AppState>) -> Result<SaveImageResult, String> {
+    let dir = &state.server.images_dir;
+    let old_file = dir.join(Path::new(&old_name).file_name().ok_or("invalid filename")?);
+    if !old_file.exists() {
+        return Err("file not found".into());
+    }
+    let ext = old_file.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    let safe_stem: String = Path::new(&new_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image")
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let name = if old_file.file_name().and_then(|n| n.to_str()) == Some(&format!("{}.{}", safe_stem, ext)) {
+        // Renaming to the same name — nothing to do.
+        old_name.clone()
+    } else {
+        unique_dest_name(dir, &safe_stem, ext)
+    };
+    let dest = dir.join(&name);
+    std::fs::rename(&old_file, &dest).map_err(|e| e.to_string())?;
+    let url = format!("http://localhost:{}/images/{}", state.server.sync_port, name);
+    Ok(SaveImageResult { name, url })
+}
+
+// Restores an image from a Project export (base64-embedded file data). Kept
+// idempotent — if a file with that exact name already exists (e.g. re-importing
+// the same project, or the image was never deleted), it's left untouched
+// rather than duplicated with a numeric suffix.
+#[tauri::command]
+pub fn import_image(name: String, data_base64: String, state: State<'_, AppState>) -> Result<SaveImageResult, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&data_base64)
+        .map_err(|e| e.to_string())?;
+    let dir = &state.server.images_dir;
+    let safe_name = Path::new(&name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("image.png")
+        .to_string();
+    let dest = dir.join(&safe_name);
+    if !dest.exists() {
+        std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
+    }
+    let url = format!("http://localhost:{}/images/{}", state.server.sync_port, safe_name);
+    Ok(SaveImageResult { name: safe_name, url })
 }
 
 #[tauri::command]

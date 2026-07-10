@@ -2,16 +2,23 @@ import { useState, useRef, useEffect } from 'react';
 import { useCanvasStore } from '../stores/canvasStore';
 import { useVmixStore } from '../stores/vmixStore';
 import { useTournamentStore } from '../stores/tournamentStore';
-import { buildSnapshot, exportToFile, localFileBackend } from '../utils/project';
+import { useTeamDbStore } from '../stores/teamDbStore';
+import { useMatchScheduleStore } from '../stores/matchScheduleStore';
+import { useMatchResultsStore } from '../stores/matchResultsStore';
+import { buildSnapshot, exportToFile, localFileBackend, collectImages, restoreImages } from '../utils/project';
 
 export function ProjectMenu() {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<{ msg: string; ok: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   const { pages, activePageId, restoreCanvas } = useCanvasStore();
   const { savedConnections, shortcuts, scoreboards, timers, dataBindings, globalVariables, restoreVmix } = useVmixStore();
   const { tournaments, activeTournamentId, restoreTournaments } = useTournamentStore();
+  const { teams, restoreTeams } = useTeamDbStore();
+  const { matches, restoreMatches } = useMatchScheduleStore();
+  const { results, restoreResults } = useMatchResultsStore();
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -28,26 +35,45 @@ export function ProjectMenu() {
   }, [status]);
 
   const handleExport = async () => {
-    const snapshot = buildSnapshot(
-      { pages, activePageId },
-      { savedConnections, shortcuts, scoreboards, timers: timers as never, dataBindings, globalVariables },
-      { tournaments, activeTournamentId },
-    );
-    await localFileBackend.save(snapshot);
-    setStatus({ msg: 'Exported', ok: true });
     setOpen(false);
+    setBusy(true);
+    try {
+      const images = await collectImages();
+      const snapshot = buildSnapshot(
+        { pages, activePageId },
+        { savedConnections, shortcuts, scoreboards, timers: timers as never, dataBindings, globalVariables },
+        { tournaments, activeTournamentId },
+        { teams },
+        { matches },
+        { results },
+        images,
+      );
+      await localFileBackend.save(snapshot);
+      setStatus({ msg: 'Exported', ok: true });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleImport = async () => {
     setOpen(false);
     const snapshot = await localFileBackend.load();
     if (!snapshot) { setStatus({ msg: 'Import cancelled', ok: false }); return; }
-    restoreCanvas(snapshot.canvas.pages, snapshot.canvas.activePageId);
-    restoreVmix(snapshot.vmix);
-    if (snapshot.tournament) {
-      restoreTournaments(snapshot.tournament.tournaments, snapshot.tournament.activeTournamentId);
+    setBusy(true);
+    try {
+      restoreCanvas(snapshot.canvas.pages, snapshot.canvas.activePageId);
+      restoreVmix(snapshot.vmix);
+      if (snapshot.tournament) {
+        restoreTournaments(snapshot.tournament.tournaments, snapshot.tournament.activeTournamentId);
+      }
+      if (snapshot.teamDb) restoreTeams(snapshot.teamDb.teams);
+      if (snapshot.matchSchedule) restoreMatches(snapshot.matchSchedule.matches);
+      if (snapshot.matchResults) restoreResults(snapshot.matchResults.results);
+      if (snapshot.images?.length) await restoreImages(snapshot.images);
+      setStatus({ msg: 'Imported', ok: true });
+    } finally {
+      setBusy(false);
     }
-    setStatus({ msg: 'Imported', ok: true });
   };
 
   return (
@@ -57,7 +83,9 @@ export function ProjectMenu() {
         onClick={() => setOpen(v => !v)}
         title="Project: save / load"
       >
-        {status ? (
+        {busy ? (
+          <span className="project-status--busy">…</span>
+        ) : status ? (
           <span className={status.ok ? 'project-status--ok' : 'project-status--err'}>{status.msg}</span>
         ) : '💾'}
       </button>
@@ -71,10 +99,14 @@ export function ProjectMenu() {
             Auto-saved locally
           </div>
 
-          <button className="project-action-btn" onClick={handleExport}>
+          <p className="app-settings-hint" style={{ margin: '0 0 6px' }}>
+            Includes canvas, vMix settings, tournaments, teams, schedule, results, and the logo library.
+          </p>
+
+          <button className="project-action-btn" onClick={handleExport} disabled={busy}>
             <span>↓</span> Export to file
           </button>
-          <button className="project-action-btn" onClick={handleImport}>
+          <button className="project-action-btn" onClick={handleImport} disabled={busy}>
             <span>↑</span> Import from file
           </button>
 

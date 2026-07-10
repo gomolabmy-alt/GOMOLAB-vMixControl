@@ -1061,8 +1061,26 @@ button { user-select: none; -webkit-user-select: none; }
 .logo-library-title { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
 .logo-library-empty { font-size: 11px; color: var(--text-muted); text-align: center; padding: 8px 0; }
 .logo-library-grid { display: flex; flex-wrap: wrap; gap: 6px; }
-.logo-library-item { position: relative; width: 56px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; background: #111; }
-.logo-library-thumb { width: 56px; height: 40px; object-fit: contain; display: block; }
+.logo-library-item { position: relative; width: 64px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; background: #111; }
+.logo-library-thumb { width: 64px; height: 40px; object-fit: contain; display: block; }
+.logo-library-name {
+  display: block; font-size: 8.5px; color: var(--text-muted); text-align: center;
+  padding: 2px 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: rgba(255,255,255,0.04); border-top: 1px solid var(--border);
+  cursor: text;
+}
+.logo-library-name-input {
+  display: block; width: 100%; font: inherit; font-size: 8.5px; text-align: center;
+  padding: 2px 3px; background: var(--bg-3); color: var(--text-primary);
+  border: 1px solid var(--accent); border-top: 1px solid var(--accent);
+}
+.logo-library-del {
+  position: absolute; top: 2px; right: 2px; width: 15px; height: 15px; border-radius: 50%;
+  border: none; background: rgba(0,0,0,0.65); color: #fff; font-size: 11px; line-height: 1;
+  cursor: pointer; opacity: 0; transition: opacity var(--transition); z-index: 2;
+}
+.logo-library-item:hover .logo-library-del { opacity: 0.9; }
+.logo-library-del:hover { background: var(--red); }
 .logo-library-actions { display: flex; }
 .logo-library-btn { flex: 1; border: none; background: rgba(255,255,255,.07); color: var(--text-secondary); font-size: 10px; font-weight: 700; padding: 2px 0; cursor: pointer; }
 .logo-library-btn:hover { background: var(--accent); color: #fff; }
@@ -1229,6 +1247,23 @@ button { user-select: none; -webkit-user-select: none; }
 .project-menu-btn { font-size: 14px; min-width: 32px; }
 .project-status--ok  { color: #2ecc71; font-size: 11px; }
 .project-status--err { color: #e74c3c; font-size: 11px; }
+.project-status--busy { color: var(--text-muted); font-size: 11px; }
+
+/* Shared in-place confirm button (ConfirmButton.tsx) */
+.confirm-btn-group {
+  display: flex; align-items: center; gap: 5px;
+  background: rgba(231,76,60,0.12); border: 1px solid rgba(231,76,60,0.4);
+  border-radius: 4px; padding: 2px 4px;
+}
+.confirm-btn-msg { font-size: 9.5px; color: var(--text-primary, #e8e8f0); font-weight: 500; text-transform: none; letter-spacing: 0; white-space: nowrap; }
+.confirm-btn {
+  font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 3px;
+  border: none; cursor: pointer; text-transform: none; letter-spacing: 0;
+}
+.confirm-btn--yes { background: #e74c3c; color: #fff; }
+.confirm-btn--yes:hover { background: #c0392b; }
+.confirm-btn--no { background: rgba(255,255,255,0.1); color: var(--text-secondary, #8888a8); }
+.confirm-btn--no:hover { background: rgba(255,255,255,0.18); }
 
 .project-dropdown {
   position: absolute;
@@ -3584,6 +3619,55 @@ input.wgt-score-comp-sub::placeholder { color: var(--text-muted); font-weight: 4
   opacity: 0.45;
   flex-shrink: 0;
 }
+.wgt-score-logo-hist-btn {
+  border: none; background: none; padding: 0; margin: 0; cursor: pointer;
+  border-radius: 8px; transition: box-shadow 0.15s;
+}
+.wgt-score-logo-hist-btn:hover { box-shadow: 0 0 0 2px var(--accent); }
+
+.team-hist-popup {
+  width: 380px; max-height: 520px; overflow-y: auto;
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.55); padding: 12px 0;
+}
+.team-hist-title {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 17px; font-weight: 700; color: var(--text-primary);
+  padding: 4px 18px 12px; border-bottom: 1px solid var(--border); margin-bottom: 8px;
+}
+.team-hist-title-logo { width: 32px; height: 32px; object-fit: contain; border-radius: 6px; flex-shrink: 0; }
+.team-hist-title-logo--ph { opacity: 0.5; }
+.team-hist-opp-logo { width: 24px; height: 24px; object-fit: contain; border-radius: 4px; flex-shrink: 0; }
+.team-hist-opp-logo--ph { opacity: 0.5; }
+.team-hist-section + .team-hist-section { margin-top: 12px; }
+.team-hist-section-label {
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted); padding: 4px 18px 6px;
+}
+.team-hist-row-wrap { padding: 9px 0; }
+.team-hist-row-wrap + .team-hist-row-wrap { border-top: 1px solid var(--border); }
+.team-hist-row {
+  display: flex; align-items: center; gap: 10px; padding: 2px 18px;
+  font-size: 15px; color: var(--text-secondary);
+}
+.team-hist-round {
+  padding: 2px 18px 0 52px; font-size: 12px; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.team-hist-date { color: var(--text-muted); flex-shrink: 0; white-space: nowrap; min-width: 46px; }
+.team-hist-vs { color: var(--text-muted); flex-shrink: 0; font-size: 12px; }
+.team-hist-opp { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.team-hist-comp { color: var(--text-muted); font-size: 12.5px; flex-shrink: 0; }
+.team-hist-score { font-size: 16px; font-weight: 800; color: var(--text-primary); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.team-hist-empty { padding: 6px 18px; font-size: 13px; color: var(--text-muted); }
+.team-hist-outcome {
+  width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 800; color: #fff;
+}
+.team-hist-outcome--W { background: #2ecc71; }
+.team-hist-outcome--L { background: #e74c3c; }
+.team-hist-outcome--D { background: #7f8c9a; }
 .wgt-score-mcolor {
   position: absolute;
   bottom: -4px;
@@ -8695,6 +8779,31 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
 .tm-sched-team-name { font-size: 14px; font-weight: 700; color: var(--text-primary); white-space: nowrap; }
 .tm-sched-vs { font-size: 12px; font-weight: 700; color: var(--text-muted); flex-shrink: 0; }
 
+/* VS/score + round stacked together, both inside the matchup div */
+.tm-sched-vs-col { display: flex; flex-direction: column; align-items: center; gap: 3px; flex-shrink: 0; }
+.tm-sched-round {
+  font-size: 9.5px;
+  color: var(--text-muted);
+  cursor: text;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+/* Result score: bigger + highlighted, the focal point of the row */
+.tm-sched-score {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.tm-sched-score-sep { color: var(--text-muted); font-weight: 400; opacity: 0.6; }
+.tm-sched-score .tm-sched-edit-input { width: 1.6em; flex: 0 0 auto; text-align: center; padding: 1px 2px; }
+
 .tm-sched-badge {
   width: 100%; height: 100%; border-radius: 50%; overflow: hidden;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
@@ -8742,6 +8851,24 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
 }
 .tm-sched-row:hover .tm-sched-del { opacity: 0.85; }
 .tm-sched-del:hover { color: var(--red); }
+
+.tm-sched-send-col { flex-shrink: 0; display: flex; align-items: center; justify-content: center; padding: 10px 14px; }
+.tm-sched-send-btn {
+  border: none; border-radius: 6px; padding: 6px 10px; font-size: 11px; font-weight: 700;
+  cursor: pointer; background: var(--accent); color: #fff; transition: background 0.15s; white-space: nowrap;
+}
+.tm-sched-send-btn:hover:not(:disabled) { filter: brightness(1.12); }
+.tm-sched-send-btn:disabled { background: var(--bg-3); color: var(--text-muted); cursor: default; }
+.tm-sched-sent-tag { font-size: 11px; font-weight: 700; color: #2ecc71; white-space: nowrap; }
+
+.tm-sched-row--completed { opacity: 0.55; }
+.tm-sched-row--completed:hover { opacity: 0.85; }
+.tm-sched-completed-badge {
+  position: absolute; top: 6px; left: 8px; z-index: 2;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase;
+  color: #2ecc71; background: rgba(46,204,113,0.15); border: 1px solid rgba(46,204,113,0.4);
+  border-radius: 10px; padding: 1px 7px;
+}
 
 /* Config panel: team side picker */
 .team-side-picker {
@@ -10661,6 +10788,12 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
 }
 [data-theme="dark"] .wgt-tc-phase { color: #e0e0f0; }
 .wgt-tc-phase--ot { color: #e74c3c !important; }
+.wgt-tc-phase-select {
+  font-family: inherit; border: none; background: transparent; cursor: pointer;
+  padding: 0; margin: 0; -webkit-appearance: none; appearance: none;
+  max-width: 100%;
+}
+.wgt-tc-phase-select:hover, .wgt-tc-phase-select:focus { opacity: 0.75; outline: none; }
 
 .wgt-tc-ot-tag {
   font-size: 11px;
@@ -11075,6 +11208,9 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
   font-family: inherit;
 }
 .wgt-rm-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   padding: 8px 12px;
   font-size: 12px;
   font-weight: 800;
@@ -11085,6 +11221,14 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
   border-bottom: 1px solid rgba(255,255,255,0.06);
   flex-shrink: 0;
 }
+.wgt-rm-tool-btn, .wgt-ms-tool-btn {
+  font-size: 9.5px; font-weight: 700; text-transform: none; letter-spacing: 0;
+  padding: 2px 6px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.75); cursor: pointer;
+}
+.wgt-rm-tool-btn:hover, .wgt-ms-tool-btn:hover { background: rgba(255,255,255,0.14); }
+.wgt-rm-tool-btn--danger, .wgt-ms-tool-btn--danger { border-color: rgba(231,76,60,0.5); color: #ff8a80; }
+.wgt-rm-tool-btn--danger:hover, .wgt-ms-tool-btn--danger:hover { background: rgba(231,76,60,0.2); }
 .wgt-rm-empty {
   padding: 16px 12px;
   font-size: 11px;
@@ -11109,15 +11253,29 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
 }
 .wgt-rm-group-comp { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wgt-rm-group-date { flex-shrink: 0; opacity: 0.7; }
+.wgt-rm-row-wrap {
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  padding-bottom: 2px;
+}
 .wgt-rm-row {
   position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
+  padding: 6px 12px 0;
 }
 .wgt-rm-row:hover .wgt-rm-del { opacity: 1; }
+.wgt-rm-round {
+  display: block;
+  text-align: center;
+  font-size: 9.5px;
+  color: rgba(255,255,255,0.4);
+  padding: 1px 12px 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wgt-rm-placeholder { opacity: 0.5; }
 .wgt-rm-team {
   display: flex;
   align-items: center;
@@ -11162,6 +11320,12 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
 .wgt-rm-score-sep { opacity: 0.4; font-weight: 400; }
 .wgt-rm-score-win { color: #2ecc71; }
 .wgt-rm-score-lose { color: rgba(255,255,255,0.4); }
+.wgt-rm-edit-input {
+  font: inherit; font-weight: inherit; color: #fff; text-align: center;
+  background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 3px; padding: 0 2px; width: 3.2em; min-width: 0;
+}
+.wgt-rm-score .wgt-rm-edit-input { width: 1.6em; }
 .wgt-rm-date {
   flex-shrink: 0;
   font-size: 9.5px;
@@ -11247,6 +11411,17 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
 }
 .wgt-ms-row--sent { opacity: 0.45; }
 .wgt-ms-row--late { border-color: rgba(231,76,60,0.4); background: rgba(231,76,60,0.06); }
+.wgt-ms-row--next:not(.wgt-ms-row--late) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.wgt-ms-next-badge {
+  align-self: flex-start;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
 .wgt-ms-late-badge {
   align-self: flex-start;
   background: rgba(231,76,60,0.15);

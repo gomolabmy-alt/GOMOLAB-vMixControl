@@ -1,10 +1,51 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { useTeamDbStore } from '../stores/teamDbStore';
 import { resolveImageUrl } from '../lib/imageUrl';
 
 const isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 interface ImageInfo { name: string; url: string }
+
+// Double-click a library filename to rename it in place.
+function RenamableName({ name, onRename }: { name: string; onRename: (newName: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const ref = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) requestAnimationFrame(() => { ref.current?.focus(); ref.current?.select(); });
+  }, [editing]);
+
+  const commit = () => { setEditing(false); if (draft.trim() && draft !== name) onRename(draft); };
+
+  if (editing) {
+    return (
+      <input
+        ref={ref}
+        className="logo-library-name-input"
+        value={draft}
+        onClick={e => e.stopPropagation()}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') { setDraft(name); setEditing(false); }
+        }}
+      />
+    );
+  }
+
+  return (
+    <span
+      className="logo-library-name"
+      title={`${name} — double-click to rename`}
+      onDoubleClick={e => { e.stopPropagation(); setDraft(name); setEditing(true); }}
+    >
+      {name}
+    </span>
+  );
+}
 
 interface Props {
   value: string;
@@ -18,15 +59,38 @@ interface Props {
   thumbContent?: React.ReactNode;
   /** Compact mode only: size of the clickable thumbnail box, in px. */
   thumbSize?: { w: number; h: number };
+  /** When set, the library opens scoped to this tournament's own team logos
+   *  first (a much shorter, more relevant list) — the full server image
+   *  library is still one click away via "Browse full library". */
+  tournamentId?: string;
 }
 
-export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbContent, thumbSize }: Props) {
+export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbContent, thumbSize, tournamentId }: Props) {
   const [showLibrary, setShowLibrary] = useState(false);
+  const [browseAll, setBrowseAll] = useState(false);
+  const [libPos, setLibPos] = useState<{ left: number; bottom: number } | null>(null);
   const [images, setImages] = useState<ImageInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
+  const { teams: dbTeams } = useTeamDbStore();
+
+  // This tournament's own team logos — de-duplicated by URL — shown first so
+  // picking a logo doesn't require scrolling the entire global upload library.
+  const teamLogos = useMemo(() => {
+    if (!tournamentId) return [];
+    const seen = new Set<string>();
+    const out: { name: string; url: string }[] = [];
+    for (const t of dbTeams) {
+      if (t.tournamentId === tournamentId && t.logo && !seen.has(t.logo)) {
+        seen.add(t.logo);
+        out.push({ name: t.name, url: t.logo });
+      }
+    }
+    return out;
+  }, [dbTeams, tournamentId]);
+  const showScoped = !!tournamentId && teamLogos.length > 0 && !browseAll;
 
   useEffect(() => {
     if (!showLibrary) return;
@@ -44,6 +108,20 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [showLibrary]);
+
+  // Opens via a portal into document.body, positioned above the anchor with
+  // fixed coordinates: widgets and table rows commonly have overflow:hidden
+  // (for rounded corners / clipping), which would silently clip an
+  // absolutely-positioned popup nested inside them.
+  const toggleLibrary = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!showLibrary && anchorRef.current) {
+      const r = anchorRef.current.getBoundingClientRect();
+      setLibPos({ left: r.left, bottom: window.innerHeight - r.top + 6 });
+      setBrowseAll(false);
+    }
+    setShowLibrary(v => !v);
+  };
 
   async function loadImages() {
     setLoading(true);
@@ -94,31 +172,106 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
     setShowLibrary(false);
   }
 
-  const library = (
+  // Library management (Tauri only — the browser/remote preview path has no
+  // mutation routes for this yet, only list/upload).
+  async function handleDeleteImage(e: React.MouseEvent, img: ImageInfo) {
+    e.stopPropagation();
+    if (!isTauriApp) return;
+    if (!confirm(`Delete "${img.name}" from the library? This can't be undone.`)) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('delete_image', { name: img.name });
+      if (value === img.url) onChange('');
+      loadImages();
+    } catch { /* ignore */ }
+  }
+
+  async function handleClearLibrary(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!isTauriApp || images.length === 0) return;
+    if (!confirm(`Delete all ${images.length} image${images.length !== 1 ? 's' : ''} in the library? This can't be undone.`)) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      for (const img of images) await invoke('delete_image', { name: img.name });
+      if (images.some(img => img.url === value)) onChange('');
+      loadImages();
+    } catch { /* ignore */ }
+  }
+
+  async function handleRenameImage(img: ImageInfo, newName: string) {
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === img.name) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const result = await invoke<{ name: string; url: string }>('rename_image', { oldName: img.name, newName: trimmed });
+      if (value === img.url) onChange(result.url);
+      loadImages();
+    } catch { /* ignore */ }
+  }
+
+  const library = libPos && (
     <div
       ref={popupRef}
       className="logo-library"
-      style={{ position: 'absolute', top: '100%', left: 0, zIndex: 300,
-        minWidth: 220, background: 'var(--bg-1)', marginTop: 4, maxHeight: 240, overflowY: 'auto',
-        boxShadow: '0 4px 16px rgba(0,0,0,.5)', borderRadius: 6 }}
+      onClick={e => e.stopPropagation()}
+      style={{ position: 'fixed', left: libPos.left, bottom: libPos.bottom, zIndex: 10000,
+        minWidth: 220, background: 'var(--bg-1)', maxHeight: 280, overflowY: 'auto',
+        boxShadow: '0 -4px 16px rgba(0,0,0,.5)', borderRadius: 6 }}
     >
       <div className="logo-library-header">
-        <span className="logo-library-title">Server Images</span>
+        <span className="logo-library-title">{showScoped ? 'Team Logos' : 'Server Images'}</span>
         <div style={{ display: 'flex', gap: 4 }}>
-          <button className="btn btn--ghost btn--small" onClick={handleUploadClick} style={{ fontSize: 10, padding: '1px 6px' }}>↑ Upload</button>
-          <button className="btn btn--ghost btn--small" onClick={loadImages} style={{ fontSize: 10, padding: '1px 5px' }}>↺</button>
+          {showScoped ? (
+            <button className="btn btn--ghost btn--small" onClick={() => setBrowseAll(true)} style={{ fontSize: 10, padding: '1px 6px' }}>
+              Browse full library →
+            </button>
+          ) : (
+            <>
+              {tournamentId && teamLogos.length > 0 && (
+                <button className="btn btn--ghost btn--small" onClick={() => setBrowseAll(false)} style={{ fontSize: 10, padding: '1px 6px' }}>
+                  ← Team logos
+                </button>
+              )}
+              <button className="btn btn--ghost btn--small" onClick={handleUploadClick} style={{ fontSize: 10, padding: '1px 6px' }}>↑ Upload</button>
+              <button className="btn btn--ghost btn--small" onClick={loadImages} style={{ fontSize: 10, padding: '1px 5px' }}>↺</button>
+              {isTauriApp && images.length > 0 && (
+                <button className="btn btn--ghost btn--small" title="Delete every image in the library"
+                  onClick={handleClearLibrary} style={{ fontSize: 10, padding: '1px 6px', color: 'var(--red)' }}>
+                  🗑 Clear
+                </button>
+              )}
+            </>
+          )}
         </div>
       </div>
-      {loading ? (
+      {showScoped ? (
+        <div className="logo-library-grid">
+          {teamLogos.map(t => (
+            <div key={t.url} className="logo-library-item" style={{ cursor: 'pointer' }} title={t.name}
+              onClick={() => { onChange(t.url); setShowLibrary(false); }}>
+              <img src={resolveImageUrl(t.url)} alt={t.name} className="logo-library-thumb" />
+              <span className="logo-library-name">{t.name}</span>
+            </div>
+          ))}
+        </div>
+      ) : loading ? (
         <div className="logo-library-empty">Loading…</div>
       ) : images.length === 0 ? (
         <div className="logo-library-empty">No images yet — upload one</div>
       ) : (
         <div className="logo-library-grid">
           {images.map(img => (
-            <div key={img.name} className="logo-library-item" style={{ cursor: 'pointer' }} title={img.name}
+            <div key={img.name} className="logo-library-item" style={{ cursor: 'pointer' }}
               onClick={() => { onChange(img.url); setShowLibrary(false); }}>
+              {isTauriApp && (
+                <button className="logo-library-del" title="Delete this image" onClick={e => handleDeleteImage(e, img)}>×</button>
+              )}
               <img src={resolveImageUrl(img.url)} alt={img.name} className="logo-library-thumb" />
+              {isTauriApp ? (
+                <RenamableName name={img.name} onRename={newName => handleRenameImage(img, newName)} />
+              ) : (
+                <span className="logo-library-name">{img.name}</span>
+              )}
             </div>
           ))}
         </div>
@@ -133,7 +286,7 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
       <div ref={anchorRef} style={{ position: 'relative', display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <div
           className="tm-team-logo-thumb-wrap"
-          onClick={() => setShowLibrary(v => !v)}
+          onClick={toggleLibrary}
           style={thumbContent ? { cursor: 'pointer', position: 'relative', width: w, height: h, overflow: 'hidden' } : {
             cursor: 'pointer', position: 'relative', width: w, height: h,
             border: '1px dashed var(--border)', borderRadius: 4, background: '#111',
@@ -149,7 +302,7 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
           <button className="tm-team-logo-clear" title="Remove logo" onClick={() => onChange('')}>×</button>
         )}
         <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileChange} />
-        {showLibrary && library}
+        {showLibrary && library && createPortal(library, document.body)}
       </div>
     );
   }
@@ -169,13 +322,13 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
           onChange={e => onChange(e.target.value)}
           style={{ flex: 1, minWidth: 0 }}
         />
-        <button className="btn btn--ghost btn--small" title="Choose from server library" onClick={() => setShowLibrary(v => !v)}>⊞</button>
+        <button className="btn btn--ghost btn--small" title="Choose from server library" onClick={toggleLibrary}>⊞</button>
         {value && (
           <button className="btn btn--ghost btn--small" title="Clear" onClick={() => onChange('')} style={{ color: 'var(--text-muted)' }}>✕</button>
         )}
       </div>
       <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileChange} />
-      {showLibrary && library}
+      {showLibrary && library && createPortal(library, document.body)}
     </div>
   );
 }

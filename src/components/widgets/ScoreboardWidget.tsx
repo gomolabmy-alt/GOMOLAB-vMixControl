@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useContext } from 'react';
+import { useState, useMemo, useEffect, useContext, useRef } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTeamDbStore } from '../../stores/teamDbStore';
@@ -7,9 +7,10 @@ import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
 import { LogoUrlPicker } from '../LogoUrlPicker';
 import { TeamPicker } from '../TeamPicker';
+import { TeamMatchHistoryButton } from '../TeamMatchHistoryButton';
 import { MatchSchedulePicker } from '../MatchSchedulePicker';
 import { useMatchScheduleStore, type ScheduledMatch } from '../../stores/matchScheduleStore';
-import { computeMatchSignature, buildResultFromConfig, guardScoreboardOverwrite } from '../../utils/scoreboardSnapshot';
+import { computeMatchSignature, buildResultFromConfig, buildLoadMatchPatch, guardScoreboardOverwrite } from '../../utils/scoreboardSnapshot';
 
 interface Props {
   widgetId: string;
@@ -101,12 +102,15 @@ function ScoreButtons({ team, increments, onScore, onDec, buttonSize = 1, teamCo
 export function ScoreboardWidget({ widgetId, config }: Props) {
   const store = useCanvasStore();
   const ctx = useContext(CanvasActionContext);
-  const { pages, scoreWidgetAction, resetWidgetScore } = store;
+  // CanvasActionContext is only provided on the commentator canvas — its
+  // presence doubles as the commentator-mode flag (see canvasContext.ts).
+  const isCommentator = !!ctx;
+  const { pages, scoreWidgetAction, resetWidgetScore, resetWidgetTimer } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { teams: teamDbTeams } = useTeamDbStore();
   const { client, vmixSyncVersion } = useVmixStore();
   const { addResult } = useMatchResultsStore();
-  const { markSent } = useMatchScheduleStore();
+  const { markSent, markCompleted } = useMatchScheduleStore();
 
   // When linked, mirror the source scoreboard's display state
   const allWidgets = useMemo(() => pages.flatMap(p => p.widgets), [pages]);
@@ -132,6 +136,19 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
         : tCfg.running
           ? { label: 'LIVE', color: '#e74c3c', pulse: true }
           : { label: 'NOT LIVE', color: '#7f8c9a', pulse: false };
+
+  // Captures the real kickoff time as the moment the linked timer first
+  // starts running for this match (rather than the pre-scheduled fixture
+  // time) — only meaningful on the primary board that owns the data.
+  const prevTimerRunning = useRef(false);
+  useEffect(() => {
+    if (isLinked) return;
+    const nowRunning = !!tCfg?.running;
+    if (nowRunning && !prevTimerRunning.current && !config.actualKickoffAt) {
+      updateWidgetConfig(widgetId, { actualKickoffAt: Date.now() });
+    }
+    prevTimerRunning.current = nowRunning;
+  }, [tCfg?.running, isLinked, config.actualKickoffAt, widgetId, updateWidgetConfig]);
 
   const increments: Increment[] = config.increments ?? [1, 2, 5, 10];
   const [pending, setPending] = useState<Pending | null>(null);
@@ -285,6 +302,8 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const saveResult = () => {
     addResult(buildResultFromConfig(dc));
     updateWidgetConfig(widgetId, { lastSavedSignature: computeMatchSignature(dc) });
+    // If this match came from the Schedule tab, mark that fixture completed.
+    if (dc.linkedScheduleMatchId) markCompleted(dc.linkedScheduleMatchId);
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 1200);
   };
@@ -296,14 +315,9 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   // was never saved, or confirms before overwriting if it already was.
   const loadScheduledMatch = (m: ScheduledMatch) => {
     if (!guardScoreboardOverwrite(dc, addResult)) return;
-    updateWidgetConfig(widgetId, {
-      competition: m.competition ?? '',
-      subtitle: m.round ?? '',
-      teamAName: m.teamAName, teamAShortName: m.teamAShortName ?? '', teamAColor: m.teamAColor, teamALogo: m.teamALogo ?? '',
-      teamBName: m.teamBName, teamBShortName: m.teamBShortName ?? '', teamBColor: m.teamBColor, teamBLogo: m.teamBLogo ?? '',
-      scoreA: 0, scoreB: 0,
-      lastSavedSignature: '',
-    });
+    updateWidgetConfig(widgetId, buildLoadMatchPatch(m));
+    // A new match starting means the previous one's clock shouldn't carry over.
+    if (dc.linkedTimerWidgetId) resetWidgetTimer(dc.linkedTimerWidgetId);
     markSent(m.id);
   };
 
@@ -418,9 +432,13 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
         <div className="wgt-score-mteam">
           <div className="wgt-score-mlogo-wrap" onClick={e => e.stopPropagation()}>
             {isLinked ? (
-              dc.teamALogo
-                ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamALogo)} alt="" />
-                : <div className="wgt-score-mlogo-ph" style={{ background: teamAColor }} />
+              isCommentator ? (
+                <TeamMatchHistoryButton teamName={dc.teamAName ?? 'Team A'} teamShortName={dc.teamAShortName} logo={dc.teamALogo} color={teamAColor} />
+              ) : (
+                dc.teamALogo
+                  ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamALogo)} alt="" />
+                  : <div className="wgt-score-mlogo-ph" style={{ background: teamAColor }} />
+              )
             ) : (
               <LogoUrlPicker
                 compact
@@ -488,9 +506,13 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
         <div className="wgt-score-mteam wgt-score-mteam--b">
           <div className="wgt-score-mlogo-wrap" onClick={e => e.stopPropagation()}>
             {isLinked ? (
-              dc.teamBLogo
-                ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamBLogo)} alt="" />
-                : <div className="wgt-score-mlogo-ph" style={{ background: teamBColor }} />
+              isCommentator ? (
+                <TeamMatchHistoryButton teamName={dc.teamBName ?? 'Team B'} teamShortName={dc.teamBShortName} logo={dc.teamBLogo} color={teamBColor} />
+              ) : (
+                dc.teamBLogo
+                  ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamBLogo)} alt="" />
+                  : <div className="wgt-score-mlogo-ph" style={{ background: teamBColor }} />
+              )
             ) : (
               <LogoUrlPicker
                 compact

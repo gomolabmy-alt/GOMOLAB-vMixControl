@@ -9,6 +9,7 @@ import type { CanvasWidget } from '../types/canvas';
 import { INPUT_TYPE_LABELS } from '../types/vmix';
 import type { VmixInput } from '../types/vmix';
 import { LogoUrlPicker } from './LogoUrlPicker';
+import { ConfirmButton } from './ConfirmButton';
 import { resolveImageUrl } from '../lib/imageUrl';
 import { useMatchResultsStore } from '../stores/matchResultsStore';
 
@@ -1079,6 +1080,18 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             )}
           </CollapsibleSection>
 
+          <CollapsibleSection label="Tournament Database">
+            <Field label="Link Tournament">
+              <select className="field-input" value={cfg.linkedTournamentId ?? ''} onChange={e => up({ linkedTournamentId: e.target.value })}>
+                <option value="">— none (set automatically from Load Match) —</option>
+                {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </Field>
+            <p className="app-settings-hint" style={{ margin: '4px 0 0' }}>
+              Tags "💾 Save Result" with this tournament so it shows up in its Results tab. Loading a fixture from the Schedule tab sets this automatically — only set it here for matches entered manually.
+            </p>
+          </CollapsibleSection>
+
           <CollapsibleSection label="Teams">
             <p className="app-settings-hint" style={{ margin: '0 0 6px' }}>
               Use the 👥 team picker on the scoreboard itself to pull from the Team DB, or edit directly here.
@@ -1658,6 +1671,19 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               </select>
             </Field>
           )}
+          {(cfg.periods ?? 1) > 1 && (
+            <Field label="Current Period">
+              <select
+                className="field-input"
+                value={Math.min(cfg.currentPeriod ?? 1, cfg.periods ?? 1)}
+                onChange={e => store.jumpToPeriod(widget.id, Number(e.target.value))}
+              >
+                {Array.from({ length: cfg.periods ?? 1 }, (_, i) => i + 1).map(p => (
+                  <option key={p} value={p}>Period {p}</option>
+                ))}
+              </select>
+            </Field>
+          )}
           <Field label="Overrun (manual end)">
             <label className="tf-autosend-label">
               <input type="checkbox" checked={cfg.overrun ?? false} onChange={e => up({ overrun: e.target.checked })} />
@@ -1952,6 +1978,19 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   >{lbl}</button>
                 ))}
               </div>
+            </Field>
+          )}
+          {(cfg.periods ?? 1) > 1 && (
+            <Field label="Auto-advance">
+              <label className="tf-autosend-label">
+                <input type="checkbox" checked={cfg.autoAdvance ?? false} onChange={e => up({ autoAdvance: e.target.checked })} />
+                Flow straight through period → break → next period automatically
+              </label>
+              <p className="app-settings-hint" style={{ margin: '4px 0 0' }}>
+                {cfg.autoAdvance
+                  ? 'Auto: no manual step needed between periods and breaks.'
+                  : 'Manual (default): period end and break end both pause the timer — press Play/Resume to start each next step.'}
+              </p>
             </Field>
           )}
           </CollapsibleSection>
@@ -2328,11 +2367,14 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               onChange={e => up({ showDate: e.target.checked })} />
           </Field>
           <Field label={`Saved results (${savedMatchResults.length})`}>
-            <button
+            <ConfirmButton
               className="btn btn--ghost btn--small"
               disabled={savedMatchResults.length === 0}
-              onClick={() => { if (confirm('Delete all saved match results? This cannot be undone.')) clearMatchResults(); }}
-            >Clear All</button>
+              label="Clear All"
+              confirmLabel="Delete all"
+              message="Delete all saved match results? This cannot be undone."
+              onConfirm={clearMatchResults}
+            />
           </Field>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
             Results are added from a scoreboard widget's "💾 Save Result" button.

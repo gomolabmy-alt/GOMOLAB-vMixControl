@@ -29,6 +29,7 @@ interface TeamDbStore {
   deletePlayer: (teamId: string, playerId: string) => void;
   replaceTeamPlayers: (teamId: string, players: Omit<Player, 'id'>[]) => void;
   updateStaffMember: (teamId: string, staffId: string, name: string) => void;
+  restoreTeams: (teams: unknown[]) => void;
 }
 
 export const useTeamDbStore = create<TeamDbStore>()(
@@ -83,6 +84,8 @@ export const useTeamDbStore = create<TeamDbStore>()(
           return { ...t, staff: next };
         }),
       })),
+
+      restoreTeams: (teams) => set({ teams: teams as SavedTeam[] }),
     }),
     {
       name: 'gomolab-teamdb-v1',

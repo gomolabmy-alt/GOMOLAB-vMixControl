@@ -9,6 +9,10 @@ export interface SavedMatchResult {
   /** Which tournament/competition this result belongs to (teamDbStore-scoped). */
   tournamentId?: string;
   date: string; // e.g. "2026-07-09"
+  /** Scheduled kickoff time, carried over from the fixture this result came
+   *  from (e.g. "20:30") — distinct from savedAt, which is when the result
+   *  was actually recorded/the match ended. */
+  time?: string;
   competition?: string;
   round?: string;
   teamAName: string;
@@ -27,8 +31,10 @@ export interface SavedMatchResult {
 interface MatchResultsStore {
   results: SavedMatchResult[];
   addResult: (result: Omit<SavedMatchResult, 'id' | 'savedAt'>) => string;
+  updateResult: (id: string, patch: Partial<Omit<SavedMatchResult, 'id' | 'savedAt'>>) => void;
   deleteResult: (id: string) => void;
   clearResults: () => void;
+  restoreResults: (results: unknown[]) => void;
 }
 
 export const useMatchResultsStore = create<MatchResultsStore>()(
@@ -42,9 +48,15 @@ export const useMatchResultsStore = create<MatchResultsStore>()(
         return id;
       },
 
+      updateResult: (id, patch) => set(s => ({
+        results: s.results.map(r => r.id === id ? { ...r, ...patch } : r),
+      })),
+
       deleteResult: (id) => set(s => ({ results: s.results.filter(r => r.id !== id) })),
 
       clearResults: () => set({ results: [] }),
+
+      restoreResults: (results) => set({ results: results as SavedMatchResult[] }),
     }),
     {
       name: 'gomolab-match-results-v1',

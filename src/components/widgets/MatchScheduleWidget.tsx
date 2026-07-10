@@ -1,9 +1,10 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useRef } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useMatchScheduleStore } from '../../stores/matchScheduleStore';
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
-import { guardScoreboardOverwrite } from '../../utils/scoreboardSnapshot';
+import { guardScoreboardOverwrite, buildLoadMatchPatch } from '../../utils/scoreboardSnapshot';
+import { ConfirmButton } from '../ConfirmButton';
 
 interface Props {
   widgetId: string;
@@ -43,8 +44,8 @@ function formatLate(ms: number): string {
 }
 
 export function MatchScheduleWidget({ config }: Props) {
-  const { pages, updateWidgetConfig } = useCanvasStore();
-  const { matches, markSent, unmarkSent } = useMatchScheduleStore();
+  const { pages, updateWidgetConfig, resetWidgetTimer } = useCanvasStore();
+  const { matches, markSent, unmarkSent, resetAllSent, clearMatches } = useMatchScheduleStore();
   const { addResult } = useMatchResultsStore();
   const title: string = config.title ?? 'Upcoming Matches';
 
@@ -62,19 +63,22 @@ export function MatchScheduleWidget({ config }: Props) {
     return () => clearInterval(id);
   }, []);
 
+  // Auto-scrolls to the next fixture waiting to be sent — matches are already
+  // date-sorted, so the first not-yet-sent one is "up next" in the queue.
+  const nextMatchId = useMemo(() => matches.find(m => !m.sentAt)?.id, [matches]);
+  const nextRowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (nextMatchId) nextRowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [nextMatchId]);
+
   const sendToScoreboard = (m: typeof matches[number]) => {
     if (!targetScoreboard) return;
     // Protects the outgoing match on the target scoreboard: auto-saves it if
     // it was never saved, or confirms before overwriting if it already was.
     if (!guardScoreboardOverwrite(targetScoreboard.config, addResult)) return;
-    updateWidgetConfig(targetScoreboard.id, {
-      competition: m.competition ?? '',
-      subtitle: m.round ?? '',
-      teamAName: m.teamAName, teamAShortName: m.teamAShortName ?? '', teamAColor: m.teamAColor, teamALogo: m.teamALogo ?? '',
-      teamBName: m.teamBName, teamBShortName: m.teamBShortName ?? '', teamBColor: m.teamBColor, teamBLogo: m.teamBLogo ?? '',
-      scoreA: 0, scoreB: 0,
-      lastSavedSignature: '',
-    });
+    updateWidgetConfig(targetScoreboard.id, buildLoadMatchPatch(m));
+    // A new match starting means the previous one's clock shouldn't carry over.
+    if (targetScoreboard.config.linkedTimerWidgetId) resetWidgetTimer(targetScoreboard.config.linkedTimerWidgetId);
     markSent(m.id);
   };
 
@@ -82,7 +86,25 @@ export function MatchScheduleWidget({ config }: Props) {
     <div className="wgt-ms">
       <div className="wgt-ms-header">
         <span>{title}</span>
-        {matches.length > 0 && <span className="wgt-ms-count">{sentCount}/{matches.length} sent</span>}
+        {matches.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span className="wgt-ms-count">{sentCount}/{matches.length} sent</span>
+            <ConfirmButton
+              className="wgt-ms-tool-btn"
+              label="↺ Reset"
+              confirmLabel="Reset"
+              message="Mark all fixtures as not sent?"
+              onConfirm={resetAllSent}
+            />
+            <ConfirmButton
+              className="wgt-ms-tool-btn wgt-ms-tool-btn--danger"
+              label="🗑 Clear"
+              confirmLabel="Delete all"
+              message="Delete all scheduled fixtures? This can't be undone."
+              onConfirm={clearMatches}
+            />
+          </div>
+        )}
       </div>
       {matches.length === 0 ? (
         <div className="wgt-ms-empty">No scheduled matches yet — add fixtures in 🏆 DB → Schedule</div>
@@ -95,8 +117,14 @@ export function MatchScheduleWidget({ config }: Props) {
             const isLate = !m.sentAt && scheduledTs !== null && now > scheduledTs;
             const lateStr = isLate ? formatLate(now - scheduledTs!) : null;
 
+            const isNext = m.id === nextMatchId;
+
             return (
-              <div key={m.id} className={`wgt-ms-row${m.sentAt ? ' wgt-ms-row--sent' : ''}${isLate ? ' wgt-ms-row--late' : ''}`}>
+              <div
+                key={m.id}
+                ref={isNext ? nextRowRef : undefined}
+                className={`wgt-ms-row${m.sentAt ? ' wgt-ms-row--sent' : ''}${isLate ? ' wgt-ms-row--late' : ''}${isNext ? ' wgt-ms-row--next' : ''}`}
+              >
                 <div className="wgt-ms-row-meta">
                   <span className="wgt-ms-date">{m.date}{m.time ? ` · ${m.time}` : ''}</span>
                   {m.competition && <span className="wgt-ms-comp">{m.competition}{m.round ? ` — ${m.round}` : ''}</span>}
@@ -104,6 +132,9 @@ export function MatchScheduleWidget({ config }: Props) {
 
                 {isLate && (
                   <div className="wgt-ms-late-badge">⏰ LATE — {lateStr} behind schedule</div>
+                )}
+                {isNext && !isLate && (
+                  <div className="wgt-ms-next-badge">▶ NEXT UP</div>
                 )}
 
                 <div className="wgt-ms-row-matchup">

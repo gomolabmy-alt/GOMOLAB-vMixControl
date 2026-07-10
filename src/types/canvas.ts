@@ -103,6 +103,13 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       linkedTimerWidgetId: '', linkedScoreLogWidgetId: '',
       linkedPlayerListA: '', linkedPlayerListB: '',
       linkedScoreboardSourceId: '',
+      // Set automatically when a scheduled fixture is loaded (Load Match /
+      // Send to Scoreboard) — tags "Save Result" snapshots with the right
+      // tournament so they show up in that tournament's Results tab.
+      linkedTournamentId: '',
+      // Also set automatically on load — lets "Save Result" mark the
+      // originating fixture as completed back in the Schedule tab.
+      linkedScheduleMatchId: '',
       lastSavedSignature: '',
     },
   },
@@ -176,6 +183,10 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       durationMs: 300000, currentMs: 300000, running: false,
       highPrecision: false, vmixInputKey: '', fieldName: 'Timer.Text',
       periods: 1, periodMode: 'reset', overrun: false, breakDurationMs: 0,
+      // When false (default), period end and break end both stop the timer and
+      // wait for a manual Play/Resume press. When true, it flows straight
+      // through period → break → next period with no manual step.
+      autoAdvance: false,
       currentPeriod: 1, periodStartMs: 0, overrunning: false, inBreak: false, breakCurrentMs: 0,
       breakVmixInputKey: '', breakFieldName: 'Timer.Text',
       miniVmixInputKey: '', miniFieldName: 'MiniTimer.Text',
