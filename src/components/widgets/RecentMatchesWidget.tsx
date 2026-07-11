@@ -65,6 +65,8 @@ export function RecentMatchesWidget({ config }: Props) {
   const groupByCompetition: boolean = config.groupByCompetition ?? true;
   const showDate: boolean = config.showDate ?? true;
   const title: string = config.title ?? 'Latest Results';
+  const useFullName: boolean = config.nameDisplay === 'full';
+  const compact: boolean = config.compactSize ?? false;
 
   const shown = useMemo(() => results.slice(0, maxResults), [results, maxResults]);
 
@@ -81,7 +83,7 @@ export function RecentMatchesWidget({ config }: Props) {
   }, [shown, groupByCompetition]);
 
   return (
-    <div className="wgt-rm">
+    <div className={`wgt-rm${compact ? ' wgt-rm--compact' : ''}`}>
       <div className="wgt-rm-header">
         <span>{title}</span>
         {results.length > 0 && (
@@ -117,8 +119,8 @@ export function RecentMatchesWidget({ config }: Props) {
                       <EditableSpan
                         className="wgt-rm-team-name"
                         title={r.teamAName}
-                        value={r.teamAShortName || r.teamAName}
-                        onChange={v => updateResult(r.id, r.teamAShortName ? { teamAShortName: v } : { teamAName: v })}
+                        value={useFullName ? r.teamAName : (r.teamAShortName || r.teamAName)}
+                        onChange={v => updateResult(r.id, useFullName || !r.teamAShortName ? { teamAName: v } : { teamAShortName: v })}
                       />
                     </div>
                     <div className="wgt-rm-score">
@@ -140,8 +142,8 @@ export function RecentMatchesWidget({ config }: Props) {
                       <EditableSpan
                         className="wgt-rm-team-name"
                         title={r.teamBName}
-                        value={r.teamBShortName || r.teamBName}
-                        onChange={v => updateResult(r.id, r.teamBShortName ? { teamBShortName: v } : { teamBName: v })}
+                        value={useFullName ? r.teamBName : (r.teamBShortName || r.teamBName)}
+                        onChange={v => updateResult(r.id, useFullName || !r.teamBShortName ? { teamBName: v } : { teamBShortName: v })}
                       />
                       {r.teamBLogo
                         ? <img className="wgt-rm-logo" src={resolveImageUrl(r.teamBLogo)} alt="" />

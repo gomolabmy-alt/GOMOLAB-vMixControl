@@ -2405,6 +2405,18 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             <input type="checkbox" checked={cfg.showDate ?? true}
               onChange={e => up({ showDate: e.target.checked })} />
           </Field>
+          <Field label="Team name">
+            <select className="field-input" value={cfg.nameDisplay ?? 'short'} onChange={e => up({ nameDisplay: e.target.value })}>
+              <option value="short">Short name (falls back to full)</option>
+              <option value="full">Full name</option>
+            </select>
+          </Field>
+          <Field label="Widget size">
+            <select className="field-input" value={cfg.compactSize ? 'compact' : 'normal'} onChange={e => up({ compactSize: e.target.value === 'compact' })}>
+              <option value="normal">Bigger (default)</option>
+              <option value="compact">Compact</option>
+            </select>
+          </Field>
           <Field label={`Saved results (${savedMatchResults.length})`}>
             <ConfirmButton
               className="btn btn--ghost btn--small"
