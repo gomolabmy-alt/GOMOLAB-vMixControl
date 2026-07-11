@@ -13,6 +13,13 @@ export type SyncFullState = {
   type: 'FULL_STATE';
   canvas?: { pages: any[]; activePageId: string };
   tournament?: { tournaments: any[]; activeTournamentId: string };
+  // Team database / schedule / results — remote clients previously never
+  // received these at all (only canvas + tournament were included), so the
+  // Tournament Database window showed empty/stale local data over a remote
+  // IP connection instead of the host's actual data.
+  teamDb?: { teams: any[] };
+  matchSchedule?: { matches: any[] };
+  matchResults?: { results: any[] };
 };
 
 export type SyncCommentatorFullState = {

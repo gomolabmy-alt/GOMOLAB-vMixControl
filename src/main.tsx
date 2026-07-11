@@ -6,6 +6,9 @@ import { App } from './App';
 import { syncClient } from './lib/syncClient';
 import { useCanvasStore, initCanvasSync, initCommentatorSync } from './stores/canvasStore';
 import { useTournamentStore, initTournamentSync } from './stores/tournamentStore';
+import { useTeamDbStore } from './stores/teamDbStore';
+import { useMatchScheduleStore } from './stores/matchScheduleStore';
+import { useMatchResultsStore } from './stores/matchResultsStore';
 
 class RootErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null };
@@ -56,6 +59,9 @@ syncClient.connect(isDesktopHost ? () => ({
     const s = useTournamentStore.getState();
     return { tournaments: s.tournaments, activeTournamentId: s.activeTournamentId };
   })(),
+  teamDb: { teams: useTeamDbStore.getState().teams },
+  matchSchedule: { matches: useMatchScheduleStore.getState().matches },
+  matchResults: { results: useMatchResultsStore.getState().results },
 }) : undefined);
 
 function sendCommentatorHeartbeat() {

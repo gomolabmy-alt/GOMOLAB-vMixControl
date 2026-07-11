@@ -3,6 +3,9 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Tournament, SportType, TournamentSettings } from '../types/tournament';
 import { SPORT_DEFAULTS } from '../types/tournament';
 import { syncClient } from '../lib/syncClient';
+import { useTeamDbStore } from './teamDbStore';
+import { useMatchScheduleStore } from './matchScheduleStore';
+import { useMatchResultsStore } from './matchResultsStore';
 
 interface TournamentStore {
   tournaments: Tournament[];
@@ -80,6 +83,12 @@ export const useTournamentStore = create<TournamentStore>()(
           ? localStorage
           : sessionStorage
       ),
+      // Remote/browser clients always load the host's live data via
+      // FULL_STATE — never persist locally, or a reload could show stale
+      // data before (or instead of) the synced copy.
+      partialize: (s) => (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window))
+        ? {}
+        : { tournaments: s.tournaments, activeTournamentId: s.activeTournamentId },
     }
   )
 );
@@ -88,11 +97,21 @@ export function initTournamentSync() {
   syncClient.onMessage((msg) => {
     if (msg.type === 'FULL_STATE') {
       const isHost = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-      if (!isHost && msg.tournament) {
-        useTournamentStore.setState({
-          tournaments: msg.tournament.tournaments,
-          activeTournamentId: msg.tournament.activeTournamentId,
-        });
+      // Remote/browser clients (any non-host — plain remote-control, readonly,
+      // or commentator) previously never received the team database, match
+      // schedule, or results — only canvas/tournament were synced, so the
+      // Tournament Database window showed empty/stale local data over a
+      // remote IP connection instead of the host's actual data.
+      if (!isHost) {
+        if (msg.tournament) {
+          useTournamentStore.setState({
+            tournaments: msg.tournament.tournaments,
+            activeTournamentId: msg.tournament.activeTournamentId,
+          });
+        }
+        if (msg.teamDb) useTeamDbStore.getState().restoreTeams(msg.teamDb.teams);
+        if (msg.matchSchedule) useMatchScheduleStore.getState().restoreMatches(msg.matchSchedule.matches);
+        if (msg.matchResults) useMatchResultsStore.getState().restoreResults(msg.matchResults.results);
       }
       return;
     }

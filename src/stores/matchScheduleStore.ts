@@ -90,6 +90,10 @@ export const useMatchScheduleStore = create<MatchScheduleStore>()(
           ? localStorage
           : sessionStorage
       ),
+      // Remote/browser clients always load the host's live data via
+      // FULL_STATE — never persist locally, or a reload could show stale
+      // data before (or instead of) the synced copy.
+      partialize: (s) => (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) ? {} : { matches: s.matches },
     }
   )
 );
