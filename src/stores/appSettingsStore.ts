@@ -23,6 +23,12 @@ interface AppSettingsState {
   setNotifySub: (v: boolean) => void;
   setNotifyTimePause: (v: boolean) => void;
   setNotifyDurationMs: (v: number) => void;
+  // Remote-client-only: while true, incoming host sync for the Team DB /
+  // Schedule / Results / Tournament stores is paused so local edits aren't
+  // clobbered by the host's periodic re-broadcast — the operator explicitly
+  // pushes changes back with "Save to Host" instead of continuous mirroring.
+  remoteEditMode: boolean;
+  setRemoteEditMode: (v: boolean) => void;
 }
 
 export const useAppSettings = create<AppSettingsState>()(
@@ -48,6 +54,9 @@ export const useAppSettings = create<AppSettingsState>()(
       setNotifySub: (v) => set({ notifySub: v }),
       setNotifyTimePause: (v) => set({ notifyTimePause: v }),
       setNotifyDurationMs: (v) => set({ notifyDurationMs: Math.max(1000, Math.min(30000, v)) }),
+
+      remoteEditMode: false,
+      setRemoteEditMode: (v) => set({ remoteEditMode: v }),
     }),
     { name: 'gomolab-app-settings' },
   ),

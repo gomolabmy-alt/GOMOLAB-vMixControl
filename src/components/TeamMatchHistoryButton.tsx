@@ -121,6 +121,7 @@ export function TeamMatchHistoryButton({ teamName, teamShortName, logo, color }:
                         ? <img className="team-hist-opp-logo" src={resolveImageUrl(oppLogo)} alt="" />
                         : <div className="team-hist-opp-logo team-hist-opp-logo--ph" style={{ background: oppColor }} />}
                       <span className="team-hist-opp">{oppName}</span>
+                      {m.matchType && <span className="team-hist-type-badge">{m.matchType === 'bye' ? 'BYE' : 'W/O'}</span>}
                       {m.competition && <span className="team-hist-comp">{m.competition}</span>}
                     </div>
                     {m.round && <div className="team-hist-round">{m.round}</div>}
@@ -151,6 +152,7 @@ export function TeamMatchHistoryButton({ teamName, teamShortName, logo, color }:
                       ? <img className="team-hist-opp-logo" src={resolveImageUrl(oppLogo)} alt="" />
                       : <div className="team-hist-opp-logo team-hist-opp-logo--ph" style={{ background: oppColor }} />}
                     <span className="team-hist-opp">{oppName}</span>
+                    {r.matchType && <span className="team-hist-type-badge">{r.matchType === 'bye' ? 'BYE' : 'W/O'}</span>}
                     <span className="team-hist-score">{own} - {opp}</span>
                   </div>
                   {r.round && <div className="team-hist-round">{r.round}</div>}

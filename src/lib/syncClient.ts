@@ -27,6 +27,18 @@ export type SyncCommentatorFullState = {
   canvas: { pages: any[]; activePageId: string };
 };
 
+// Sent by a remote client (port 9877) pressing "Save to Host" to explicitly
+// push its locally-edited Team DB / Schedule / Results / Tournament data —
+// unlike FULL_STATE (host → everyone), this only takes effect on the host,
+// which then adopts it and re-broadcasts via its own next FULL_STATE heartbeat.
+export type SyncPushTournamentData = {
+  type: 'PUSH_TOURNAMENT_DATA';
+  teamDb: { teams: any[] };
+  matchSchedule: { matches: any[] };
+  matchResults: { results: any[] };
+  tournament: { tournaments: any[]; activeTournamentId: string };
+};
+
 export type SyncRequestState = { type: 'REQUEST_STATE' };
 
 export interface RemoteVmixConnection {
@@ -69,7 +81,7 @@ export type SyncVmixCommand = {
   args: any[];
 };
 
-export type SyncMessage = SyncAction | SyncFullState | SyncCommentatorFullState | SyncRequestState | SyncVmixStatus | SyncClientList | SyncVmixData | SyncVmixCommand;
+export type SyncMessage = SyncAction | SyncFullState | SyncCommentatorFullState | SyncRequestState | SyncVmixStatus | SyncClientList | SyncVmixData | SyncVmixCommand | SyncPushTournamentData;
 
 type MessageListener = (msg: SyncMessage) => void;
 type StatusListener = (status: 'connecting' | 'connected' | 'disconnected') => void;

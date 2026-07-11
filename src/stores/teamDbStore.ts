@@ -16,6 +16,10 @@ export interface SavedTeam {
   players: Player[];
   staff?: StaffMember[];
   tournamentId?: string;
+  /** Marks a team as sitting out ('bye') or withdrawn/forfeiting ('walkover')
+   *  for the rest of the tournament — setting this auto-applies the same
+   *  status to that team's not-yet-completed fixtures in the Schedule tab. */
+  status?: 'bye' | 'walkover';
 }
 
 interface TeamDbStore {

@@ -1,4 +1,5 @@
-// Minimal, dynamically-loaded bindings to the NDI SDK runtime (libndi.dylib),
+// Minimal, dynamically-loaded bindings to the NDI SDK runtime
+// (libndi.dylib on macOS, Processing.NDI.Lib.x64.dll on Windows),
 // used only to power a live network preview: finding NDI sources and
 // receiving/decoding their video frames directly, independent of vMix. The
 // NDI SDK itself is never linked at build time — we dlopen whatever runtime
@@ -114,11 +115,13 @@ struct NdiLib {
 }
 
 // Safe: every field is either a plain C fn pointer (always Send+Sync) or
-// libloading::Library, which is itself Send+Sync (dlopen/dlsym are
-// thread-safe on macOS). Resolved once at load and never mutated after.
+// libloading::Library, which is itself Send+Sync (dlopen/dlsym on macOS,
+// LoadLibrary/GetProcAddress on Windows, are both thread-safe). Resolved
+// once at load and never mutated after.
 unsafe impl Send for NdiLib {}
 unsafe impl Sync for NdiLib {}
 
+#[cfg(target_os = "macos")]
 fn candidate_paths() -> Vec<String> {
     let mut v = vec![
         "/usr/local/lib/libndi.dylib".to_string(),
@@ -131,6 +134,28 @@ fn candidate_paths() -> Vec<String> {
         v.push(format!("{dir}/libndi.dylib"));
     }
     v
+}
+
+#[cfg(target_os = "windows")]
+fn candidate_paths() -> Vec<String> {
+    // The official NDI Windows Runtime installer sets NDI_RUNTIME_DIR_V6/V5
+    // and installs to one of these Program Files locations by default.
+    let mut v = Vec::new();
+    if let Ok(dir) = std::env::var("NDI_RUNTIME_DIR_V6") {
+        v.push(format!("{dir}\\Processing.NDI.Lib.x64.dll"));
+    }
+    if let Ok(dir) = std::env::var("NDI_RUNTIME_DIR_V5") {
+        v.push(format!("{dir}\\Processing.NDI.Lib.x64.dll"));
+    }
+    v.push(r"C:\Program Files\NDI\NDI 6 Runtime\v6\Processing.NDI.Lib.x64.dll".to_string());
+    v.push(r"C:\Program Files\NDI\NDI 5 Runtime\v5\Processing.NDI.Lib.x64.dll".to_string());
+    v.push(r"C:\Program Files\NewTek\NDI 5 Runtime\v5\Processing.NDI.Lib.x64.dll".to_string());
+    v
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn candidate_paths() -> Vec<String> {
+    vec![]
 }
 
 unsafe fn load() -> Option<NdiLib> {

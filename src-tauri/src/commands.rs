@@ -772,10 +772,39 @@ pub fn get_local_ips() -> Vec<String> {
         }
         result
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // No POSIX getifaddrs on Windows — parse `ipconfig` output instead.
+        // Matched by value shape (dotted-quad) rather than the "IPv4 Address"
+        // label text, since that label is localized on non-English Windows.
+        let mut result = Vec::new();
+        if let Ok(output) = std::process::Command::new("ipconfig").output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let Some(colon) = line.find(':') else { continue };
+                let value = line[colon + 1..].split('(').next().unwrap_or("").trim();
+                if is_ipv4(value) && value != "127.0.0.1" && !value.starts_with("169.254.") {
+                    result.push(value.to_string());
+                }
+            }
+        }
+        result.sort();
+        result.dedup();
+        result
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         vec![]
     }
+}
+
+#[cfg(windows)]
+fn is_ipv4(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|p| {
+            !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()) && p.parse::<u16>().is_ok_and(|n| n <= 255)
+        })
 }
 
 // ── NDI source discovery + live preview ─────────────────────────────────────
@@ -790,6 +819,14 @@ pub async fn scan_ndi() -> Vec<String> {
             .unwrap_or_default();
     }
 
+    // dns-sd is part of Apple's Bonjour/mDNS and isn't present on Windows —
+    // without the NDI runtime installed there's no discovery path on Windows,
+    // so just report nothing instead of spawning a command that can't exist.
+    #[cfg(not(target_os = "macos"))]
+    return vec![];
+
+    #[cfg(target_os = "macos")]
+    {
     use std::{collections::HashSet, process::Stdio, time::Duration};
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -827,6 +864,7 @@ pub async fn scan_ndi() -> Vec<String> {
 
     let _ = child.kill().await;
     sources.into_iter().collect()
+    }
 }
 
 #[tauri::command]

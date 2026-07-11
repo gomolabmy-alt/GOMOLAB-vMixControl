@@ -1,7 +1,8 @@
-import { useMemo, useState, useRef, useEffect } from 'react';
+import { useMemo, useState, useRef, useEffect, useContext } from 'react';
 import { useMatchResultsStore, type SavedMatchResult } from '../../stores/matchResultsStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
 import { ConfirmButton } from '../ConfirmButton';
+import { CanvasActionContext } from '../../lib/canvasContext';
 
 interface Props {
   config: Record<string, any>;
@@ -60,6 +61,9 @@ function EditableSpan({ value, onChange, className, type = 'text', title, placeh
 }
 
 export function RecentMatchesWidget({ config }: Props) {
+  // CanvasActionContext is only provided on the commentator canvas — a
+  // commentator shouldn't be able to wipe the tournament's saved results.
+  const isCommentator = !!useContext(CanvasActionContext);
   const { results, updateResult, deleteResult, clearResults } = useMatchResultsStore();
   const maxResults: number = config.maxResults ?? 8;
   const groupByCompetition: boolean = config.groupByCompetition ?? true;
@@ -86,7 +90,7 @@ export function RecentMatchesWidget({ config }: Props) {
     <div className={`wgt-rm${compact ? ' wgt-rm--compact' : ''}`}>
       <div className="wgt-rm-header">
         <span>{title}</span>
-        {results.length > 0 && (
+        {results.length > 0 && !isCommentator && (
           <ConfirmButton
             className="wgt-rm-tool-btn"
             label="🗑 Clear"
@@ -157,12 +161,15 @@ export function RecentMatchesWidget({ config }: Props) {
                       onClick={e => { e.stopPropagation(); deleteResult(r.id); }}
                     >×</button>
                   </div>
-                  <EditableSpan
-                    className="wgt-rm-round"
-                    placeholder="Round/Group"
-                    value={r.round ?? ''}
-                    onChange={v => updateResult(r.id, { round: v })}
-                  />
+                  <div className="wgt-rm-round-row">
+                    {r.matchType && <span className="wgt-rm-type-badge">{r.matchType === 'bye' ? 'BYE' : 'W/O'}</span>}
+                    <EditableSpan
+                      className="wgt-rm-round"
+                      placeholder="Round/Group"
+                      value={r.round ?? ''}
+                      onChange={v => updateResult(r.id, { round: v })}
+                    />
+                  </div>
                 </div>
               ))}
             </div>

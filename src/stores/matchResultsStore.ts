@@ -25,6 +25,16 @@ export interface SavedMatchResult {
   teamBLogo?: string;
   teamBColor: string;
   scoreB: number;
+  /** 'bye' = no opponent that round; 'walkover' = one side forfeited a
+   *  fixtured match — neither was actually played, carried over from the
+   *  originating Schedule fixture so Results/standings can badge it. */
+  matchType?: 'bye' | 'walkover';
+  walkoverLoser?: 'A' | 'B';
+  /** Set only for bye/walkover results auto-generated directly from the
+   *  Schedule tab (no live scoreboard match ever ran) — lets the sync effect
+   *  find-and-update this same result instead of creating duplicates each
+   *  time the fixture's score changes. Normal played results never set this. */
+  sourceScheduleId?: string;
   savedAt: number;
 }
 

@@ -78,16 +78,20 @@ export interface TournamentSettings {
   maxOnField: number;
   maxSubs: number;
   timerMode: 'countup' | 'countdown';
+  /** Winning score auto-applied when a fixture is marked Bye/Walkover in the
+   *  Schedule tab (loser always gets 0) — per-tournament since the
+   *  convention varies by sport/competition (e.g. rugby often uses 21 or 28). */
+  walkoverWinScore: number;
 }
 
 export const SPORT_DEFAULTS: Record<SportType, TournamentSettings> = {
-  football:    { periods: 2, periodDurationMs: 2700000, halfTimeDurationMs:  900000, maxOnField: 11, maxSubs:  9, timerMode: 'countup'   },
-  basketball:  { periods: 4, periodDurationMs:  720000, halfTimeDurationMs:  120000, maxOnField:  5, maxSubs:  7, timerMode: 'countdown' },
-  rugby_union: { periods: 2, periodDurationMs: 2400000, halfTimeDurationMs:  600000, maxOnField: 15, maxSubs:  8, timerMode: 'countup'   },
-  rugby_league:{ periods: 2, periodDurationMs: 2400000, halfTimeDurationMs:  600000, maxOnField: 13, maxSubs:  4, timerMode: 'countup'   },
-  volleyball:  { periods: 5, periodDurationMs:       0, halfTimeDurationMs:  120000, maxOnField:  6, maxSubs:  6, timerMode: 'countup'   },
-  handball:    { periods: 2, periodDurationMs: 1800000, halfTimeDurationMs:  600000, maxOnField:  7, maxSubs:  7, timerMode: 'countup'   },
-  ice_hockey:  { periods: 3, periodDurationMs: 1200000, halfTimeDurationMs:  900000, maxOnField:  6, maxSubs: 14, timerMode: 'countdown' },
-  futsal:      { periods: 2, periodDurationMs: 1200000, halfTimeDurationMs:  600000, maxOnField:  5, maxSubs:  5, timerMode: 'countup'   },
-  custom:      { periods: 2, periodDurationMs: 2700000, halfTimeDurationMs:  900000, maxOnField: 11, maxSubs:  7, timerMode: 'countup'   },
+  football:    { periods: 2, periodDurationMs: 2700000, halfTimeDurationMs:  900000, maxOnField: 11, maxSubs:  9, timerMode: 'countup',   walkoverWinScore: 3  },
+  basketball:  { periods: 4, periodDurationMs:  720000, halfTimeDurationMs:  120000, maxOnField:  5, maxSubs:  7, timerMode: 'countdown', walkoverWinScore: 20 },
+  rugby_union: { periods: 2, periodDurationMs: 2400000, halfTimeDurationMs:  600000, maxOnField: 15, maxSubs:  8, timerMode: 'countup',   walkoverWinScore: 28 },
+  rugby_league:{ periods: 2, periodDurationMs: 2400000, halfTimeDurationMs:  600000, maxOnField: 13, maxSubs:  4, timerMode: 'countup',   walkoverWinScore: 28 },
+  volleyball:  { periods: 5, periodDurationMs:       0, halfTimeDurationMs:  120000, maxOnField:  6, maxSubs:  6, timerMode: 'countup',   walkoverWinScore: 3  },
+  handball:    { periods: 2, periodDurationMs: 1800000, halfTimeDurationMs:  600000, maxOnField:  7, maxSubs:  7, timerMode: 'countup',   walkoverWinScore: 10 },
+  ice_hockey:  { periods: 3, periodDurationMs: 1200000, halfTimeDurationMs:  900000, maxOnField:  6, maxSubs: 14, timerMode: 'countdown', walkoverWinScore: 5  },
+  futsal:      { periods: 2, periodDurationMs: 1200000, halfTimeDurationMs:  600000, maxOnField:  5, maxSubs:  5, timerMode: 'countup',   walkoverWinScore: 5  },
+  custom:      { periods: 2, periodDurationMs: 2700000, halfTimeDurationMs:  900000, maxOnField: 11, maxSubs:  7, timerMode: 'countup',   walkoverWinScore: 1  },
 };

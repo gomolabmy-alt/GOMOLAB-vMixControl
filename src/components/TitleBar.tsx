@@ -188,7 +188,7 @@ function VmixConnectDropdown({
         <button
           className="titlebar-dropdown-btn"
           type="button"
-          style={{ background: '#444' }}
+          style={{ background: 'var(--bg-3)', color: 'var(--text-primary)' }}
           disabled={!host.trim() || diagRunning}
           onClick={handleDiagnose}
         >

@@ -8,8 +8,14 @@ import { SplashScreen } from './components/SplashScreen';
 import { syncClient } from './lib/syncClient';
 
 function CommentatorApp() {
+  const { theme, setTheme } = useAppSettings();
   return (
     <div className="app-layout" style={{ background: '#111' }}>
+      <button
+        className="commentator-theme-btn"
+        onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+      >{theme === 'dark' ? '☀' : '🌙'}</button>
       <Canvas mode="commentator" />
     </div>
   );

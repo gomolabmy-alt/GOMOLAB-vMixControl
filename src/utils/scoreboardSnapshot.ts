@@ -59,6 +59,8 @@ export function buildResultFromConfig(cfg: Record<string, any>): Omit<SavedMatch
     teamBLogo: cfg.teamBLogo || undefined,
     teamBColor: cfg.teamBColor ?? '#3498db',
     scoreB: cfg.scoreB ?? 0,
+    matchType: cfg.matchType || undefined,
+    walkoverLoser: cfg.walkoverLoser || undefined,
   };
 }
 
@@ -74,12 +76,18 @@ export function buildLoadMatchPatch(m: ScheduledMatch): Record<string, any> {
     competition: m.competition ?? '', subtitle: m.round ?? '',
     teamAName: m.teamAName, teamAShortName: m.teamAShortName ?? '', teamAColor: m.teamAColor, teamALogo: m.teamALogo ?? '',
     teamBName: m.teamBName, teamBShortName: m.teamBShortName ?? '', teamBColor: m.teamBColor, teamBLogo: m.teamBLogo ?? '',
-    scoreA: 0, scoreB: 0,
+    // A bye/walkover never gets "played" on the clock — carry over whatever
+    // scoreline the operator already set on the fixture instead of resetting
+    // to 0-0, since there's no live match to score it during.
+    scoreA: m.matchType ? (m.scoreA ?? 0) : 0,
+    scoreB: m.matchType ? (m.scoreB ?? 0) : 0,
     scoreLog: [], cardsA: [], cardsB: [],
     lastSavedSignature: '',
     actualKickoffAt: undefined,
     linkedTournamentId: m.tournamentId ?? '',
     linkedScheduleMatchId: m.id,
+    matchType: m.matchType || '',
+    walkoverLoser: m.walkoverLoser || '',
   };
 }
 

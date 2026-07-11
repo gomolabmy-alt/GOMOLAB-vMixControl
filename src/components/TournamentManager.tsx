@@ -1,12 +1,14 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { useTournamentStore } from '../stores/tournamentStore';
+import { useTournamentStore, pushTournamentDataToHost } from '../stores/tournamentStore';
+import { useAppSettings } from '../stores/appSettingsStore';
+import { syncClient } from '../lib/syncClient';
 import { useCanvasStore } from '../stores/canvasStore';
 import type { Tournament, SportType } from '../types/tournament';
 import { SPORT_LABELS, SPORT_POSITIONS, SPORT_DEFAULTS } from '../types/tournament';
 import type { Player } from '../types/tournament';
 import { LogoUrlPicker } from './LogoUrlPicker';
-import { useTeamDbStore } from '../stores/teamDbStore';
+import { useTeamDbStore, type SavedTeam } from '../stores/teamDbStore';
 import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
 import { useMatchResultsStore, type SavedMatchResult } from '../stores/matchResultsStore';
 import { resolveImageUrl } from '../lib/imageUrl';
@@ -340,6 +342,17 @@ function SettingsBar({ tournament, onApply }: { tournament: Tournament; onApply:
         </div>
       </div>
 
+      <div className="tm-settings-group">
+        <label className="tm-settings-label" title="Winning score auto-applied when a fixture is marked Bye/Walkover in the Schedule tab">W/O Score</label>
+        <input
+          className="tm-settings-input tm-settings-input--sm"
+          type="number"
+          min={0} max={999}
+          value={s.walkoverWinScore ?? 1}
+          onChange={e => updateTournamentSettings(tournament.id, { walkoverWinScore: Math.max(0, Number(e.target.value) || 0) })}
+        />
+      </div>
+
       <button className="tm-apply-btn" onClick={onApply} title="Push all settings to linked canvas widgets">
         ▶ Apply to Canvas
       </button>
@@ -511,12 +524,43 @@ function PlayersPanel({ tournamentId }: { tournamentId: string }) {
 
 // ── Teams tab: teams belonging to the selected tournament (a competition can
 // hold any number of teams — pick 2 of them per fixture in the Schedule tab) ──
-function TeamsPanel({ tournamentId }: { tournamentId: string }) {
+function TeamsPanel({ tournament }: { tournament: Tournament }) {
+  const tournamentId = tournament.id;
   const { teams: allTeams, addTeam, updateTeam, deleteTeam } = useTeamDbStore();
+  const { matches, updateMatch: updateScheduleMatch } = useMatchScheduleStore();
   const teams = useMemo(() => allTeams.filter(t => t.tournamentId === tournamentId), [allTeams, tournamentId]);
 
   const handleAdd = () => {
     addTeam({ name: 'New Team', color: '#3498db', tournamentId });
+  };
+
+  // Setting a team's status auto-applies the same matchType to that team's
+  // not-yet-completed fixtures — matching by name since ScheduledMatch only
+  // stores a denormalized team name, not a team id.
+  const setTeamStatus = (team: SavedTeam, status: SavedTeam['status']) => {
+    updateTeam(team.id, { status });
+    const win = tournament.settings?.walkoverWinScore ?? SPORT_DEFAULTS[tournament.sport].walkoverWinScore;
+    const nameKey = team.name.trim().toLowerCase();
+    const shortKey = (team.shortName ?? '').trim().toLowerCase();
+    const isTeam = (n?: string, s?: string) =>
+      !!n && (n.trim().toLowerCase() === nameKey || (!!shortKey && (s ?? '').trim().toLowerCase() === shortKey));
+    for (const m of matches) {
+      if (m.completedAt) continue;
+      const isA = isTeam(m.teamAName, m.teamAShortName);
+      const isB = !isA && isTeam(m.teamBName, m.teamBShortName);
+      if (!isA && !isB) continue;
+      if (!status) {
+        updateScheduleMatch(m.id, { matchType: undefined, walkoverLoser: undefined });
+        continue;
+      }
+      const loserSide: 'A' | 'B' = isA ? 'A' : 'B';
+      updateScheduleMatch(m.id, {
+        matchType: status,
+        walkoverLoser: status === 'walkover' ? loserSide : undefined,
+        scoreA: loserSide === 'A' ? 0 : win,
+        scoreB: loserSide === 'A' ? win : 0,
+      });
+    }
   };
 
   if (teams.length === 0) {
@@ -539,7 +583,7 @@ function TeamsPanel({ tournamentId }: { tournamentId: string }) {
         {teams.map(t => (
           <div key={t.id} style={{
             display: 'flex', alignItems: 'center', gap: 10, padding: 10,
-            background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8,
+            background: 'var(--bg-2)', border: `1px solid ${t.status ? 'var(--red)' : 'var(--border)'}`, borderRadius: 8,
           }}>
             <LogoUrlPicker
               compact
@@ -572,6 +616,17 @@ function TeamsPanel({ tournamentId }: { tournamentId: string }) {
                   style={{ width: 24, height: 24, padding: 0, border: 'none', background: 'none', cursor: 'pointer' }}
                 />
               </div>
+              <select
+                className="tm-sched-type-select"
+                title="Bye/Walkover auto-applies to this team's not-yet-completed fixtures"
+                value={t.status ?? ''}
+                onChange={e => setTeamStatus(t, (e.target.value || undefined) as SavedTeam['status'])}
+                style={{ width: '100%' }}
+              >
+                <option value="">Active</option>
+                <option value="bye">BYE (sitting out)</option>
+                <option value="walkover">WALKOVER (withdrawn)</option>
+              </select>
             </div>
             <button
               className="btn btn--ghost btn--small"
@@ -829,7 +884,7 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
   const { matches: allMatches, addMatch, updateMatch, deleteMatch, markSent } = useMatchScheduleStore();
   const { teams: allTeams } = useTeamDbStore();
   const { pages, updateWidgetConfig, resetWidgetTimer } = useCanvasStore();
-  const { addResult } = useMatchResultsStore();
+  const { results: allResults, addResult, updateResult, deleteResult } = useMatchResultsStore();
   const matches = useMemo(
     () => allMatches.filter(m => m.tournamentId === tournament.id),
     [allMatches, tournament.id]
@@ -864,6 +919,84 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
       if (m.competition !== tournament.name) updateMatch(m.id, { competition: tournament.name });
     }
   }, [tournament.name, matches, updateMatch]);
+
+  // Bye/Walkover are fully automatic, no manual per-fixture picker: a fixture
+  // with no Team B name is a bye; a fixture where either team currently has
+  // 'walkover' status set in the Team Database is a walkover for that side.
+  // Keeps every not-yet-completed fixture in sync as fixtures/team statuses change.
+  useEffect(() => {
+    const win = tournament.settings?.walkoverWinScore ?? SPORT_DEFAULTS[tournament.sport].walkoverWinScore;
+    const statusOf = (name: string, shortName?: string) => {
+      const key = name.trim().toLowerCase();
+      const shortKey = (shortName ?? '').trim().toLowerCase();
+      return scopedTeams.find(t =>
+        t.name.trim().toLowerCase() === key || (!!shortKey && (t.shortName ?? '').trim().toLowerCase() === shortKey)
+      )?.status;
+    };
+    for (const m of matches) {
+      if (m.completedAt) continue;
+      const isByeAuto = !m.teamBName || !m.teamBName.trim();
+      let nextType: ScheduledMatch['matchType'];
+      let nextLoser: 'A' | 'B' | undefined;
+      if (isByeAuto) {
+        nextType = 'bye';
+      } else if (statusOf(m.teamAName, m.teamAShortName) === 'walkover') {
+        nextType = 'walkover'; nextLoser = 'A';
+      } else if (statusOf(m.teamBName, m.teamBShortName) === 'walkover') {
+        nextType = 'walkover'; nextLoser = 'B';
+      }
+      if (nextType === m.matchType && nextLoser === m.walkoverLoser) continue;
+      if (!nextType) {
+        updateMatch(m.id, { matchType: undefined, walkoverLoser: undefined });
+      } else {
+        updateMatch(m.id, {
+          matchType: nextType, walkoverLoser: nextLoser,
+          scoreA: nextLoser === 'A' ? 0 : win,
+          scoreB: nextLoser === 'A' ? win : 0,
+        });
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matches, scopedTeams, tournament.settings?.walkoverWinScore, tournament.sport]);
+
+  // A bye/walkover has no live match to run on a scoreboard, so it never
+  // reaches the normal "Save Result" step — without this, the score set on
+  // the fixture just sits on the Schedule row and never becomes a Result,
+  // which looked like "the score I set doesn't show up, it's stuck at 0-0".
+  // Writes/updates/removes a linked Result directly as the fixture changes.
+  useEffect(() => {
+    for (const m of matches) {
+      const existing = allResults.find(r => r.sourceScheduleId === m.id);
+      if (m.matchType) {
+        const data = {
+          tournamentId: tournament.id,
+          date: m.date, time: m.time,
+          competition: m.competition ?? tournament.name, round: m.round,
+          teamAName: m.teamAName, teamAShortName: m.teamAShortName, teamALogo: m.teamALogo, teamAColor: m.teamAColor,
+          scoreA: m.scoreA ?? 0,
+          teamBName: m.teamBName, teamBShortName: m.teamBShortName, teamBLogo: m.teamBLogo, teamBColor: m.teamBColor,
+          scoreB: m.scoreB ?? 0,
+          matchType: m.matchType, walkoverLoser: m.walkoverLoser,
+          sourceScheduleId: m.id,
+        };
+        if (!existing) {
+          addResult(data);
+        } else if (
+          existing.scoreA !== data.scoreA || existing.scoreB !== data.scoreB ||
+          existing.walkoverLoser !== data.walkoverLoser || existing.round !== data.round ||
+          existing.date !== data.date || existing.time !== data.time ||
+          existing.teamAName !== data.teamAName || existing.teamBName !== data.teamBName ||
+          existing.teamAShortName !== data.teamAShortName || existing.teamBShortName !== data.teamBShortName
+        ) {
+          updateResult(existing.id, data);
+        }
+      } else if (existing) {
+        // No longer a bye/walkover (e.g. team reinstated) — drop the auto result.
+        deleteResult(existing.id);
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matches, allResults, tournament.id, tournament.name]);
 
   const handleAdd = () => {
     const today = new Date();
@@ -985,7 +1118,22 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
                       <ScheduleTeamPicker side="A" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamAName: t.name, teamAShortName: t.shortName, teamAColor: t.color, teamALogo: t.logo })} />
                     </div>
                     <div className="tm-sched-vs-col">
-                      <span className="tm-sched-vs">VS</span>
+                      {m.matchType && (
+                        <span className="tm-sched-type-badge" title={
+                          m.matchType === 'bye'
+                            ? 'Automatic — no Team B name set'
+                            : `Automatic — ${m.walkoverLoser === 'A' ? m.teamAName : m.teamBName} is on Walkover status in the Team Database`
+                        }>{m.matchType === 'bye' ? 'BYE' : 'W/O'}</span>
+                      )}
+                      {m.matchType ? (
+                        <span className="tm-sched-vs tm-sched-score">
+                          <EditableText value={String(m.scoreA ?? 0)} onChange={v => updateMatch(m.id, { scoreA: Number(v) || 0 })} />
+                          <span className="tm-sched-score-sep">–</span>
+                          <EditableText value={String(m.scoreB ?? 0)} onChange={v => updateMatch(m.id, { scoreB: Number(v) || 0 })} />
+                        </span>
+                      ) : (
+                        <span className="tm-sched-vs">VS</span>
+                      )}
                       <EditableText className="tm-sched-round" value={m.round ?? ''} placeholder="Round"
                         onChange={v => updateMatch(m.id, { round: v })} />
                     </div>
@@ -1080,6 +1228,9 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
                   onChange={v => updateResult(r.id, r.teamAShortName ? { teamAShortName: v } : { teamAName: v })} />
               </div>
               <div className="tm-sched-vs-col">
+                {r.matchType && (
+                  <span className="tm-sched-type-badge">{r.matchType === 'bye' ? 'BYE' : 'W/O'}</span>
+                )}
                 <span className="tm-sched-vs tm-sched-score">
                   <EditableText value={String(r.scoreA)} onChange={v => updateResult(r.id, { scoreA: Number(v) || 0 })} />
                   <span className="tm-sched-score-sep">–</span>
@@ -1139,9 +1290,21 @@ function TournamentScopeHeader({ tournaments, selectedId, onSelect }: {
 }
 
 // ── Draggable window ──────────────────────────────────────────────────────────
+const isHostClient = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
 export function TournamentManager({ onClose }: Props) {
   const { tournaments, updateTournament, deleteTournament, setActiveTournament } = useTournamentStore();
   const { pages, updateWidgetConfig } = useCanvasStore();
+  const { remoteEditMode, setRemoteEditMode } = useAppSettings();
+
+  const handleSaveToHost = () => {
+    pushTournamentDataToHost();
+    setRemoteEditMode(false);
+  };
+  const handleDiscardAndResync = () => {
+    setRemoteEditMode(false);
+    syncClient.send({ type: 'REQUEST_STATE' });
+  };
 
   // Window position (drag)
   const [pos, setPos] = useState(() => ({
@@ -1333,6 +1496,25 @@ export function TournamentManager({ onClose }: Props) {
           >🏁 Results{scopedResults.length > 0 ? ` (${scopedResults.length})` : ''}</button>
         </div>
 
+        {/* Remote-only (not host, not the deliberately view-only readonly client):
+            local edits don't sync live — must be explicitly pushed */}
+        {!isHostClient && !syncClient.isReadOnly && (
+          <div className="tm-remote-edit-bar">
+            {remoteEditMode ? (
+              <>
+                <span className="tm-remote-edit-status tm-remote-edit-status--editing">✏️ Editing locally — not synced to host yet</span>
+                <button className="tm-io-btn tm-io-btn--ok" onClick={handleSaveToHost}>💾 Save to Host</button>
+                <button className="tm-io-btn" onClick={handleDiscardAndResync}>↩ Discard &amp; Resync</button>
+              </>
+            ) : (
+              <>
+                <span className="tm-remote-edit-status">🔒 Live view — synced from host</span>
+                <button className="tm-io-btn" onClick={() => setRemoteEditMode(true)}>✏️ Edit</button>
+              </>
+            )}
+          </div>
+        )}
+
         {/* Main area */}
         {tab === 'teams' || tab === 'players' || tab === 'schedule' || tab === 'results' ? (
           <div className="tm-win-body--scoped">
@@ -1342,7 +1524,7 @@ export function TournamentManager({ onClose }: Props) {
                 <span>Create a tournament first in the 🏆 Tournaments tab.</span>
               </div>
             ) : tab === 'teams' ? (
-              <TeamsPanel tournamentId={selected.id} />
+              <TeamsPanel tournament={selected} />
             ) : tab === 'players' ? (
               <PlayersPanel tournamentId={selected.id} />
             ) : tab === 'schedule' ? (

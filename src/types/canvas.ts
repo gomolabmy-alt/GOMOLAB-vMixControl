@@ -111,6 +111,10 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       // originating fixture as completed back in the Schedule tab.
       linkedScheduleMatchId: '',
       lastSavedSignature: '',
+      // Carried from the fixture when it's a bye/walkover — undefined for a
+      // normal match.
+      matchType: '',
+      walkoverLoser: '',
     },
   },
   'score-log': {

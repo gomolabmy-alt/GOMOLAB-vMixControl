@@ -6,6 +6,25 @@ import { syncClient } from '../lib/syncClient';
 import { useTeamDbStore } from './teamDbStore';
 import { useMatchScheduleStore } from './matchScheduleStore';
 import { useMatchResultsStore } from './matchResultsStore';
+import { useAppSettings } from './appSettingsStore';
+
+/** True on the desktop host (Tauri), false on any browser/remote client. */
+const isHostClient = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+/** Remote client only: push the current local Team DB/Schedule/Results/
+ *  Tournament state to the host, which adopts it and re-broadcasts to
+ *  everyone else on its next FULL_STATE heartbeat. */
+export function pushTournamentDataToHost() {
+  if (isHostClient()) return;
+  const t = useTournamentStore.getState();
+  syncClient.send({
+    type: 'PUSH_TOURNAMENT_DATA',
+    teamDb: { teams: useTeamDbStore.getState().teams },
+    matchSchedule: { matches: useMatchScheduleStore.getState().matches },
+    matchResults: { results: useMatchResultsStore.getState().results },
+    tournament: { tournaments: t.tournaments, activeTournamentId: t.activeTournamentId },
+  });
+}
 
 interface TournamentStore {
   tournaments: Tournament[];
@@ -96,13 +115,17 @@ export const useTournamentStore = create<TournamentStore>()(
 export function initTournamentSync() {
   syncClient.onMessage((msg) => {
     if (msg.type === 'FULL_STATE') {
-      const isHost = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
       // Remote/browser clients (any non-host — plain remote-control, readonly,
       // or commentator) previously never received the team database, match
       // schedule, or results — only canvas/tournament were synced, so the
       // Tournament Database window showed empty/stale local data over a
       // remote IP connection instead of the host's actual data.
-      if (!isHost) {
+      //
+      // While remoteEditMode is on, a remote client is mid-edit locally —
+      // skip applying the host's periodic re-broadcast so it doesn't clobber
+      // those unsaved edits; "Save to Host" (pushTournamentDataToHost) is the
+      // explicit, deliberate way those edits reach the host instead.
+      if (!isHostClient() && !useAppSettings.getState().remoteEditMode) {
         if (msg.tournament) {
           useTournamentStore.setState({
             tournaments: msg.tournament.tournaments,
@@ -112,6 +135,21 @@ export function initTournamentSync() {
         if (msg.teamDb) useTeamDbStore.getState().restoreTeams(msg.teamDb.teams);
         if (msg.matchSchedule) useMatchScheduleStore.getState().restoreMatches(msg.matchSchedule.matches);
         if (msg.matchResults) useMatchResultsStore.getState().restoreResults(msg.matchResults.results);
+      }
+      return;
+    }
+    if (msg.type === 'PUSH_TOURNAMENT_DATA') {
+      // Only the host adopts a pushed edit — everyone else just gets it via
+      // the host's normal FULL_STATE heartbeat afterward.
+      if (isHostClient()) {
+        useTeamDbStore.getState().restoreTeams(msg.teamDb.teams);
+        useMatchScheduleStore.getState().restoreMatches(msg.matchSchedule.matches);
+        useMatchResultsStore.getState().restoreResults(msg.matchResults.results);
+        useTournamentStore.setState({
+          tournaments: msg.tournament.tournaments,
+          activeTournamentId: msg.tournament.activeTournamentId,
+        });
+        syncClient.sendFullState();
       }
       return;
     }

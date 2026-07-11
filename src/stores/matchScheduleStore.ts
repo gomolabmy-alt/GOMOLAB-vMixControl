@@ -23,6 +23,16 @@ export interface ScheduledMatch {
   teamBShortName?: string;
   teamBLogo?: string;
   teamBColor: string;
+  /** 'bye' = no opponent this round (teamB is a placeholder); 'walkover' =
+   *  both teams were fixtured but one forfeited — no match was actually
+   *  played. Undefined means a normal fixture. */
+  matchType?: 'bye' | 'walkover';
+  /** Which side forfeited, for a walkover — informational + drives the badge. */
+  walkoverLoser?: 'A' | 'B';
+  /** User-set scoreline for a bye/walkover (no live match to derive it from),
+   *  editable directly on the fixture. Carries over when sent to a scoreboard. */
+  scoreA?: number;
+  scoreB?: number;
   /** Set when this fixture has been sent to a scoreboard — used to grey it
    *  out and auto-advance the schedule widget's carousel past it. */
   sentAt?: number;
