@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTeamDbStore } from '../stores/teamDbStore';
-import { resolveImageUrl } from '../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../lib/imageUrl';
 
 const isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -221,6 +221,10 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
       <div className="logo-library-header">
         <span className="logo-library-title">{showScoped ? 'Team Logos' : 'Server Images'}</span>
         <div style={{ display: 'flex', gap: 4 }}>
+          <button className="btn btn--ghost btn--small" title="Use a blank/transparent image — clears any logo instead of leaving one set"
+            onClick={() => { onChange(transparentLogoUrl()); setShowLibrary(false); }} style={{ fontSize: 10, padding: '1px 6px' }}>
+            ⬜ Transparent
+          </button>
           {showScoped ? (
             <button className="btn btn--ghost btn--small" onClick={() => setBrowseAll(true)} style={{ fontSize: 10, padding: '1px 6px' }}>
               Browse full library →

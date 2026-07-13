@@ -35,6 +35,16 @@ pub fn run() {
                 .join("served-images");
             std::fs::create_dir_all(&images_dir).ok();
 
+            // Seed a fully transparent PNG every launch (idempotent) so the
+            // Draw system's vMix pushes can reference a stable, always-present
+            // "blank" logo — http://localhost:9877/images/transparent.png —
+            // to actively clear an image field instead of leaving whatever
+            // the previous team's logo was showing.
+            let transparent_dest = images_dir.join("transparent.png");
+            if !transparent_dest.exists() {
+                std::fs::write(&transparent_dest, include_bytes!("../assets/transparent.png")).ok();
+            }
+
             let server_state = Arc::new(server::ServerState::new(
                 lan_ip,
                 9877,

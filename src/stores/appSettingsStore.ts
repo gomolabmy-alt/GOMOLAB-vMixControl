@@ -29,6 +29,17 @@ interface AppSettingsState {
   // pushes changes back with "Save to Host" instead of continuous mirroring.
   remoteEditMode: boolean;
   setRemoteEditMode: (v: boolean) => void;
+  // Remote-client-only, Draw tab: while true, every draw change (team
+  // drawn, group/position assigned) is auto-pushed to the host a moment
+  // after it happens — no manual "Save to Host" click needed. Independent
+  // of remoteEditMode: this client keeps receiving the host's broadcasts
+  // normally, it just also proactively pushes its own changes.
+  liveSyncDraw: boolean;
+  setLiveSyncDraw: (v: boolean) => void;
+  // Title bar clock. Empty string = follow system local time zone;
+  // otherwise an IANA time zone name (e.g. "Europe/London").
+  clockTimeZone: string;
+  setClockTimeZone: (v: string) => void;
 }
 
 export const useAppSettings = create<AppSettingsState>()(
@@ -57,6 +68,12 @@ export const useAppSettings = create<AppSettingsState>()(
 
       remoteEditMode: false,
       setRemoteEditMode: (v) => set({ remoteEditMode: v }),
+
+      liveSyncDraw: false,
+      setLiveSyncDraw: (v) => set({ liveSyncDraw: v }),
+
+      clockTimeZone: '',
+      setClockTimeZone: (v) => set({ clockTimeZone: v }),
     }),
     { name: 'gomolab-app-settings' },
   ),

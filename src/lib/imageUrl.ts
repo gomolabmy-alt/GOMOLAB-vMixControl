@@ -26,3 +26,14 @@ export function resolveImageUrl(url: string): string {
   const host = typeof window !== 'undefined' ? (window.location.hostname || 'localhost') : 'localhost';
   return `http://${host}:${m[2]}${m[3]}`;
 }
+
+// A fully transparent PNG the Rust side seeds into the images folder on
+// every launch (see lib.rs) — always present on every port (9877/9878/9879
+// all serve the same images dir), so it can be referenced by a stable URL
+// without uploading anything. Useful as a deliberate "blank" logo, e.g. so
+// a vMix push can actively clear an image field instead of leaving
+// whatever the previous team's logo was showing.
+export function transparentLogoUrl(): string {
+  const port = (typeof window !== 'undefined' && window.location.port) || '9877';
+  return `http://localhost:${port}/images/transparent.png`;
+}

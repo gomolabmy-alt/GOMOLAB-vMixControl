@@ -29,13 +29,20 @@ export function pushTournamentDataToHost() {
 interface TournamentStore {
   tournaments: Tournament[];
   activeTournamentId: string;
+  /** Which tournament the Tournament Database window opens to by default —
+   *  purely a local UI convenience, separate from `activeTournamentId`
+   *  (which drives what remote/readonly/commentator clients see and must
+   *  stay tied to sync). Empty = no default, falls back to the first
+   *  tournament in the list. */
+  defaultTournamentId: string;
 
   addTournament: (data: { name: string; sport: SportType }) => string;
-  updateTournament: (id: string, patch: Partial<Pick<Tournament, 'name' | 'sport'>>) => void;
+  updateTournament: (id: string, patch: Partial<Pick<Tournament, 'name' | 'sport' | 'groups' | 'pots' | 'categories' | 'drawVmix' | 'drawTeamMode' | 'groupListVmix'>>) => void;
   deleteTournament: (id: string) => void;
 
   updateTournamentSettings: (id: string, patch: Partial<TournamentSettings>) => void;
   setActiveTournament: (id: string) => void;
+  setDefaultTournament: (id: string) => void;
   restoreTournaments: (tournaments: unknown[], activeTournamentId: string) => void;
 }
 
@@ -44,6 +51,7 @@ export const useTournamentStore = create<TournamentStore>()(
     (set) => ({
       tournaments: [],
       activeTournamentId: '',
+      defaultTournamentId: '',
 
       addTournament: ({ name, sport }) => {
         const id = crypto.randomUUID();
@@ -87,10 +95,12 @@ export const useTournamentStore = create<TournamentStore>()(
         return {
           tournaments: remaining,
           activeTournamentId: s.activeTournamentId === id ? (remaining[0]?.id ?? '') : s.activeTournamentId,
+          defaultTournamentId: s.defaultTournamentId === id ? '' : s.defaultTournamentId,
         };
       }),
 
       setActiveTournament: (id) => set({ activeTournamentId: id }),
+      setDefaultTournament: (id) => set(s => ({ defaultTournamentId: s.defaultTournamentId === id ? '' : id })),
 
       restoreTournaments: (tournaments, activeTournamentId) =>
         set({ tournaments: tournaments as Tournament[], activeTournamentId: activeTournamentId as string }),
@@ -107,7 +117,31 @@ export const useTournamentStore = create<TournamentStore>()(
       // data before (or instead of) the synced copy.
       partialize: (s) => (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window))
         ? {}
-        : { tournaments: s.tournaments, activeTournamentId: s.activeTournamentId },
+        : { tournaments: s.tournaments, activeTournamentId: s.activeTournamentId, defaultTournamentId: s.defaultTournamentId },
+      // v1: Tournament.groups changed from string[] to {name,prefix,capacity}[]
+      // (added group prefix labels + per-group max team count).
+      // v2: Tournament.pots changed from string[] to {name,category}[]
+      // (added per-category draw scoping).
+      // Both migrations convert any already-saved plain strings so old
+      // tournaments don't crash the Teams/Standings/Draw tabs, which now
+      // assume group/pot objects.
+      version: 2,
+      migrate: (persisted) => {
+        const state = persisted as { tournaments?: Array<Omit<Tournament, 'groups' | 'pots'> & { groups?: unknown; pots?: unknown }> };
+        if (state?.tournaments) {
+          for (const t of state.tournaments) {
+            if (Array.isArray(t.groups)) {
+              t.groups = t.groups.map((g: unknown) =>
+                typeof g === 'string' ? { name: g, prefix: g.charAt(0).toUpperCase() } : g
+              );
+            }
+            if (Array.isArray(t.pots)) {
+              t.pots = t.pots.map((p: unknown) => typeof p === 'string' ? { name: p } : p);
+            }
+          }
+        }
+        return state;
+      },
     }
   )
 );

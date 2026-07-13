@@ -24,6 +24,29 @@ export interface StaffMember {
 
 export const DEFAULT_STAFF_ROLES = ['Head Coach', 'Manager', 'Medic'];
 
+export interface TournamentGroup {
+  /** Display name, e.g. "Group A" — also the value stored in SavedTeam.group. */
+  name: string;
+  /** Short code prefixed to each team's position within this group (e.g.
+   *  prefix "A" + position 1 = "A1") — freely customizable, defaults to the
+   *  name's first letter when unset. */
+  prefix?: string;
+  /** Max team count for this group — the draw won't assign more teams to it
+   *  once reached. Unset = unlimited. */
+  capacity?: number;
+  /** Which Tournament.categories entry this group belongs to (e.g. "Men") —
+   *  unset means shared/visible under any category tab in the Draw tab. */
+  category?: string;
+}
+
+export interface TournamentPot {
+  /** Display name, e.g. "Pot 1" — also the value stored in SavedTeam.pot. */
+  name: string;
+  /** Which Tournament.categories entry this pot belongs to — unset means
+   *  shared/visible under any category tab in the Draw tab. */
+  category?: string;
+}
+
 // A Tournament is a competition/league container — it no longer owns a fixed
 // Team A / Team B. Teams belong to a tournament via SavedTeam.tournamentId
 // (teamDbStore) and can be any number; widgets reference a specific team by id.
@@ -33,6 +56,57 @@ export interface Tournament {
   sport: SportType;
   settings: TournamentSettings;
   createdAt: number;
+  /** Preliminary-draw / pool groups (e.g. "Pool A", "Pool B") — freely added
+   *  and removed, teams are assigned to one via SavedTeam.group (which stores
+   *  the group's `name`). Standings are computed per group when this is
+   *  non-empty, otherwise as one table. */
+  groups?: TournamentGroup[];
+  /** Seeding pots for the live draw (e.g. "Pot 1", "Pot 2") — teams are
+   *  pre-assigned to a pot via SavedTeam.pot before drawing; the draw then
+   *  randomly places one team per pot into each group in turn. */
+  pots?: TournamentPot[];
+  /** Freely-defined competition categories (e.g. "Men", "Women", "U21") —
+   *  teams are assigned to one via SavedTeam.category. A club entering more
+   *  than one category duplicates its team entry per category since rosters
+   *  differ (see teamDbStore.duplicateTeam). */
+  categories?: string[];
+  /** How the next team is picked from the current pot — 'random' (default)
+   *  picks blindly; 'manual' lets the operator click a specific team chip in
+   *  the current pot to draw it (e.g. a physical ball was already pulled by
+   *  hand and just needs recording). */
+  drawTeamMode?: 'random' | 'manual';
+  /** vMix field mapping pushed in real time as each team is drawn, for an
+   *  on-air draw graphic — plain text since this is a small, occasional
+   *  setup step rather than something needing a full input/field picker. */
+  drawVmix?: {
+    inputKey?: string;
+    fieldTeamName?: string;
+    fieldTeamShort?: string;
+    fieldTeamLogo?: string;
+    fieldGroup?: string;
+    fieldPot?: string;
+  };
+  /** Pushes a whole group's team list to numbered vMix text fields, one
+   *  target per on-air "Group A" style title — same numbered-prefix setup as
+   *  the Player List widget's vMix Name Sync (pick/type e.g. "Team1.Text"
+   *  and the digit + ".Text" suffix is stripped to a reusable prefix, so
+   *  team N lands in `{prefix}N.Text`). */
+  groupListVmix?: GroupListVmixTarget[];
+}
+
+export interface GroupListVmixTarget {
+  id: string;
+  /** Which group's team list (in prefix/position order) this target pushes. */
+  group: string;
+  inputKey?: string;
+  /** e.g. "Team" → writes Team1.Text, Team2.Text, … for each team in the group. */
+  fieldPrefix?: string;
+  /** e.g. "Short" → writes Short1.Text, Short2.Text, … (optional). */
+  fieldShortPrefix?: string;
+  /** e.g. "Logo" → writes Logo1.Source, Logo2.Source, … (optional, image field). */
+  fieldLogoPrefix?: string;
+  /** Push automatically whenever this group's membership changes. */
+  autoSync?: boolean;
 }
 
 export const SPORT_LABELS: Record<SportType, string> = {
@@ -82,16 +156,22 @@ export interface TournamentSettings {
    *  Schedule tab (loser always gets 0) — per-tournament since the
    *  convention varies by sport/competition (e.g. rugby often uses 21 or 28). */
   walkoverWinScore: number;
+  /** Standings points per outcome — varies by sport/competition convention
+   *  (e.g. rugby union commonly 4/2/0, football 3/1/0). Bonus points aren't
+   *  modeled; walkovers count as a normal win/loss, byes don't count at all. */
+  pointsWin: number;
+  pointsDraw: number;
+  pointsLoss: number;
 }
 
 export const SPORT_DEFAULTS: Record<SportType, TournamentSettings> = {
-  football:    { periods: 2, periodDurationMs: 2700000, halfTimeDurationMs:  900000, maxOnField: 11, maxSubs:  9, timerMode: 'countup',   walkoverWinScore: 3  },
-  basketball:  { periods: 4, periodDurationMs:  720000, halfTimeDurationMs:  120000, maxOnField:  5, maxSubs:  7, timerMode: 'countdown', walkoverWinScore: 20 },
-  rugby_union: { periods: 2, periodDurationMs: 2400000, halfTimeDurationMs:  600000, maxOnField: 15, maxSubs:  8, timerMode: 'countup',   walkoverWinScore: 28 },
-  rugby_league:{ periods: 2, periodDurationMs: 2400000, halfTimeDurationMs:  600000, maxOnField: 13, maxSubs:  4, timerMode: 'countup',   walkoverWinScore: 28 },
-  volleyball:  { periods: 5, periodDurationMs:       0, halfTimeDurationMs:  120000, maxOnField:  6, maxSubs:  6, timerMode: 'countup',   walkoverWinScore: 3  },
-  handball:    { periods: 2, periodDurationMs: 1800000, halfTimeDurationMs:  600000, maxOnField:  7, maxSubs:  7, timerMode: 'countup',   walkoverWinScore: 10 },
-  ice_hockey:  { periods: 3, periodDurationMs: 1200000, halfTimeDurationMs:  900000, maxOnField:  6, maxSubs: 14, timerMode: 'countdown', walkoverWinScore: 5  },
-  futsal:      { periods: 2, periodDurationMs: 1200000, halfTimeDurationMs:  600000, maxOnField:  5, maxSubs:  5, timerMode: 'countup',   walkoverWinScore: 5  },
-  custom:      { periods: 2, periodDurationMs: 2700000, halfTimeDurationMs:  900000, maxOnField: 11, maxSubs:  7, timerMode: 'countup',   walkoverWinScore: 1  },
+  football:    { periods: 2, periodDurationMs: 2700000, halfTimeDurationMs:  900000, maxOnField: 11, maxSubs:  9, timerMode: 'countup',   walkoverWinScore: 3,  pointsWin: 3, pointsDraw: 1, pointsLoss: 0 },
+  basketball:  { periods: 4, periodDurationMs:  720000, halfTimeDurationMs:  120000, maxOnField:  5, maxSubs:  7, timerMode: 'countdown', walkoverWinScore: 20, pointsWin: 2, pointsDraw: 0, pointsLoss: 0 },
+  rugby_union: { periods: 2, periodDurationMs: 2400000, halfTimeDurationMs:  600000, maxOnField: 15, maxSubs:  8, timerMode: 'countup',   walkoverWinScore: 28, pointsWin: 4, pointsDraw: 2, pointsLoss: 0 },
+  rugby_league:{ periods: 2, periodDurationMs: 2400000, halfTimeDurationMs:  600000, maxOnField: 13, maxSubs:  4, timerMode: 'countup',   walkoverWinScore: 28, pointsWin: 2, pointsDraw: 1, pointsLoss: 0 },
+  volleyball:  { periods: 5, periodDurationMs:       0, halfTimeDurationMs:  120000, maxOnField:  6, maxSubs:  6, timerMode: 'countup',   walkoverWinScore: 3,  pointsWin: 3, pointsDraw: 0, pointsLoss: 0 },
+  handball:    { periods: 2, periodDurationMs: 1800000, halfTimeDurationMs:  600000, maxOnField:  7, maxSubs:  7, timerMode: 'countup',   walkoverWinScore: 10, pointsWin: 2, pointsDraw: 1, pointsLoss: 0 },
+  ice_hockey:  { periods: 3, periodDurationMs: 1200000, halfTimeDurationMs:  900000, maxOnField:  6, maxSubs: 14, timerMode: 'countdown', walkoverWinScore: 5,  pointsWin: 2, pointsDraw: 1, pointsLoss: 0 },
+  futsal:      { periods: 2, periodDurationMs: 1200000, halfTimeDurationMs:  600000, maxOnField:  5, maxSubs:  5, timerMode: 'countup',   walkoverWinScore: 5,  pointsWin: 3, pointsDraw: 1, pointsLoss: 0 },
+  custom:      { periods: 2, periodDurationMs: 2700000, halfTimeDurationMs:  900000, maxOnField: 11, maxSubs:  7, timerMode: 'countup',   walkoverWinScore: 1,  pointsWin: 3, pointsDraw: 1, pointsLoss: 0 },
 };

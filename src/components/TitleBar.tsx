@@ -1,11 +1,95 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useVmixStore } from '../stores/vmixStore';
 import { useCanvasStore } from '../stores/canvasStore';
+import { useAppSettings } from '../stores/appSettingsStore';
 import { syncClient } from '../lib/syncClient';
 import type { VmixConnectionEntry } from '../types/vmix';
 import type { SavedConnection } from '../types/vmix';
 
 type ScanState = 'idle' | 'scanning' | 'done';
+
+function TitleBarClock() {
+  const { clockTimeZone, setClockTimeZone } = useAppSettings();
+  const [now, setNow] = useState(() => new Date());
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const iv = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(iv);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) { setOpen(false); setSearch(''); }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const allZones: string[] = useMemo(() => {
+    try {
+      const supported = (Intl as any).supportedValuesOf;
+      return supported ? supported('timeZone') : [];
+    } catch { return []; }
+  }, []);
+
+  const filtered = search
+    ? allZones.filter(z => z.toLowerCase().includes(search.toLowerCase()))
+    : allZones;
+
+  let timeStr: string;
+  try {
+    timeStr = new Intl.DateTimeFormat('en-GB', {
+      timeZone: clockTimeZone || undefined,
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).format(now);
+  } catch {
+    timeStr = new Intl.DateTimeFormat('en-GB', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).format(now);
+  }
+
+  const tzLabel = clockTimeZone ? clockTimeZone.split('/').pop()!.replace(/_/g, ' ') : 'Local';
+
+  return (
+    <div className="titlebar-clock" ref={ref}>
+      <button className="titlebar-clock-btn" onClick={() => setOpen(o => !o)} title="Click to change time zone">
+        <span className="titlebar-clock-time">{timeStr}</span>
+        <span className="titlebar-clock-tz">{tzLabel}</span>
+      </button>
+      {open && (
+        <div className="titlebar-clock-dropdown">
+          <input
+            className="titlebar-clock-search"
+            placeholder="Search time zone…"
+            autoFocus
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+          />
+          <ul className="titlebar-clock-list">
+            <li
+              className={`titlebar-clock-item${!clockTimeZone ? ' titlebar-clock-item--selected' : ''}`}
+              onClick={() => { setClockTimeZone(''); setOpen(false); setSearch(''); }}
+            >🖥 System (Local)</li>
+            {filtered.length === 0
+              ? <li className="titlebar-clock-empty">No matching time zone</li>
+              : filtered.map(z => (
+                <li
+                  key={z}
+                  className={`titlebar-clock-item${z === clockTimeZone ? ' titlebar-clock-item--selected' : ''}`}
+                  onClick={() => { setClockTimeZone(z); setOpen(false); setSearch(''); }}
+                >{z.replace(/_/g, ' ')}</li>
+              ))
+            }
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function VmixConnectDropdown({
   onClose,
@@ -404,6 +488,9 @@ export function TitleBar() {
 
       {/* Right — transport buttons + connections */}
       <div className="titlebar-right">
+        <TitleBarClock />
+        <div className="titlebar-sep" />
+
         {vmixState && (
           <>
             {!isBrowserClient && (

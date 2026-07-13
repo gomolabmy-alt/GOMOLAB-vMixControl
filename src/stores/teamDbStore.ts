@@ -20,6 +20,24 @@ export interface SavedTeam {
    *  for the rest of the tournament — setting this auto-applies the same
    *  status to that team's not-yet-completed fixtures in the Schedule tab. */
   status?: 'bye' | 'walkover';
+  /** Which preliminary-draw/pool group this team is in (e.g. "Pool A") —
+   *  must match a name in Tournament.groups, or unset for no group. Set
+   *  either manually or by the live draw (see Tournament.pots). */
+  group?: string;
+  /** Explicit 1-based slot within `group` (e.g. 2 → "A2") — optional; when
+   *  unset the slot is auto-computed by list order. If two teams in the
+   *  same group are both given the same explicit position, that slot is
+   *  left blank in the group list push rather than guessing which wins. */
+  groupPosition?: number;
+  /** Seeding pot for the live draw (e.g. "Pot 1") — must match a name in
+   *  Tournament.pots. Assigned before drawing; unrelated to `group`, which
+   *  is the draw's OUTPUT. */
+  pot?: string;
+  /** Competition category (e.g. "Men", "Women", "U21") — must match a name
+   *  in Tournament.categories, or unset for none. A club entering multiple
+   *  categories gets a separate SavedTeam per category (see duplicateTeam)
+   *  since each category's roster is independent. */
+  category?: string;
 }
 
 interface TeamDbStore {
@@ -27,6 +45,11 @@ interface TeamDbStore {
   addTeam: (team: Omit<SavedTeam, 'id' | 'players'>) => string;
   updateTeam: (id: string, patch: Partial<Omit<SavedTeam, 'id' | 'players'>>) => void;
   deleteTeam: (id: string) => void;
+  /** Copies a team's identity (name/short/color/logo) into a fresh team in
+   *  the same tournament — empty roster/staff and no group/pot/category, so
+   *  the same club can field a separate, independently-rostered entry in
+   *  another category. Returns the new team's id, or undefined if not found. */
+  duplicateTeam: (id: string) => string | undefined;
 
   addPlayer: (teamId: string, player: Omit<Player, 'id'>) => string;
   updatePlayer: (teamId: string, playerId: string, patch: Partial<Omit<Player, 'id'>>) => void;
@@ -38,7 +61,7 @@ interface TeamDbStore {
 
 export const useTeamDbStore = create<TeamDbStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       teams: [],
 
       addTeam: (team) => {
@@ -52,6 +75,25 @@ export const useTeamDbStore = create<TeamDbStore>()(
       })),
 
       deleteTeam: (id) => set(s => ({ teams: s.teams.filter(t => t.id !== id) })),
+
+      duplicateTeam: (id) => {
+        const src = get().teams.find(t => t.id === id);
+        if (!src) return undefined;
+        const newId = crypto.randomUUID();
+        set(s => ({
+          teams: [...s.teams, {
+            id: newId,
+            name: src.name,
+            shortName: src.shortName,
+            color: src.color,
+            logo: src.logo,
+            players: [],
+            staff: [],
+            tournamentId: src.tournamentId,
+          }],
+        }));
+        return newId;
+      },
 
       addPlayer: (teamId, player) => {
         const playerId = crypto.randomUUID();

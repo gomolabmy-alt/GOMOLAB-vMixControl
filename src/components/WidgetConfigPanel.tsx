@@ -271,7 +271,7 @@ const SCORE_STYLES = [
   { value: 'rugby-league',  label: 'Rugby League',        increments: RUGBY_LEAGUE_INCS },
 ];
 
-function InputPickerDropdown({ currentKey, currentTitle, allInputs, onSelect, filter }: {
+export function InputPickerDropdown({ currentKey, currentTitle, allInputs, onSelect, filter }: {
   currentKey: string;
   currentTitle: string | undefined;
   allInputs: VmixInput[];

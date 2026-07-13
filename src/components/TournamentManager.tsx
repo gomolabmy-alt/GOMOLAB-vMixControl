@@ -3,15 +3,18 @@ import { createPortal } from 'react-dom';
 import { useTournamentStore, pushTournamentDataToHost } from '../stores/tournamentStore';
 import { useAppSettings } from '../stores/appSettingsStore';
 import { syncClient } from '../lib/syncClient';
+import { useVmixStore } from '../stores/vmixStore';
+import { ConfirmButton } from './ConfirmButton';
 import { useCanvasStore } from '../stores/canvasStore';
-import type { Tournament, SportType } from '../types/tournament';
+import type { Tournament, SportType, TournamentSettings, TournamentGroup, TournamentPot, GroupListVmixTarget } from '../types/tournament';
 import { SPORT_LABELS, SPORT_POSITIONS, SPORT_DEFAULTS } from '../types/tournament';
 import type { Player } from '../types/tournament';
 import { LogoUrlPicker } from './LogoUrlPicker';
+import { InputPickerDropdown } from './WidgetConfigPanel';
 import { useTeamDbStore, type SavedTeam } from '../stores/teamDbStore';
 import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
 import { useMatchResultsStore, type SavedMatchResult } from '../stores/matchResultsStore';
-import { resolveImageUrl } from '../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../lib/imageUrl';
 import { guardScoreboardOverwrite, buildLoadMatchPatch } from '../utils/scoreboardSnapshot';
 
 // ── Import / Export helpers ───────────────────────────────────────────────────
@@ -58,6 +61,34 @@ function exportResultsCSV(results: SavedMatchResult[], tournamentName: string) {
   const header = ['Date', 'Round', 'Team A', 'Score A', 'Score B', 'Team B'];
   const rows = results.map(r => [r.date, r.round ?? '', r.teamAName, String(r.scoreA), String(r.scoreB), r.teamBName]);
   downloadCSV(header, rows, `${tournamentName.replace(/[^a-z0-9]/gi, '_')}_results.csv`);
+}
+
+function downloadJSON(data: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Exports one tournament plus everything scoped to it (teams w/ rosters,
+// schedule, results) — self-contained enough to hand off or restore later.
+function exportTournamentJSON(tournament: Tournament, teams: SavedTeam[], matches: ScheduledMatch[], results: SavedMatchResult[]) {
+  downloadJSON(
+    { kind: 'gomolab-tournament-export', version: 1, exportedAt: Date.now(), tournament, teams, matches, results },
+    `${tournament.name.replace(/[^a-z0-9]/gi, '_')}_tournament.json`
+  );
+}
+
+// Exports every tournament and all related teams/schedule/results in the
+// database, regardless of which one is selected.
+function exportProjectJSON(tournaments: Tournament[], activeTournamentId: string, teams: SavedTeam[], matches: ScheduledMatch[], results: SavedMatchResult[]) {
+  downloadJSON(
+    { kind: 'gomolab-project-export', version: 1, exportedAt: Date.now(), tournaments, activeTournamentId, teams, matches, results },
+    `gomolab_project_${new Date().toISOString().slice(0, 10)}.json`
+  );
 }
 
 // Basic quoted-CSV / TSV row splitter, shared by every file importer below.
@@ -353,6 +384,21 @@ function SettingsBar({ tournament, onApply }: { tournament: Tournament; onApply:
         />
       </div>
 
+      <div className="tm-settings-group">
+        <label className="tm-settings-label" title="Standings points per outcome — walkovers count as a normal win/loss, byes don't count at all">Win/Draw/Loss Pts</label>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <input className="tm-settings-input tm-settings-input--sm" type="number" min={0} max={99} title="Win"
+            value={s.pointsWin ?? 3}
+            onChange={e => updateTournamentSettings(tournament.id, { pointsWin: Math.max(0, Number(e.target.value) || 0) })} />
+          <input className="tm-settings-input tm-settings-input--sm" type="number" min={0} max={99} title="Draw"
+            value={s.pointsDraw ?? 1}
+            onChange={e => updateTournamentSettings(tournament.id, { pointsDraw: Math.max(0, Number(e.target.value) || 0) })} />
+          <input className="tm-settings-input tm-settings-input--sm" type="number" min={0} max={99} title="Loss"
+            value={s.pointsLoss ?? 0}
+            onChange={e => updateTournamentSettings(tournament.id, { pointsLoss: Math.max(0, Number(e.target.value) || 0) })} />
+        </div>
+      </div>
+
       <button className="tm-apply-btn" onClick={onApply} title="Push all settings to linked canvas widgets">
         ▶ Apply to Canvas
       </button>
@@ -522,16 +568,121 @@ function PlayersPanel({ tournamentId }: { tournamentId: string }) {
   );
 }
 
+// Tournament.groups was a plain string[] before group prefixes/capacity were
+// added — tolerate any group that's still in that shape (e.g. a stale
+// pre-migration remote client) instead of crashing on `.name`.
+function normalizeGroups(groups: unknown): TournamentGroup[] {
+  return ((groups as TournamentGroup[] | undefined) ?? []).map(g =>
+    typeof g === 'string' ? { name: g as string, prefix: (g as string).charAt(0).toUpperCase() } : g
+  );
+}
+
+// Tournament.pots was a plain string[] before per-category scoping was
+// added — tolerate any pot that's still in that shape.
+function normalizePots(pots: unknown): TournamentPot[] {
+  return ((pots as TournamentPot[] | undefined) ?? []).map(p =>
+    typeof p === 'string' ? { name: p as string } : p
+  );
+}
+
+// Resolves each group member to a 1-based slot — fully manual, no auto-fill:
+// only teams with an explicit `groupPosition` occupy a slot. If two teams
+// claim the SAME slot, it's left blank (neither wins) so the group list
+// push doesn't guess — those teams are reported in `conflictTeamIds`. Teams
+// with no explicit position (or a conflicted one) are reported in
+// `unpositioned` instead of being silently placed somewhere.
+function resolveGroupSlots(members: SavedTeam[], slotCount?: number): { slots: (SavedTeam | null)[]; conflictTeamIds: Set<string>; unpositioned: SavedTeam[] } {
+  const withPos = members.filter(t => t.groupPosition != null && t.groupPosition >= 1);
+  const maxPos = withPos.reduce((m, t) => Math.max(m, t.groupPosition!), 0);
+  const size = Math.max(slotCount ?? 0, maxPos);
+  const slots: (SavedTeam | null)[] = Array(size).fill(null);
+  const conflictSlots = new Set<number>();
+  const conflictTeamIds = new Set<string>();
+  for (const t of withPos) {
+    const idx = t.groupPosition! - 1;
+    if (slots[idx] === null && !conflictSlots.has(idx)) {
+      slots[idx] = t;
+    } else {
+      conflictSlots.add(idx);
+      const other = slots[idx];
+      if (other) conflictTeamIds.add(other.id);
+      slots[idx] = null;
+      conflictTeamIds.add(t.id);
+    }
+  }
+  const unpositioned = members.filter(t => !withPos.includes(t) || conflictTeamIds.has(t.id));
+  return { slots, conflictTeamIds, unpositioned };
+}
+
 // ── Teams tab: teams belonging to the selected tournament (a competition can
 // hold any number of teams — pick 2 of them per fixture in the Schedule tab) ──
 function TeamsPanel({ tournament }: { tournament: Tournament }) {
   const tournamentId = tournament.id;
-  const { teams: allTeams, addTeam, updateTeam, deleteTeam } = useTeamDbStore();
+  const { teams: allTeams, addTeam, updateTeam, deleteTeam, duplicateTeam } = useTeamDbStore();
+  const { updateTournament } = useTournamentStore();
   const { matches, updateMatch: updateScheduleMatch } = useMatchScheduleStore();
   const teams = useMemo(() => allTeams.filter(t => t.tournamentId === tournamentId), [allTeams, tournamentId]);
+  const categories = tournament.categories ?? [];
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [duplicateTarget, setDuplicateTarget] = useState('');
+  // Drag a team card onto a category section header to move it there —
+  // alternative to the bulk "Move Selected" button for a single team.
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dragOverSection, setDragOverSection] = useState<string | null>(null);
 
   const handleAdd = () => {
     addTeam({ name: 'New Team', color: '#3498db', tournamentId });
+  };
+
+  const toggleSelected = (id: string) => setSelectedIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  // Duplicates every selected team into the chosen category (or into EVERY
+  // category at once via "All Categories") — each copy gets its own fresh,
+  // empty roster since players differ per category.
+  const bulkDuplicate = () => {
+    if (selectedIds.size === 0 || !duplicateTarget) return;
+    const targets = duplicateTarget === '__all__' ? categories : [duplicateTarget];
+    for (const id of selectedIds) {
+      for (const cat of targets) {
+        const newId = duplicateTeam(id);
+        if (newId) updateTeam(newId, { category: cat });
+      }
+    }
+    setSelectedIds(new Set());
+  };
+
+  // Moves every selected team into the chosen category in place (no
+  // duplicate) — a team can only be in one category, so "All Categories"
+  // isn't a valid move target.
+  const moveSelected = () => {
+    if (selectedIds.size === 0 || !duplicateTarget || duplicateTarget === '__all__') return;
+    for (const id of selectedIds) updateTeam(id, { category: duplicateTarget });
+    setSelectedIds(new Set());
+  };
+
+  const dropOnSection = (label: string | null) => {
+    if (draggedId) updateTeam(draggedId, { category: label === 'Uncategorized' ? undefined : (label ?? undefined) });
+    setDraggedId(null);
+    setDragOverSection(null);
+  };
+
+  const addCategory = () => {
+    const name = newCategoryName.trim();
+    if (!name || categories.includes(name)) return;
+    updateTournament(tournamentId, { categories: [...categories, name] });
+    setNewCategoryName('');
+  };
+
+  const removeCategory = (name: string) => {
+    updateTournament(tournamentId, { categories: categories.filter(c => c !== name) });
+    for (const t of teams) {
+      if (t.category === name) updateTeam(t.id, { category: undefined });
+    }
   };
 
   // Setting a team's status auto-applies the same matchType to that team's
@@ -563,79 +714,160 @@ function TeamsPanel({ tournament }: { tournament: Tournament }) {
     }
   };
 
-  if (teams.length === 0) {
-    return (
-      <div className="tm-win-content" style={{ padding: 16 }}>
-        <div className="tm-win-placeholder">
-          <span>No teams in this tournament yet.</span>
-        </div>
-        <button className="tm-sidebar-new-btn" style={{ marginTop: 12 }} onClick={handleAdd}>＋ Add Team</button>
-      </div>
-    );
-  }
-
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-        <button className="tm-sidebar-new-btn" onClick={handleAdd}>＋ Add Team</button>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
-        {teams.map(t => (
-          <div key={t.id} style={{
-            display: 'flex', alignItems: 'center', gap: 10, padding: 10,
-            background: 'var(--bg-2)', border: `1px solid ${t.status ? 'var(--red)' : 'var(--border)'}`, borderRadius: 8,
-          }}>
-            <LogoUrlPicker
-              compact
-              value={t.logo ?? ''}
-              onChange={logo => updateTeam(t.id, { logo })}
-              thumbSize={{ w: 44, h: 44 }}
-              tournamentId={tournamentId}
-            />
-            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <input
-                className="tm-input"
-                value={t.name}
-                placeholder="Team name"
-                onChange={e => updateTeam(t.id, { name: e.target.value })}
-                style={{ fontSize: 12 }}
-              />
-              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                <input
-                  className="tm-input"
-                  value={t.shortName ?? ''}
-                  placeholder="Short"
-                  onChange={e => updateTeam(t.id, { shortName: e.target.value })}
-                  style={{ fontSize: 11, width: 60 }}
-                />
-                <input
-                  type="color"
-                  value={t.color}
-                  title="Team color"
-                  onChange={e => updateTeam(t.id, { color: e.target.value })}
-                  style={{ width: 24, height: 24, padding: 0, border: 'none', background: 'none', cursor: 'pointer' }}
-                />
-              </div>
-              <select
-                className="tm-sched-type-select"
-                title="Bye/Walkover auto-applies to this team's not-yet-completed fixtures"
-                value={t.status ?? ''}
-                onChange={e => setTeamStatus(t, (e.target.value || undefined) as SavedTeam['status'])}
-                style={{ width: '100%' }}
-              >
-                <option value="">Active</option>
-                <option value="bye">BYE (sitting out)</option>
-                <option value="walkover">WALKOVER (withdrawn)</option>
-              </select>
-            </div>
-            <button
-              className="btn btn--ghost btn--small"
-              title="Delete team"
-              onClick={() => deleteTeam(t.id)}
-              style={{ color: 'var(--text-muted)', alignSelf: 'flex-start' }}
-            >×</button>
-          </div>
+      <div className="tm-groups-bar">
+        <span className="tm-groups-label">Categories:</span>
+        {categories.map(c => (
+          <span key={c} className="tm-group-chip">
+            {c}
+            <button onClick={() => removeCategory(c)} title={`Remove ${c} (unassigns any teams in it)`}>×</button>
+          </span>
         ))}
+        <input
+          className="tm-input tm-groups-add-input"
+          placeholder="e.g. Men, Women, U21"
+          value={newCategoryName}
+          onChange={e => setNewCategoryName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') addCategory(); }}
+        />
+        <button className="tm-io-btn" onClick={addCategory} disabled={!newCategoryName.trim()}>+ Add Category</button>
+      </div>
+
+      {categories.length > 0 && selectedIds.size > 0 && (
+        <div className="tm-draw-vmix-cfg" style={{ marginTop: 10 }}>
+          <span className="tm-groups-label">{selectedIds.size} selected —</span>
+          <select className="tm-input" value={duplicateTarget} onChange={e => setDuplicateTarget(e.target.value)} style={{ width: 160 }}>
+            <option value="">— pick category —</option>
+            {categories.map(c => <option key={c} value={c}>{c}</option>)}
+            <option value="__all__">All Categories</option>
+          </select>
+          <button className="tm-io-btn" onClick={bulkDuplicate} disabled={!duplicateTarget}>⧉ Duplicate Selected</button>
+          <button className="tm-io-btn" onClick={moveSelected} disabled={!duplicateTarget || duplicateTarget === '__all__'}>→ Move Selected</button>
+          <button className="tm-io-btn" onClick={() => setSelectedIds(new Set())}>Clear Selection</button>
+        </div>
+      )}
+
+      {teams.length === 0 ? (
+        <div className="tm-win-placeholder" style={{ marginTop: 12 }}>
+          <span>No teams in this tournament yet.</span>
+        </div>
+      ) : (
+        (categories.length > 0
+          ? [...categories.map(c => ({ label: c, items: teams.filter(t => t.category === c) })), { label: 'Uncategorized', items: teams.filter(t => !t.category) }]
+          : [{ label: null as string | null, items: teams }]
+        ).map(section => (section.label && section.items.length === 0) ? null : (
+          <div
+            key={section.label ?? '__all__'}
+            style={{
+              marginTop: 16, borderRadius: 8, transition: 'box-shadow 0.12s',
+              boxShadow: categories.length > 0 && dragOverSection === (section.label ?? '__all__') ? 'inset 0 0 0 2px var(--accent)' : 'none',
+            }}
+            onDragOver={categories.length > 0 ? (e => { e.preventDefault(); setDragOverSection(section.label ?? '__all__'); }) : undefined}
+            onDragLeave={categories.length > 0 ? (() => setDragOverSection(prev => prev === (section.label ?? '__all__') ? null : prev)) : undefined}
+            onDrop={categories.length > 0 ? (e => { e.preventDefault(); dropOnSection(section.label); }) : undefined}
+          >
+            {section.label && (
+              <div className="tm-draw-section-title" style={{ marginBottom: 8 }}>{section.label} ({section.items.length})</div>
+            )}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
+              {section.items.map(t => (
+                <div
+                  key={t.id}
+                  draggable={categories.length > 0}
+                  onDragStart={categories.length > 0 ? (() => setDraggedId(t.id)) : undefined}
+                  onDragEnd={categories.length > 0 ? (() => { setDraggedId(null); setDragOverSection(null); }) : undefined}
+                  style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: 10,
+                  background: 'var(--bg-2)', border: `1px solid ${t.status ? 'var(--red)' : 'var(--border)'}`, borderRadius: 8,
+                }}>
+                  {categories.length > 0 && (
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(t.id)}
+                      onChange={() => toggleSelected(t.id)}
+                      title="Select for bulk duplicate"
+                      style={{ flexShrink: 0, cursor: 'pointer' }}
+                    />
+                  )}
+                  <LogoUrlPicker
+                    compact
+                    value={t.logo ?? ''}
+                    onChange={logo => updateTeam(t.id, { logo })}
+                    thumbSize={{ w: 44, h: 44 }}
+                    tournamentId={tournamentId}
+                  />
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <input
+                      className="tm-input"
+                      value={t.name}
+                      placeholder="Team name"
+                      onChange={e => updateTeam(t.id, { name: e.target.value })}
+                      style={{ fontSize: 12 }}
+                    />
+                    <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                      <input
+                        className="tm-input"
+                        value={t.shortName ?? ''}
+                        placeholder="Short"
+                        onChange={e => updateTeam(t.id, { shortName: e.target.value })}
+                        style={{ fontSize: 11, width: 60 }}
+                      />
+                      <input
+                        type="color"
+                        value={t.color}
+                        title="Team color"
+                        onChange={e => updateTeam(t.id, { color: e.target.value })}
+                        style={{ width: 24, height: 24, padding: 0, border: 'none', background: 'none', cursor: 'pointer' }}
+                      />
+                    </div>
+                    <select
+                      className="tm-sched-type-select"
+                      title="Bye/Walkover auto-applies to this team's not-yet-completed fixtures"
+                      value={t.status ?? ''}
+                      onChange={e => setTeamStatus(t, (e.target.value || undefined) as SavedTeam['status'])}
+                      style={{ width: '100%' }}
+                    >
+                      <option value="">Active</option>
+                      <option value="bye">BYE (sitting out)</option>
+                      <option value="walkover">WALKOVER (withdrawn)</option>
+                    </select>
+                    {categories.length > 0 && (
+                      <select
+                        className="tm-sched-type-select"
+                        title="Competition category"
+                        value={t.category ?? ''}
+                        onChange={e => updateTeam(t.id, { category: e.target.value || undefined })}
+                        style={{ width: '100%' }}
+                      >
+                        <option value="">— No Category —</option>
+                        {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignSelf: 'flex-start' }}>
+                    <button
+                      className="btn btn--ghost btn--small"
+                      title="Duplicate this team into another category (fresh empty roster)"
+                      onClick={() => duplicateTeam(t.id)}
+                      style={{ color: 'var(--text-muted)' }}
+                    >⧉</button>
+                    <button
+                      className="btn btn--ghost btn--small"
+                      title="Delete team"
+                      onClick={() => deleteTeam(t.id)}
+                      style={{ color: 'var(--text-muted)' }}
+                    >×</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+        <button className="tm-sidebar-new-btn" onClick={handleAdd}>＋ Add Team</button>
       </div>
     </div>
   );
@@ -711,7 +943,9 @@ function ScheduleTeamPicker({ side, tournamentId, onPick }: {
           ) : teams.map(t => (
             <div key={t.id} onClick={() => { onPick(t); setOpen(false); }}
               style={{ padding: '5px 8px', fontSize: 11, cursor: 'pointer', color: 'var(--text-secondary)',
-                borderBottom: '1px solid var(--border)' }}>{t.name}</div>
+                borderBottom: '1px solid var(--border)' }}>
+              {t.name}{t.category ? <span style={{ color: 'var(--text-muted)' }}> — {t.category}</span> : ''}
+            </div>
           ))}
         </div>,
         document.body
@@ -1273,14 +1507,1052 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
   );
 }
 
+// ── Standings tab: one table per pool/group (or one overall table if the
+// tournament has no groups defined) computed from saved results. Byes don't
+// count at all (nothing was played); walkovers count as a normal win/loss
+// for the team that didn't forfeit, same as any other result.
+interface StandingRow {
+  teamId: string; name: string; shortName?: string; logo?: string; color: string;
+  played: number; won: number; drawn: number; lost: number;
+  pf: number; pa: number; pts: number;
+}
+
+function computeStandings(teams: SavedTeam[], results: SavedMatchResult[], settings: TournamentSettings): StandingRow[] {
+  const rows = new Map<string, StandingRow>();
+  for (const t of teams) {
+    rows.set(t.id, { teamId: t.id, name: t.name, shortName: t.shortName, logo: t.logo, color: t.color, played: 0, won: 0, drawn: 0, lost: 0, pf: 0, pa: 0, pts: 0 });
+  }
+  const findRow = (name: string, shortName?: string) => {
+    const key = name.trim().toLowerCase();
+    const shortKey = (shortName ?? '').trim().toLowerCase();
+    const t = teams.find(t2 =>
+      t2.name.trim().toLowerCase() === key || (!!shortKey && (t2.shortName ?? '').trim().toLowerCase() === shortKey)
+    );
+    return t ? rows.get(t.id) : undefined;
+  };
+  for (const r of results) {
+    if (r.matchType === 'bye') continue; // nothing was actually played
+    const rowA = findRow(r.teamAName, r.teamAShortName);
+    const rowB = findRow(r.teamBName, r.teamBShortName);
+    if (!rowA || !rowB) continue; // team isn't part of this group/tournament
+    rowA.played++; rowB.played++;
+    rowA.pf += r.scoreA; rowA.pa += r.scoreB;
+    rowB.pf += r.scoreB; rowB.pa += r.scoreA;
+    if (r.scoreA > r.scoreB) {
+      rowA.won++; rowA.pts += settings.pointsWin;
+      rowB.lost++; rowB.pts += settings.pointsLoss;
+    } else if (r.scoreB > r.scoreA) {
+      rowB.won++; rowB.pts += settings.pointsWin;
+      rowA.lost++; rowA.pts += settings.pointsLoss;
+    } else {
+      rowA.drawn++; rowB.drawn++;
+      rowA.pts += settings.pointsDraw; rowB.pts += settings.pointsDraw;
+    }
+  }
+  return Array.from(rows.values()).sort((a, b) =>
+    b.pts - a.pts || (b.pf - b.pa) - (a.pf - a.pa) || b.pf - a.pf
+  );
+}
+
+function StandingsTable({ title, rows }: { title: string; rows: StandingRow[] }) {
+  return (
+    <div className="tm-standings-table">
+      <div className="tm-standings-title">{title}</div>
+      <div className="tm-standings-row tm-standings-row--head">
+        <span className="tm-standings-team">Team</span>
+        <span>P</span><span>W</span><span>D</span><span>L</span>
+        <span>PF</span><span>PA</span><span>+/-</span><span>Pts</span>
+      </div>
+      {rows.map((r, i) => (
+        <div key={r.teamId} className={`tm-standings-row${i < 2 ? ' tm-standings-row--top' : ''}`}>
+          <span className="tm-standings-team">
+            <div style={{ width: 22, height: 22, flexShrink: 0 }}><ScheduleBadge logo={r.logo} color={r.color} /></div>
+            {r.shortName || r.name}
+          </span>
+          <span>{r.played}</span><span>{r.won}</span><span>{r.drawn}</span><span>{r.lost}</span>
+          <span>{r.pf}</span><span>{r.pa}</span><span>{r.pf - r.pa > 0 ? '+' : ''}{r.pf - r.pa}</span>
+          <span className="tm-standings-pts">{r.pts}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StandingsPanel({ tournament }: { tournament: Tournament }) {
+  const { teams: allTeams } = useTeamDbStore();
+  const { results: allResults } = useMatchResultsStore();
+  const settings = tournament.settings ?? SPORT_DEFAULTS[tournament.sport];
+  const teams = useMemo(() => allTeams.filter(t => t.tournamentId === tournament.id), [allTeams, tournament.id]);
+  const results = useMemo(() => allResults.filter(r => r.tournamentId === tournament.id), [allResults, tournament.id]);
+  const groups = normalizeGroups(tournament.groups);
+  const categories = tournament.categories ?? [];
+
+  if (teams.length === 0) {
+    return (
+      <div className="tm-win-content" style={{ padding: 16 }}>
+        <div className="tm-win-placeholder">
+          <span>Add teams in the 👥 Teams tab to see standings.</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Groups/tables for one scope (a category, or the whole tournament when
+  // no categories are defined) — untagged groups stay visible in every scope.
+  const renderScope = (scopeTeams: SavedTeam[], scopeGroups: TournamentGroup[], label: string | null) => (
+    <div key={label ?? '__all__'} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {label && <div className="tm-draw-section-title">{label}</div>}
+      {scopeGroups.length === 0 ? (
+        <StandingsTable title={label ?? tournament.name} rows={computeStandings(scopeTeams, results, settings)} />
+      ) : (
+        <>
+          {scopeGroups.map(g => (
+            <StandingsTable key={g.name} title={g.name} rows={computeStandings(scopeTeams.filter(t => t.group === g.name), results, settings)} />
+          ))}
+          {scopeTeams.some(t => !t.group) && (
+            <StandingsTable title="Unassigned" rows={computeStandings(scopeTeams.filter(t => !t.group), results, settings)} />
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 24 }}>
+      {categories.length === 0 ? (
+        renderScope(teams, groups, null)
+      ) : (
+        <>
+          {categories.map(c => renderScope(
+            teams.filter(t => t.category === c),
+            groups.filter(g => !g.category || g.category === c),
+            c
+          ))}
+          {teams.some(t => !t.category) && renderScope(
+            teams.filter(t => !t.category),
+            groups.filter(g => !g.category),
+            'Uncategorized'
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Draw tab: live pot-based draw — a team is picked per pot (randomly or
+// by clicking one), then always waits for the operator to manually pick its
+// destination group (no auto-assignment), pushing each pick to a configured
+// vMix input in real time for an on-air draw graphic.
+interface LastDrawn { team: SavedTeam; pot: string; group: string; }
+
+// A team armed by clicking its card, awaiting a slot click to complete
+// the pairing (or vice versa — see `armedSlot`).
+interface ArmedTeam { team: SavedTeam; pot: string; }
+interface ArmedSlot { group: string; position: number; }
+
+function DrawPanel({ tournament }: { tournament: Tournament }) {
+  const { teams: allTeams, updateTeam } = useTeamDbStore();
+  const { updateTournament } = useTournamentStore();
+  const { client, vmixState } = useVmixStore();
+  const allVmixInputs = vmixState?.inputs ?? [];
+  const { liveSyncDraw, setLiveSyncDraw } = useAppSettings();
+  // Only a non-host interactive (9877) client can push to the host — 9878
+  // readonly and 9879 commentator clients never edit.
+  const isRemoteInteractive = !isHostClient && !syncClient.isReadOnly && !syncClient.isCommentator;
+  const categories = tournament.categories ?? [];
+  // Which category's draw is currently in view — groups/pots/teams tagged
+  // for another category are hidden, so each category runs its own
+  // independent draw. Untagged groups/pots/teams stay visible everywhere
+  // (keeps single-category tournaments working exactly as before).
+  const [activeCategory, setActiveCategory] = useState('');
+  // Setup (Groups & Pots config + Assignments table) is one-time/occasional
+  // work — split it into its own sub-tab so the daily-use Live Draw view
+  // isn't buried below it.
+  const [drawSubTab, setDrawSubTab] = useState<'live' | 'settings'>('live');
+  const allGroups = normalizeGroups(tournament.groups);
+  const allPots = normalizePots(tournament.pots);
+  const inScope = (category?: string) => !activeCategory || !category || category === activeCategory;
+  const teams = useMemo(
+    () => allTeams.filter(t => t.tournamentId === tournament.id && inScope(t.category)),
+    [allTeams, tournament.id, activeCategory]
+  );
+  const pots = allPots.filter(p => inScope(p.category));
+  const groups = allGroups.filter(g => inScope(g.category));
+  const drawCfg = tournament.drawVmix ?? {};
+  const [lastDrawn, setLastDrawn] = useState<LastDrawn | null>(null);
+  // Editable, order-free draw: either a team or a group can be picked first
+  // — whichever is picked second completes the pairing. Clicking the same
+  // one again cancels it ("in case I got it wrong").
+  const [armedTeam, setArmedTeam] = useState<ArmedTeam | null>(null);
+  // A specific empty slot (group + position) armed by clicking its card,
+  // awaiting a team click to complete the pairing in one step — no
+  // separate "pick a group" then "pick a position" stages.
+  const [armedSlot, setArmedSlot] = useState<ArmedSlot | null>(null);
+  // Filled slots are locked (greyed, not clickable) by default so a live
+  // on-air draw can't be bumped by a stray click — Edit unlocks them so a
+  // mistake can be cleared with a click instead of hunting through Assignments.
+  const [editMode, setEditMode] = useState(false);
+  // Once a team is already placed in a group, it's still pickable in the
+  // pot lists by default (lets you re-pick/move it). Turn this on to hide
+  // already-placed teams there instead, so the picker only shows who's
+  // still left to draw.
+  const [hideAssignedTeams, setHideAssignedTeams] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupPrefix, setNewGroupPrefix] = useState('');
+  const [newGroupCapacity, setNewGroupCapacity] = useState('');
+  const [newGroupCategory, setNewGroupCategory] = useState('');
+  const [newPotName, setNewPotName] = useState('');
+  const [vmixCfgOpen, setVmixCfgOpen] = useState(false);
+  // Bulk-edit selection for the Assignments table — apply a Pot/Group to
+  // every selected team at once instead of one dropdown at a time.
+  const [assignSelectedIds, setAssignSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkPot, setBulkPot] = useState('');
+  const [bulkGroup, setBulkGroup] = useState('');
+  const toggleAssignSelected = (id: string) => setAssignSelectedIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const applyBulkPot = () => {
+    if (assignSelectedIds.size === 0 || !bulkPot) return;
+    for (const id of assignSelectedIds) updateTeam(id, { pot: bulkPot === '__clear__' ? undefined : bulkPot });
+    setBulkPot('');
+  };
+  const applyBulkGroup = () => {
+    if (assignSelectedIds.size === 0 || !bulkGroup) return;
+    for (const id of assignSelectedIds) updateTeam(id, { group: bulkGroup === '__clear__' ? undefined : bulkGroup, groupPosition: undefined });
+    setBulkGroup('');
+  };
+  // Group/pot names are static text by default (renaming needs to cascade
+  // to every team + vMix target referencing them) — Edit unlocks renaming.
+  const [setupEditMode, setSetupEditMode] = useState(false);
+  // Drag a group chip/card onto another to reorder — reordered within the
+  // full unfiltered list so groups from other categories keep their spot.
+  const [draggedGroup, setDraggedGroup] = useState<string | null>(null);
+  const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
+  const reorderGroups = (draggedName: string, targetName: string) => {
+    if (draggedName === targetName) return;
+    const next = [...allGroups];
+    const from = next.findIndex(g => g.name === draggedName);
+    const to = next.findIndex(g => g.name === targetName);
+    if (from < 0 || to < 0) return;
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    updateTournament(tournament.id, { groups: next });
+  };
+
+
+  const addGroup = () => {
+    const name = newGroupName.trim();
+    if (!name || allGroups.some(g => g.name === name)) return;
+    const prefix = newGroupPrefix.trim() || name.charAt(0).toUpperCase();
+    const capacity = newGroupCapacity.trim() ? Number(newGroupCapacity) : undefined;
+    const category = newGroupCategory || activeCategory || undefined;
+    updateTournament(tournament.id, { groups: [...allGroups, { name, prefix, capacity, category }] });
+    setNewGroupName('');
+    setNewGroupPrefix('');
+    setNewGroupCapacity('');
+    setNewGroupCategory('');
+  };
+
+  const updateGroupDef = (name: string, patch: Partial<TournamentGroup>) => {
+    updateTournament(tournament.id, { groups: allGroups.map(g => g.name === name ? { ...g, ...patch } : g) });
+  };
+
+  const removeGroup = (name: string) => {
+    updateTournament(tournament.id, { groups: allGroups.filter(g => g.name !== name) });
+    for (const t of teams) {
+      if (t.group === name) updateTeam(t.id, { group: undefined });
+    }
+  };
+
+  // Renames a group and cascades the new name to every team's `group` field
+  // and any "Group List → vMix" targets pointing at it — both store the
+  // group by name, so a plain field edit would silently break those links.
+  const renameGroup = (oldName: string, newName: string) => {
+    const name = newName.trim();
+    if (!name || name === oldName || allGroups.some(g => g.name === name)) return;
+    updateTournament(tournament.id, {
+      groups: allGroups.map(g => g.name === oldName ? { ...g, name } : g),
+      groupListVmix: groupListTargets.map(t => t.group === oldName ? { ...t, group: name } : t),
+    });
+    for (const t of allTeams) {
+      if (t.tournamentId === tournament.id && t.group === oldName) updateTeam(t.id, { group: name });
+    }
+  };
+
+  const addPot = () => {
+    const name = newPotName.trim();
+    if (!name || allPots.some(p => p.name === name)) return;
+    updateTournament(tournament.id, { pots: [...allPots, { name, category: activeCategory || undefined }] });
+    setNewPotName('');
+  };
+
+  const removePot = (name: string) => {
+    updateTournament(tournament.id, { pots: allPots.filter(p => p.name !== name) });
+    for (const t of teams) {
+      if (t.pot === name) updateTeam(t.id, { pot: undefined });
+    }
+  };
+
+  // Renames a pot and cascades the new name to every team's `pot` field.
+  const renamePot = (oldName: string, newName: string) => {
+    const name = newName.trim();
+    if (!name || name === oldName || allPots.some(p => p.name === name)) return;
+    updateTournament(tournament.id, { pots: allPots.map(p => p.name === oldName ? { ...p, name } : p) });
+    for (const t of allTeams) {
+      if (t.tournamentId === tournament.id && t.pot === oldName) updateTeam(t.id, { pot: name });
+    }
+  };
+
+  const setDrawCfg = (patch: Partial<NonNullable<Tournament['drawVmix']>>) =>
+    updateTournament(tournament.id, { drawVmix: { ...drawCfg, ...patch } });
+
+  const pushDrawToVmix = (team: SavedTeam, pot: string, group?: string) => {
+    if (!client || !drawCfg.inputKey) return;
+    if (drawCfg.fieldTeamName) client.setTextField(drawCfg.inputKey, drawCfg.fieldTeamName, team.name);
+    if (drawCfg.fieldTeamShort) client.setTextField(drawCfg.inputKey, drawCfg.fieldTeamShort, team.shortName ?? '');
+    if (drawCfg.fieldPot) client.setTextField(drawCfg.inputKey, drawCfg.fieldPot, pot);
+    if (group && drawCfg.fieldGroup) client.setTextField(drawCfg.inputKey, drawCfg.fieldGroup, group);
+    // Push a transparent placeholder when the team has no logo, rather than
+    // skipping the field and leaving whatever image was there before.
+    if (drawCfg.fieldTeamLogo) client.setImageField(drawCfg.inputKey, drawCfg.fieldTeamLogo, team.logo || transparentLogoUrl());
+  };
+
+  // Group-list pushes: whole-group team lists to numbered vMix fields, one
+  // target per on-air "Group A" style title.
+  const groupListTargets = tournament.groupListVmix ?? [];
+  const setGroupListTargets = (next: GroupListVmixTarget[]) => updateTournament(tournament.id, { groupListVmix: next });
+  const updateGroupListTarget = (id: string, patch: Partial<GroupListVmixTarget>) =>
+    setGroupListTargets(groupListTargets.map(t => t.id === id ? { ...t, ...patch } : t));
+
+  // Same numbered-prefix pattern as the Player List widget's vMix Name Sync:
+  // type/pick a sample field like "Team1.Text" or "Logo1.Source" and the
+  // trailing digit + suffix is stripped, leaving a reusable prefix for
+  // every slot.
+  const derivePrefix = (v: string) => v.replace(/\.(Text|Source)$/i, '').replace(/\d+$/, '');
+
+  const pushGroupListToVmix = (target: GroupListVmixTarget) => {
+    if (!client || !target.inputKey) return;
+    const g = groups.find(gr => gr.name === target.group);
+    const members = teams.filter(t => t.group === target.group);
+    const { slots } = resolveGroupSlots(members, g?.capacity);
+    for (let i = 0; i < slots.length; i++) {
+      const t = slots[i];
+      if (target.fieldPrefix) client.setTextField(target.inputKey, `${target.fieldPrefix}${i + 1}.Text`, t ? t.name : '');
+      if (target.fieldShortPrefix) client.setTextField(target.inputKey, `${target.fieldShortPrefix}${i + 1}.Text`, t ? (t.shortName ?? '') : '');
+      if (target.fieldLogoPrefix) client.setImageField(target.inputKey, `${target.fieldLogoPrefix}${i + 1}.Source`, (t?.logo) || transparentLogoUrl());
+    }
+  };
+
+  // Auto-push whenever the relevant group's membership actually changes
+  // (not on every unrelated render) for any target with autoSync on.
+  const groupMembershipKey = teams.map(t => `${t.id}:${t.group ?? ''}`).sort().join(',');
+  useEffect(() => {
+    for (const target of groupListTargets) {
+      if (target.autoSync && target.group && target.inputKey) pushGroupListToVmix(target);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupMembershipKey, JSON.stringify(groupListTargets), client]);
+
+  // Live Sync (remote 9877 only): auto-push to the host a moment after any
+  // draw-relevant change, so the host (and everyone watching its broadcast)
+  // sees the draw happen live instead of waiting for a manual "Save to Host".
+  // Fingerprinted across ALL of this tournament's teams (not just the
+  // current category tab) so a switch of tabs doesn't miss a pending change.
+  const allTournamentTeams = useMemo(
+    () => allTeams.filter(t => t.tournamentId === tournament.id),
+    [allTeams, tournament.id]
+  );
+  const drawSyncFingerprint = allTournamentTeams
+    .map(t => `${t.id}:${t.pot ?? ''}:${t.group ?? ''}:${t.groupPosition ?? ''}`)
+    .sort().join(',') + '|' + JSON.stringify(allGroups) + '|' + JSON.stringify(allPots);
+  useEffect(() => {
+    if (!liveSyncDraw || !isRemoteInteractive) return;
+    const timer = setTimeout(() => pushTournamentDataToHost(), 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawSyncFingerprint, liveSyncDraw, isRemoteInteractive]);
+
+  // First pot (in order) that still has an undrawn (no group yet) team —
+  // only used to target the random "Draw Next" button, not to restrict
+  // manual clicking (any team/group can be picked or repicked any time).
+  const currentPot = pots.find(p => teams.some(t => t.pot === p.name && !t.group))?.name;
+  const groupIsFull = (g: TournamentGroup) => g.capacity != null && teams.filter(t => t.group === g.name).length >= g.capacity;
+  const hasOpenGroup = groups.some(g => !groupIsFull(g));
+  const canDraw = !!currentPot && groups.length > 0 && hasOpenGroup;
+
+  const drawTeamMode = tournament.drawTeamMode ?? 'random';
+
+  // A team can only land in a group that's untagged (shared) or tagged for
+  // that team's own category — never a group belonging to a DIFFERENT
+  // category, even when viewing "All".
+  const categoryMismatch = (team: SavedTeam, group: string) => {
+    const g = allGroups.find(gr => gr.name === group);
+    return !!(g?.category && team.category && g.category !== team.category);
+  };
+
+  const finalizeAssignment = (team: SavedTeam, pot: string, group: string, position: number) => {
+    if (categoryMismatch(team, group)) { setArmedTeam(null); setArmedSlot(null); return; }
+    updateTeam(team.id, { group, groupPosition: position });
+    setLastDrawn({ team, pot, group });
+    pushDrawToVmix(team, pot, group);
+    setArmedTeam(null);
+    setArmedSlot(null);
+  };
+
+  // Clicking a team card — works for any team, drawn or not, in any pot, so
+  // an existing assignment can always be picked up and moved elsewhere. A
+  // group+position slot is never auto-picked — it always waits for a
+  // manual slot click. Once a slot is already armed, though, only an
+  // undrawn team can fill it this way — an already-placed team has to be
+  // freed first (Edit mode / Assignments) rather than silently re-picked.
+  const handleTeamClick = (team: SavedTeam, pot: string) => {
+    if (armedSlot) {
+      if (team.group || categoryMismatch(team, armedSlot.group)) return;
+      finalizeAssignment(team, pot, armedSlot.group, armedSlot.position);
+      return;
+    }
+    if (armedTeam?.team.id === team.id) { setArmedTeam(null); return; }
+    setArmedTeam({ team, pot });
+    pushDrawToVmix(team, pot);
+  };
+
+  // Clicking an empty slot card inside a group — works whether or not a
+  // team is armed yet, so the slot can be picked first. Either way, one
+  // click on an empty slot both assigns the group AND the position.
+  const handleSlotClick = (group: string, position: number) => {
+    if (armedTeam) {
+      finalizeAssignment(armedTeam.team, armedTeam.pot, group, position);
+      return;
+    }
+    setArmedSlot(prev => (prev && prev.group === group && prev.position === position) ? null : { group, position });
+  };
+
+  const drawNext = () => {
+    if (!currentPot || !hasOpenGroup) return;
+    const undrawn = teams.filter(t => t.pot === currentPot && !t.group);
+    if (undrawn.length === 0 || groups.length === 0) return;
+    const team = undrawn[Math.floor(Math.random() * undrawn.length)];
+    if (armedSlot) finalizeAssignment(team, currentPot, armedSlot.group, armedSlot.position);
+    else { setArmedTeam({ team, pot: currentPot }); pushDrawToVmix(team, currentPot); }
+  };
+
+  const resetDraw = () => {
+    for (const t of teams) {
+      if (t.pot) updateTeam(t.id, { group: undefined, groupPosition: undefined });
+    }
+    setLastDrawn(null);
+    setArmedTeam(null);
+    setArmedSlot(null);
+  };
+
+  return (
+    <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {categories.length > 0 && (
+        <div className="tm-draw-section">
+          <div className="tm-draw-section-title">🏷️ Category — each runs its own draw</div>
+          <div className="tm-draw-group-cards">
+            <div
+              className={`tm-draw-group-card tm-draw-group-card--pickable${!activeCategory ? ' tm-draw-group-card--armed' : ''}`}
+              onClick={() => setActiveCategory('')}
+            >
+              <div className="tm-draw-group-card-title">All</div>
+            </div>
+            {categories.map(c => (
+              <div
+                key={c}
+                className={`tm-draw-group-card tm-draw-group-card--pickable${activeCategory === c ? ' tm-draw-group-card--armed' : ''}`}
+                onClick={() => setActiveCategory(c)}
+              >
+                <div className="tm-draw-group-card-title">{c}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isRemoteInteractive && (
+        <div className="tm-draw-vmix-cfg">
+          <button
+            className={`tm-io-btn${liveSyncDraw ? ' tm-io-btn--active' : ''}`}
+            title="Auto-push every draw change to the host as it happens, instead of needing a manual Save to Host"
+            onClick={() => setLiveSyncDraw(!liveSyncDraw)}
+          >{liveSyncDraw ? '🔴 Live Sync: On' : '⚪ Live Sync: Off'}</button>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            {liveSyncDraw ? 'Every draw change is pushed to the host automatically.' : 'Turn on to auto-push draw changes to the host as you make them.'}
+          </span>
+        </div>
+      )}
+
+      <div className="tm-draw-group-tabs">
+        <button
+          className={`tm-draw-group-tab${drawSubTab === 'live' ? ' tm-draw-group-tab--active' : ''}`}
+          onClick={() => setDrawSubTab('live')}
+        >🎬 Live Draw</button>
+        <button
+          className={`tm-draw-group-tab${drawSubTab === 'settings' ? ' tm-draw-group-tab--active' : ''}`}
+          onClick={() => setDrawSubTab('settings')}
+        >⚙️ Settings</button>
+      </div>
+
+      {drawSubTab === 'settings' && (
+      <>
+      <div className="tm-draw-section">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div className="tm-draw-section-title">⚙️ Setup — Groups &amp; Pots</div>
+        <button
+          className={`tm-io-btn${setupEditMode ? ' tm-io-btn--active' : ''}`}
+          style={{ flex: 'none' }}
+          title="Unlock renaming group/pot names"
+          onClick={() => setSetupEditMode(e => !e)}
+        >{setupEditMode ? '🔓 Editing' : '✏️ Edit'}</button>
+      </div>
+      <div className="tm-groups-bar">
+        <span className="tm-groups-label">Pools/Groups:</span>
+        {groups.map(g => {
+          const count = teams.filter(t => t.group === g.name).length;
+          return (
+            <span
+              key={g.name}
+              className={`tm-group-chip tm-group-chip--editable${dragOverGroup === g.name ? ' tm-draw-group-card--drag-over' : ''}`}
+              draggable={!setupEditMode}
+              title={setupEditMode ? undefined : 'Drag to reorder'}
+              onDragStart={() => setDraggedGroup(g.name)}
+              onDragOver={e => { e.preventDefault(); setDragOverGroup(g.name); }}
+              onDragLeave={() => setDragOverGroup(prev => prev === g.name ? null : prev)}
+              onDrop={e => { e.preventDefault(); if (draggedGroup) reorderGroups(draggedGroup, g.name); setDraggedGroup(null); setDragOverGroup(null); }}
+              onDragEnd={() => { setDraggedGroup(null); setDragOverGroup(null); }}
+              style={{ cursor: setupEditMode ? 'default' : 'grab' }}
+            >
+              {setupEditMode ? (
+                <input
+                  className="tm-group-chip-input"
+                  defaultValue={g.name}
+                  style={{ width: 90, fontWeight: 700 }}
+                  title="Rename group"
+                  onClick={e => e.stopPropagation()}
+                  onBlur={e => renameGroup(g.name, e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                />
+              ) : g.name}
+              <input
+                className="tm-group-chip-input"
+                value={g.prefix ?? ''}
+                placeholder="Px"
+                title="Prefix used for each team's position label in this group (e.g. A → A1, A2…)"
+                onChange={e => updateGroupDef(g.name, { prefix: e.target.value })}
+              />
+              <input
+                className="tm-group-chip-input"
+                type="number"
+                min={0}
+                value={g.capacity ?? ''}
+                placeholder="Max"
+                title="Max teams allowed in this group (blank = unlimited)"
+                onChange={e => updateGroupDef(g.name, { capacity: e.target.value ? Number(e.target.value) : undefined })}
+              />
+              {g.capacity != null && <span className="tm-group-chip-count">{count}/{g.capacity}</span>}
+              <button onClick={() => removeGroup(g.name)} title={`Remove ${g.name} (unassigns any teams in it)`}>×</button>
+            </span>
+          );
+        })}
+        <input
+          className="tm-input tm-groups-add-input"
+          placeholder="New group name"
+          value={newGroupName}
+          onChange={e => setNewGroupName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') addGroup(); }}
+          style={{ width: 110 }}
+        />
+        <input
+          className="tm-input tm-groups-add-input"
+          placeholder="Prefix"
+          value={newGroupPrefix}
+          onChange={e => setNewGroupPrefix(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') addGroup(); }}
+          style={{ width: 50 }}
+        />
+        <input
+          className="tm-input tm-groups-add-input"
+          type="number"
+          min={0}
+          placeholder="Max"
+          value={newGroupCapacity}
+          onChange={e => setNewGroupCapacity(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') addGroup(); }}
+          style={{ width: 50 }}
+        />
+        {categories.length > 0 && (
+          <select
+            className="tm-input"
+            value={newGroupCategory}
+            onChange={e => setNewGroupCategory(e.target.value)}
+            title="Which category this new group belongs to (blank = current tab)"
+            style={{ width: 110 }}
+          >
+            <option value="">{activeCategory ? `— ${activeCategory} (tab) —` : '— no category —'}</option>
+            {categories.filter(c => c !== activeCategory).map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        )}
+        <button className="tm-io-btn" onClick={addGroup} disabled={!newGroupName.trim()}>+ Add Group</button>
+      </div>
+      <div className="tm-groups-bar" style={{ marginTop: -6 }}>
+        <span className="tm-groups-label">Draw Pots:</span>
+        {pots.map(p => (
+          <span key={p.name} className="tm-group-chip tm-group-chip--pot">
+            {setupEditMode ? (
+              <input
+                className="tm-group-chip-input"
+                defaultValue={p.name}
+                style={{ width: 90, fontWeight: 700 }}
+                title="Rename pot"
+                onBlur={e => renamePot(p.name, e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+              />
+            ) : p.name}
+            <button onClick={() => removePot(p.name)} title={`Remove ${p.name} (unassigns any teams in it)`}>×</button>
+          </span>
+        ))}
+        <input
+          className="tm-input tm-groups-add-input"
+          placeholder="New pot name"
+          value={newPotName}
+          onChange={e => setNewPotName(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') addPot(); }}
+        />
+        <button className="tm-io-btn" onClick={addPot} disabled={!newPotName.trim()}>+ Add Pot</button>
+      </div>
+      </div>
+
+      {teams.length > 0 && (
+        <div className="tm-draw-section">
+          <div className="tm-draw-section-title">📋 Assignments</div>
+
+          {assignSelectedIds.size > 0 && (
+            <div className="tm-draw-vmix-cfg">
+              <span className="tm-groups-label">{assignSelectedIds.size} selected —</span>
+              <select className="tm-input" value={bulkPot} onChange={e => setBulkPot(e.target.value)} style={{ width: 140 }}>
+                <option value="">— pick pot —</option>
+                {pots.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+                <option value="__clear__">— No Pot —</option>
+              </select>
+              <button className="tm-io-btn" onClick={applyBulkPot} disabled={!bulkPot}>Apply Pot</button>
+              <select className="tm-input" value={bulkGroup} onChange={e => setBulkGroup(e.target.value)} style={{ width: 140 }}>
+                <option value="">— pick group —</option>
+                {groups.map(g => <option key={g.name} value={g.name}>{g.name}</option>)}
+                <option value="__clear__">— No Group —</option>
+              </select>
+              <button className="tm-io-btn" onClick={applyBulkGroup} disabled={!bulkGroup}>Apply Group</button>
+              <button className="tm-io-btn" onClick={() => setAssignSelectedIds(new Set())}>Clear Selection</button>
+            </div>
+          )}
+
+          {(categories.length > 0
+            ? [...categories.map(c => ({ label: c, items: teams.filter(t => t.category === c) })), { label: 'Uncategorized', items: teams.filter(t => !t.category) }]
+            : [{ label: null as string | null, items: teams }]
+          ).map(section => (section.label && section.items.length === 0) ? null : (
+            <div key={section.label ?? '__all__'} style={{ marginBottom: 12 }}>
+              {section.label && <div className="tm-groups-label" style={{ display: 'block', marginBottom: 6 }}>{section.label}</div>}
+              <div className="tm-draw-assign-table">
+                <div className="tm-draw-assign-row tm-draw-assign-row--head" style={{ gridTemplateColumns: 'auto 2fr 1fr 1fr 1fr' }}>
+                  <span></span><span>Team</span><span>Pot</span><span>Group</span><span>Position</span>
+                </div>
+                {section.items.map(t => {
+                  const g = groups.find(gr => gr.name === t.group);
+                  const members = teams.filter(t2 => t2.group === t.group);
+                  const slotCount = g?.capacity ?? Math.max(members.length + 3, 8);
+                  const prefix = g?.prefix || (t.group ?? '').charAt(0).toUpperCase();
+                  return (
+                    <div key={t.id} className="tm-draw-assign-row" style={{ gridTemplateColumns: 'auto 2fr 1fr 1fr 1fr' }}>
+                      <input
+                        type="checkbox"
+                        checked={assignSelectedIds.has(t.id)}
+                        onChange={() => toggleAssignSelected(t.id)}
+                        title="Select for bulk pot/group change"
+                      />
+                      <span className="tm-draw-assign-team">
+                        <div style={{ width: 22, height: 22, flexShrink: 0 }}><ScheduleBadge logo={t.logo} color={t.color} /></div>
+                        {t.name}
+                        {t.category && <span className="tm-team-cat-badge">{t.category}</span>}
+                      </span>
+                      <select
+                        className="tm-sched-type-select"
+                        title="Seeding pot for the live draw"
+                        value={t.pot ?? ''}
+                        onChange={e => updateTeam(t.id, { pot: e.target.value || undefined })}
+                      >
+                        <option value="">— No Pot —</option>
+                        {pots.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+                      </select>
+                      <select
+                        className="tm-sched-type-select"
+                        title="Pool/group"
+                        value={t.group ?? ''}
+                        onChange={e => updateTeam(t.id, { group: e.target.value || undefined })}
+                      >
+                        <option value="">— No Group —</option>
+                        {groups.map(gr => <option key={gr.name} value={gr.name}>{gr.name}</option>)}
+                      </select>
+                      {t.group ? (
+                        <select
+                          className="tm-sched-type-select"
+                          title="Slot position within this group"
+                          value={t.groupPosition ?? ''}
+                          onChange={e => updateTeam(t.id, { groupPosition: e.target.value ? Number(e.target.value) : undefined })}
+                        >
+                          <option value="">— No Position —</option>
+                          {Array.from({ length: slotCount }, (_, i) => i + 1).map(n => {
+                            const takenBy = members.find(t2 => t2.id !== t.id && t2.groupPosition === n);
+                            return (
+                              <option key={n} value={n}>{prefix}{n}{takenBy ? ` (clash: ${takenBy.name})` : ''}</option>
+                            );
+                          })}
+                        </select>
+                      ) : <span />}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      </>
+      )}
+
+      {drawSubTab === 'live' && (
+      <>
+      {groups.length > 0 && (
+        <div className="tm-draw-section">
+          <div className="tm-draw-section-title">🏁 Final Group List</div>
+          {(categories.length > 0
+            ? [...categories.map(c => ({ label: c, items: groups.filter(g => g.category === c) })), { label: 'Uncategorized', items: groups.filter(g => !g.category) }]
+            : [{ label: null as string | null, items: groups }]
+          ).map(section => (section.label && section.items.length === 0) ? null : (
+            <div key={section.label ?? '__all__'} style={{ marginBottom: 12 }}>
+              {section.label && <div className="tm-groups-label" style={{ display: 'block', marginBottom: 6 }}>{section.label}</div>}
+              <div className="tm-draw-group-cards">
+                {section.items.map(g => {
+                  const members = teams.filter(t => t.group === g.name);
+                  const slotCount = g.capacity ?? Math.max(members.length + 3, 8);
+                  const { slots } = resolveGroupSlots(members, g.capacity);
+                  const prefix = g.prefix || g.name.charAt(0).toUpperCase();
+                  return (
+                    <div
+                      key={g.name}
+                      className={`tm-draw-pot-card${dragOverGroup === g.name ? ' tm-draw-group-card--drag-over' : ''}`}
+                      draggable
+                      title="Drag the card to reorder groups"
+                      onDragStart={() => setDraggedGroup(g.name)}
+                      onDragOver={e => { e.preventDefault(); setDragOverGroup(g.name); }}
+                      onDragLeave={() => setDragOverGroup(prev => prev === g.name ? null : prev)}
+                      onDrop={e => { e.preventDefault(); if (draggedGroup) reorderGroups(draggedGroup, g.name); setDraggedGroup(null); setDragOverGroup(null); }}
+                      onDragEnd={() => { setDraggedGroup(null); setDragOverGroup(null); }}
+                      style={{ cursor: 'grab' }}
+                    >
+                      <div className="tm-draw-pot-title">
+                        {g.name.toUpperCase()}
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {Array.from({ length: slotCount }, (_, i) => i + 1).map(n => {
+                          const t = slots[n - 1];
+                          return (
+                            <div key={n} className="tm-draw-final-row">
+                              <span className="tm-draw-final-pos">{prefix}{n}</span>
+                              {t ? (
+                                <>
+                                  <div style={{ width: 24, height: 24, flexShrink: 0 }}><ScheduleBadge logo={t.logo} color={t.color} /></div>
+                                  <span className="tm-draw-final-name">{t.name}</span>
+                                </>
+                              ) : (
+                                <span className="tm-draw-final-name tm-draw-final-name--empty">— Empty —</span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {pots.length === 0 || groups.length === 0 ? (
+        <div className="tm-win-placeholder">
+          <span>Add at least one Group and one Pot in the ⚙️ Settings tab, then assign each team to a pot there.</span>
+        </div>
+      ) : (
+      <div className="tm-draw-section">
+      <div className="tm-draw-section-title">🎬 Live Draw</div>
+      <div className="tm-draw-vmix-cfg">
+        <span className="tm-groups-label" title="'Manual' lets you click a team chip in the current pot to draw it yourself, instead of the system picking blindly">Team Draw:</span>
+        <div className="tm-timer-mode-toggle">
+          <button
+            className={`tm-timer-mode-btn ${drawTeamMode === 'random' ? 'tm-timer-mode-btn--active' : ''}`}
+            onClick={() => updateTournament(tournament.id, { drawTeamMode: 'random' })}
+          >🎲 Random</button>
+          <button
+            className={`tm-timer-mode-btn ${drawTeamMode === 'manual' ? 'tm-timer-mode-btn--active' : ''}`}
+            onClick={() => updateTournament(tournament.id, { drawTeamMode: 'manual' })}
+          >✋ Manual (click team)</button>
+        </div>
+      </div>
+
+      <div className="tm-draw-hero">
+        {armedTeam ? (
+          <>
+            <div style={{ width: 56, height: 56, flexShrink: 0 }}>
+              <ScheduleBadge logo={armedTeam.team.logo} color={armedTeam.team.color} />
+            </div>
+            <div className="tm-draw-hero-info">
+              <span className="tm-draw-hero-name">{armedTeam.team.name}</span>
+              <span className="tm-draw-hero-detail">⏳ Pick a group below…</span>
+            </div>
+          </>
+        ) : armedSlot ? (
+          <div className="tm-draw-hero-info">
+            <span className="tm-draw-hero-name">{armedSlot.group} — {(groups.find(g => g.name === armedSlot.group)?.prefix || armedSlot.group.charAt(0).toUpperCase())}{armedSlot.position}</span>
+            <span className="tm-draw-hero-detail">⏳ Pick a team below…</span>
+          </div>
+        ) : lastDrawn ? (
+          <>
+            <div style={{ width: 56, height: 56, flexShrink: 0 }}>
+              <ScheduleBadge logo={lastDrawn.team.logo} color={lastDrawn.team.color} />
+            </div>
+            <div className="tm-draw-hero-info">
+              <span className="tm-draw-hero-name">{lastDrawn.team.name}</span>
+              <span className="tm-draw-hero-detail">{lastDrawn.pot} → {lastDrawn.group}</span>
+            </div>
+          </>
+        ) : (
+          <span className="tm-draw-hero-empty">No team drawn yet</span>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        {drawTeamMode === 'manual' ? (
+          <div className="tm-draw-manual-hint" style={{ flex: 1 }}>
+            {armedTeam ? '⏳ Pick a slot below' : armedSlot ? `⏳ Pick a team below for ${armedSlot.group}` : '👆 Click any team or empty slot to pair them — pick either first, click again to cancel'}
+          </div>
+        ) : (
+          <button className="tm-sidebar-new-btn" onClick={drawNext} disabled={!canDraw && !armedSlot} style={{ flex: 1 }}>
+            {armedSlot ? `🎲 Draw Next → ${armedSlot.group}` : canDraw ? `🎲 Draw Next (${currentPot})` : '🎉 Draw Complete'}
+          </button>
+        )}
+        <button
+          className={`tm-io-btn${editMode ? ' tm-io-btn--active' : ''}`}
+          title="Unlock filled slots so a mistake can be cleared with a click"
+          onClick={() => setEditMode(e => !e)}
+        >{editMode ? '🔓 Editing' : '✏️ Edit'}</button>
+        <button
+          className={`tm-io-btn${hideAssignedTeams ? ' tm-io-btn--active' : ''}`}
+          title="Hide already-placed teams from the pot lists below, instead of leaving them pickable to re-draw/move"
+          onClick={() => setHideAssignedTeams(v => !v)}
+        >{hideAssignedTeams ? '🙈 Hiding Placed' : '👁 Show All'}</button>
+        <ConfirmButton
+          className="tm-io-btn"
+          label="↺ Reset Draw"
+          confirmLabel="Reset"
+          message="Clear every team's group assignment from this draw?"
+          onConfirm={resetDraw}
+        />
+      </div>
+
+      {(categories.length > 0
+        ? [...categories.map(c => ({ label: c, items: groups.filter(g => g.category === c) })), { label: 'Uncategorized', items: groups.filter(g => !g.category) }]
+        : [{ label: null as string | null, items: groups }]
+      ).map(section => (section.label && section.items.length === 0) ? null : (
+        <div key={section.label ?? '__all__'}>
+          {section.label && <div className="tm-groups-label" style={{ display: 'block', marginBottom: 6 }}>{section.label}</div>}
+          <div className="tm-draw-group-cards">
+            {section.items.map(g => {
+              const members = teams.filter(t => t.group === g.name);
+              const full = groupIsFull(g);
+              const slotCount = g.capacity ?? Math.max(members.length + 3, 8);
+              const { slots } = resolveGroupSlots(members, g.capacity);
+              const prefix = g.prefix || g.name.charAt(0).toUpperCase();
+              return (
+                <div
+                  key={g.name}
+                  className={`tm-draw-group-card${full ? ' tm-draw-group-card--full' : ''}${dragOverGroup === g.name ? ' tm-draw-group-card--drag-over' : ''}`}
+                  draggable
+                  title="Drag the card to reorder groups"
+                  onDragStart={() => setDraggedGroup(g.name)}
+                  onDragOver={e => { e.preventDefault(); setDragOverGroup(g.name); }}
+                  onDragLeave={() => setDragOverGroup(prev => prev === g.name ? null : prev)}
+                  onDrop={e => { e.preventDefault(); if (draggedGroup) reorderGroups(draggedGroup, g.name); setDraggedGroup(null); setDragOverGroup(null); }}
+                  onDragEnd={() => { setDraggedGroup(null); setDragOverGroup(null); }}
+                  style={{ cursor: 'grab' }}
+                >
+                  <div className="tm-draw-group-card-title">
+                    {g.name}{g.capacity != null ? ` (${members.length}/${g.capacity})` : ''}
+                  </div>
+                  <div className="tm-draw-slot-grid">
+                    {Array.from({ length: slotCount }, (_, i) => i + 1).map(n => {
+                      const occupant = slots[n - 1];
+                      const armed = armedSlot?.group === g.name && armedSlot.position === n;
+                      // An armed team can't drop into a slot whose group belongs
+                      // to a different category.
+                      const blocked = !occupant && !!armedTeam && categoryMismatch(armedTeam.team, g.name);
+                      const clickable = (!occupant && !blocked) || editMode;
+                      return (
+                        <div
+                          key={n}
+                          className={`tm-draw-slot-card${occupant ? ' tm-draw-slot-card--filled' : blocked ? ' tm-draw-slot-card--filled' : ' tm-draw-slot-card--pickable'}${armed ? ' tm-draw-slot-card--armed' : ''}${occupant && editMode ? ' tm-draw-slot-card--editable' : ''}`}
+                          title={occupant ? (editMode ? `Click to remove ${occupant.name}` : occupant.category ? `Category: ${occupant.category}` : undefined) : blocked ? 'Not pickable for the armed team’s category' : undefined}
+                          onClick={clickable ? () => (occupant ? updateTeam(occupant.id, { group: undefined, groupPosition: undefined }) : handleSlotClick(g.name, n)) : undefined}
+                        >
+                          <span className="tm-draw-slot-card-label">{prefix}{n}</span>
+                          {occupant && <div style={{ width: 26, height: 26, flexShrink: 0 }}><ScheduleBadge logo={occupant.logo} color={occupant.color} /></div>}
+                          <span className="tm-draw-slot-card-team">{occupant ? (occupant.shortName || occupant.name) : 'Empty'}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+
+      {pots.map(p => {
+        const potTeamsAll = teams.filter(t => t.pot === p.name);
+        const potTeams = hideAssignedTeams ? potTeamsAll.filter(t => !t.group) : potTeamsAll;
+        return (
+          <div key={p.name} className="tm-draw-pot-card">
+            <div className="tm-draw-pot-title">{p.name}{p.name === currentPot ? ' — drawing now' : ''}</div>
+            <div className="tm-draw-group-cards">
+              {potTeamsAll.length === 0 ? (
+                <span className="tm-draw-pot-empty">No teams assigned to this pot</span>
+              ) : potTeams.length === 0 ? (
+                <span className="tm-draw-pot-empty">All teams in this pot are already placed</span>
+              ) : potTeams.map(t => {
+                const armed = armedTeam?.team.id === t.id;
+                // Once a slot is armed, only an undrawn, category-matching
+                // team can fill it via this tile.
+                const blocked = !!armedSlot && (!!t.group || categoryMismatch(t, armedSlot.group));
+                return (
+                  <div
+                    key={t.id}
+                    className={`tm-draw-group-card tm-draw-team-card${t.group ? ' tm-draw-team-card--drawn' : ''}${blocked ? ' tm-draw-group-card--full' : ' tm-draw-group-card--pickable'}${armed ? ' tm-draw-group-card--armed' : ''}`}
+                    title={blocked ? 'Not pickable for the armed slot' : t.category ? `Category: ${t.category}` : undefined}
+                    onClick={blocked ? undefined : () => handleTeamClick(t, p.name)}
+                  >
+                    <div style={{ width: 32, height: 32, flexShrink: 0 }}><ScheduleBadge logo={t.logo} color={t.color} /></div>
+                    <span className="tm-draw-group-card-title">{t.name}</span>
+                    {t.category && <span className="tm-team-cat-badge">{t.category}</span>}
+                    {t.group && <span className="tm-draw-team-card-dest">→ {t.group}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+      </div>
+      )}
+
+      <div className="tm-draw-section">
+        <button className="tm-draw-section-toggle" onClick={() => setVmixCfgOpen(o => !o)}>
+          <span className="tm-draw-section-title" style={{ margin: 0 }}>{vmixCfgOpen ? '▼' : '▶'} 📡 vMix Output</span>
+        </button>
+        {vmixCfgOpen && (
+          <>
+            <div className="tm-draw-vmix-cfg">
+              <span className="tm-groups-label">Current draw (live, on each draw):</span>
+              <div style={{ width: 220 }}>
+                <InputPickerDropdown
+                  currentKey={drawCfg.inputKey ?? ''}
+                  currentTitle={allVmixInputs.find(i => i.key === drawCfg.inputKey)?.title}
+                  allInputs={allVmixInputs}
+                  onSelect={key => setDrawCfg({ inputKey: key })}
+                />
+              </div>
+              <input className="tm-input" placeholder="Team name field" value={drawCfg.fieldTeamName ?? ''}
+                onChange={e => setDrawCfg({ fieldTeamName: e.target.value })} style={{ width: 120 }} />
+              <input className="tm-input" placeholder="Short field" value={drawCfg.fieldTeamShort ?? ''}
+                onChange={e => setDrawCfg({ fieldTeamShort: e.target.value })} style={{ width: 100 }} />
+              <input className="tm-input" placeholder="Logo field" value={drawCfg.fieldTeamLogo ?? ''}
+                onChange={e => setDrawCfg({ fieldTeamLogo: e.target.value })} style={{ width: 100 }} />
+              <input className="tm-input" placeholder="Group field" value={drawCfg.fieldGroup ?? ''}
+                onChange={e => setDrawCfg({ fieldGroup: e.target.value })} style={{ width: 100 }} />
+              <input className="tm-input" placeholder="Pot field" value={drawCfg.fieldPot ?? ''}
+                onChange={e => setDrawCfg({ fieldPot: e.target.value })} style={{ width: 100 }} />
+            </div>
+
+            <div className="tm-draw-vmix-cfg" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+              <span className="tm-groups-label">Group List (whole group, numbered fields):</span>
+              {groupListTargets.map(target => (
+                <div key={target.id} className="vil-cfg-block">
+                  <div className="vil-cfg-header">
+                    <select
+                      className="tm-input"
+                      value={target.group}
+                      onChange={e => updateGroupListTarget(target.id, { group: e.target.value })}
+                      style={{ flex: 1 }}
+                    >
+                      <option value="">— select group —</option>
+                      {groups.map(g => <option key={g.name} value={g.name}>{g.name}</option>)}
+                    </select>
+                    <button className="btn btn--ghost btn--small" onClick={() => setGroupListTargets(groupListTargets.filter(t => t.id !== target.id))}>×</button>
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                    <div style={{ width: 220 }}>
+                      <InputPickerDropdown
+                        currentKey={target.inputKey ?? ''}
+                        currentTitle={allVmixInputs.find(i => i.key === target.inputKey)?.title}
+                        allInputs={allVmixInputs}
+                        onSelect={key => updateGroupListTarget(target.id, { inputKey: key })}
+                      />
+                    </div>
+                    <input className="tm-input" placeholder="Pick e.g. Team1.Text → auto-prefix"
+                      value={target.fieldPrefix ? `${target.fieldPrefix}1.Text` : ''}
+                      onChange={e => updateGroupListTarget(target.id, { fieldPrefix: derivePrefix(e.target.value) })}
+                      style={{ width: 190 }} />
+                    <input className="tm-input" placeholder="Pick e.g. Short1.Text → auto-prefix"
+                      value={target.fieldShortPrefix ? `${target.fieldShortPrefix}1.Text` : ''}
+                      onChange={e => updateGroupListTarget(target.id, { fieldShortPrefix: derivePrefix(e.target.value) })}
+                      style={{ width: 190 }} />
+                    <input className="tm-input" placeholder="Pick e.g. Logo1.Source → auto-prefix"
+                      value={target.fieldLogoPrefix ? `${target.fieldLogoPrefix}1.Source` : ''}
+                      onChange={e => updateGroupListTarget(target.id, { fieldLogoPrefix: derivePrefix(e.target.value) })}
+                      style={{ width: 190 }} />
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--text-secondary)' }}>
+                      <input type="checkbox" checked={target.autoSync ?? false} onChange={e => updateGroupListTarget(target.id, { autoSync: e.target.checked })} />
+                      Auto-sync
+                    </label>
+                    <button className="tm-io-btn" onClick={() => pushGroupListToVmix(target)} disabled={!target.group || !target.inputKey}>📡 Push List</button>
+                  </div>
+                </div>
+              ))}
+              <button
+                className="btn btn--ghost btn--small"
+                style={{ alignSelf: 'flex-start' }}
+                onClick={() => setGroupListTargets([...groupListTargets, { id: crypto.randomUUID(), group: groups[0]?.name ?? '', autoSync: false }])}
+              >+ Add Group List Target</button>
+            </div>
+          </>
+        )}
+      </div>
+      </>
+      )}
+    </div>
+  );
+}
+
 // ── Small persistent tournament picker shown atop tournament-scoped tabs ──────
 function TournamentScopeHeader({ tournaments, selectedId, onSelect }: {
   tournaments: Tournament[]; selectedId: string; onSelect: (id: string) => void;
 }) {
   return (
     <div className="tm-scope-header">
-      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>🏆 Tournament:</span>
-      <select className="tm-input" style={{ fontSize: 12, maxWidth: 260, flex: 'none' }}
+      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>🏆 Tournament:</span>
+      <select className="tm-input" style={{ fontSize: 15, padding: '6px 10px', height: 34, maxWidth: 360, flex: 'none' }}
         value={selectedId} onChange={e => onSelect(e.target.value)}>
         {tournaments.length === 0 && <option value="">— none —</option>}
         {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
@@ -1293,7 +2565,7 @@ function TournamentScopeHeader({ tournaments, selectedId, onSelect }: {
 const isHostClient = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 export function TournamentManager({ onClose }: Props) {
-  const { tournaments, updateTournament, deleteTournament, setActiveTournament } = useTournamentStore();
+  const { tournaments, updateTournament, deleteTournament, setActiveTournament, defaultTournamentId, setDefaultTournament } = useTournamentStore();
   const { pages, updateWidgetConfig } = useCanvasStore();
   const { remoteEditMode, setRemoteEditMode } = useAppSettings();
 
@@ -1312,8 +2584,10 @@ export function TournamentManager({ onClose }: Props) {
     y: Math.max(20, Math.round(window.innerHeight / 2 - 330)),
   }));
   const dragRef = useRef({ active: false, ox: 0, oy: 0, ix: 0, iy: 0 });
+  const [isMaximized, setIsMaximized] = useState(false);
 
   const startDrag = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isMaximized) return;
     if ((e.target as HTMLElement).closest('.tm-win-ctrl')) return;
     dragRef.current = { active: true, ox: e.clientX, oy: e.clientY, ix: pos.x, iy: pos.y };
     const onMove = (me: MouseEvent) => {
@@ -1333,13 +2607,15 @@ export function TournamentManager({ onClose }: Props) {
     e.preventDefault();
   };
 
-  const [selectedId, setSelectedId] = useState(tournaments[0]?.id ?? '');
+  const [selectedId, setSelectedId] = useState(
+    (defaultTournamentId && tournaments.some(t => t.id === defaultTournamentId)) ? defaultTournamentId : (tournaments[0]?.id ?? '')
+  );
   const [addingNew, setAddingNew] = useState(tournaments.length === 0);
   const [editTournName, setEditTournName] = useState(false);
   const [tournNameVal, setTournNameVal] = useState('');
   const [confirmDeleteTournament, setConfirmDeleteTournament] = useState(false);
   const [applyStatus, setApplyStatus] = useState('');
-  const [tab, setTab] = useState<'tournaments' | 'teams' | 'players' | 'schedule' | 'results'>('tournaments');
+  const [tab, setTab] = useState<'tournaments' | 'teams' | 'players' | 'schedule' | 'results' | 'standings' | 'draw'>('tournaments');
   const { teams } = useTeamDbStore();
   const { matches: scheduledMatches } = useMatchScheduleStore();
   const { results: savedResults } = useMatchResultsStore();
@@ -1434,21 +2710,33 @@ export function TournamentManager({ onClose }: Props) {
 
   return (
     <>
-      {/* Subtle backdrop — click to close */}
-      <div className="tm-backdrop" onClick={onClose} />
+      {/* Subtle backdrop — no longer closes on click (that bypassed
+          confirmation); the × button is the only way to close now. */}
+      <div className="tm-backdrop" />
 
       {/* Floating window */}
       <div
-        className="tm-window"
-        style={{ left: pos.x, top: pos.y }}
+        className={`tm-window${isMaximized ? ' tm-window--maximized' : ''}`}
+        style={isMaximized ? undefined : { left: pos.x, top: pos.y }}
         onClick={e => e.stopPropagation()}
       >
         {/* Title bar */}
-        <div className="tm-titlebar" onMouseDown={startDrag}>
+        <div className="tm-titlebar" onMouseDown={startDrag} onDoubleClick={() => setIsMaximized(m => !m)}>
           <span className="tm-titlebar-icon">🏆</span>
           <span className="tm-titlebar-title">Tournament Database</span>
           <div className="tm-win-ctrls">
-            <button className="tm-win-ctrl tm-win-ctrl--close" onClick={onClose} title="Close">×</button>
+            <button
+              className="tm-win-ctrl"
+              onClick={() => setIsMaximized(m => !m)}
+              title={isMaximized ? 'Restore' : 'Maximize'}
+            >{isMaximized ? '🗗' : '⛶'}</button>
+            <ConfirmButton
+              className="tm-win-ctrl tm-win-ctrl--close"
+              label="×"
+              confirmLabel="Close"
+              message="Close this window?"
+              onConfirm={onClose}
+            />
           </div>
         </div>
 
@@ -1494,6 +2782,22 @@ export function TournamentManager({ onClose }: Props) {
               borderBottom: tab === 'results' ? '2px solid var(--accent)' : '2px solid transparent',
             }}
           >🏁 Results{scopedResults.length > 0 ? ` (${scopedResults.length})` : ''}</button>
+          <button
+            onClick={() => setTab('standings')}
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+              background: 'transparent', color: tab === 'standings' ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: tab === 'standings' ? '2px solid var(--accent)' : '2px solid transparent',
+            }}
+          >🏅 Standings</button>
+          <button
+            onClick={() => setTab('draw')}
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+              background: 'transparent', color: tab === 'draw' ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: tab === 'draw' ? '2px solid var(--accent)' : '2px solid transparent',
+            }}
+          >🎲 Draw</button>
         </div>
 
         {/* Remote-only (not host, not the deliberately view-only readonly client):
@@ -1516,7 +2820,7 @@ export function TournamentManager({ onClose }: Props) {
         )}
 
         {/* Main area */}
-        {tab === 'teams' || tab === 'players' || tab === 'schedule' || tab === 'results' ? (
+        {tab === 'teams' || tab === 'players' || tab === 'schedule' || tab === 'results' || tab === 'standings' || tab === 'draw' ? (
           <div className="tm-win-body--scoped">
             <TournamentScopeHeader tournaments={tournaments} selectedId={selectedId} onSelect={selectTournament} />
             {!selected ? (
@@ -1529,6 +2833,10 @@ export function TournamentManager({ onClose }: Props) {
               <PlayersPanel tournamentId={selected.id} />
             ) : tab === 'schedule' ? (
               <SchedulePanel tournament={selected} />
+            ) : tab === 'standings' ? (
+              <StandingsPanel tournament={selected} />
+            ) : tab === 'draw' ? (
+              <DrawPanel tournament={selected} />
             ) : (
               <ResultsPanel tournament={selected} />
             )}
@@ -1542,6 +2850,11 @@ export function TournamentManager({ onClose }: Props) {
                 className={`tm-sidebar-new-btn ${addingNew ? 'tm-sidebar-new-btn--active' : ''}`}
                 onClick={() => setAddingNew(true)}
               >＋ New</button>
+              <button
+                className="tm-btn"
+                title="Export every tournament and all related data (teams, rosters, schedules, results) as one JSON file"
+                onClick={() => exportProjectJSON(tournaments, selectedId, teams, scheduledMatches, savedResults)}
+              >⬇ Export Project</button>
             </div>
             <div className="tm-sidebar-list">
               {tournaments.map(t => (
@@ -1598,6 +2911,16 @@ export function TournamentManager({ onClose }: Props) {
                       {SPORT_TYPES.map(s => <option key={s} value={s}>{SPORT_LABELS[s]}</option>)}
                     </select>
                   </div>
+                  <button
+                    className="tm-btn"
+                    title={defaultTournamentId === selected.id ? 'Unset as default (Tournament Database will open to the first tournament instead)' : 'Set as default — the Tournament Database opens to this tournament automatically'}
+                    onClick={() => setDefaultTournament(selected.id)}
+                  >{defaultTournamentId === selected.id ? '⭐ Default' : '☆ Set Default'}</button>
+                  <button
+                    className="tm-btn"
+                    title="Export this tournament and everything related to it (teams, rosters, schedule, results) as a JSON file"
+                    onClick={() => exportTournamentJSON(selected, scopedTeams, scopedMatches, scopedResults)}
+                  >⬇ Export Tournament</button>
                   {confirmDeleteTournament ? (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                       <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Delete? Teams/fixtures/results stay saved.</span>
