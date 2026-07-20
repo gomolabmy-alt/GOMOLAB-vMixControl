@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Player, StaffMember } from '../types/tournament';
+import { useUndoStore } from './undoStore';
 
 // Reusable team profiles — the source of truth for team identity (name,
 // short name, color, logo), roster (players) and staff. A team optionally
@@ -74,7 +75,12 @@ export const useTeamDbStore = create<TeamDbStore>()(
         teams: s.teams.map(t => t.id === id ? { ...t, ...patch } : t),
       })),
 
-      deleteTeam: (id) => set(s => ({ teams: s.teams.filter(t => t.id !== id) })),
+      deleteTeam: (id) => {
+        const team = get().teams.find(t => t.id === id);
+        set(s => ({ teams: s.teams.filter(t => t.id !== id) }));
+        if (team) useUndoStore.getState().pushUndo(`Deleted team "${team.name}"`, () =>
+          useTeamDbStore.setState(s => ({ teams: [...s.teams, team] })));
+      },
 
       duplicateTeam: (id) => {
         const src = get().teams.find(t => t.id === id);
@@ -111,11 +117,19 @@ export const useTeamDbStore = create<TeamDbStore>()(
           : t),
       })),
 
-      deletePlayer: (teamId, playerId) => set(s => ({
-        teams: s.teams.map(t => t.id === teamId
-          ? { ...t, players: t.players.filter(p => p.id !== playerId) }
-          : t),
-      })),
+      deletePlayer: (teamId, playerId) => {
+        const team = get().teams.find(t => t.id === teamId);
+        const player = team?.players.find(p => p.id === playerId);
+        set(s => ({
+          teams: s.teams.map(t => t.id === teamId
+            ? { ...t, players: t.players.filter(p => p.id !== playerId) }
+            : t),
+        }));
+        if (player) useUndoStore.getState().pushUndo(`Deleted player "${player.name}"`, () =>
+          useTeamDbStore.setState(s => ({
+            teams: s.teams.map(t => t.id === teamId ? { ...t, players: [...t.players, player] } : t),
+          })));
+      },
 
       replaceTeamPlayers: (teamId, players) => set(s => ({
         teams: s.teams.map(t => t.id === teamId

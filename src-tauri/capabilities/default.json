@@ -5,6 +5,9 @@
   "platforms": ["macOS", "windows", "linux"],
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "deep-link:default",
+    "opener:default",
+    "os:default"
   ]
 }

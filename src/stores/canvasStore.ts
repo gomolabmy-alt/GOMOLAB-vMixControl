@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import type { CanvasPage, CanvasWidget, WidgetType } from '../types/canvas';
 import { WIDGET_DEFAULTS } from '../types/canvas';
 import { useVmixStore } from './vmixStore';
+import { useUndoStore } from './undoStore';
 import { syncClient } from '../lib/syncClient';
 import TimerWorkerClass from '../workers/timerWorker?worker&inline';
 
@@ -254,10 +255,18 @@ interface CanvasStore {
   restoreCommentatorCanvas: (pages: unknown[], activePageId: string) => void;
 
   // Pages
-  addPage: () => void;
+  addPage: () => string;
   deletePage: (id: string) => void;
   renamePage: (id: string, name: string) => void;
   setActivePage: (id: string) => void;
+  /** Binds/unbinds a canvas page to a tournament — widgets on it fall back to
+   *  this instead of each needing their own "which tournament" picker. */
+  setPageTournament: (id: string, tournamentId: string | undefined) => void;
+  /** Clones a page (all its widgets, with fresh ids) as a new page — the
+   *  quickest way to stand up a new tournament's canvas from an existing
+   *  layout/template instead of rebuilding widgets from scratch. Returns the
+   *  new page's id. */
+  duplicatePage: (id: string, opts?: { name?: string; tournamentId?: string }) => string;
 
   // Edit mode
   setEditMode: (on: boolean) => void;
@@ -551,6 +560,7 @@ export const useCanvasStore = create<CanvasStore>()(
           const page = makePage(`Page ${get().pages.length + 1}`);
           set({ pages: [...get().pages, page], activePageId: page.id });
           syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'addPage', args: [page] });
+          return page.id;
         },
 
         deletePage: (id) => {
@@ -573,6 +583,25 @@ export const useCanvasStore = create<CanvasStore>()(
 
         setActivePage: (id) => {
           set({ activePageId: id, selectedWidgetId: null });
+        },
+
+        setPageTournament: (id, tournamentId) => {
+          set({ pages: get().pages.map((p) => p.id === id ? { ...p, tournamentId } : p) });
+          syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'setPageTournament', args: [id, tournamentId] });
+        },
+
+        duplicatePage: (id, opts) => {
+          const src = get().pages.find((p) => p.id === id);
+          if (!src) return '';
+          const newPage: CanvasPage = {
+            id: crypto.randomUUID(),
+            name: opts?.name ?? `${src.name} Copy`,
+            tournamentId: opts?.tournamentId ?? src.tournamentId,
+            widgets: src.widgets.map((w) => ({ ...w, id: crypto.randomUUID(), config: { ...w.config } })),
+          };
+          set({ pages: [...get().pages, newPage], activePageId: newPage.id });
+          syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'addPage', args: [newPage] });
+          return newPage.id;
         },
 
         // ── Edit mode ──────────────────────────────────────────────────────
@@ -1432,6 +1461,14 @@ export const useCanvasStore = create<CanvasStore>()(
           syncSleepBlock(ints);
           const config = findWidgetConfig(widgetId);
           if (!config) return;
+          const resetKeys = [
+            'currentMs', 'running', 'currentPeriod', 'periodStartMs',
+            'resumeMs', 'resumePeriodStartMs', 'overrunning', 'inBreak', 'breakCurrentMs',
+            'inExtraTime', 'etCurrentPeriod', 'etCurrentMs', 'etPeriodStartMs', 'etInBreak', 'etBreakCurrentMs', 'etOverrunning',
+            'inAfterEt', 'afterEtCurrentMs', 'afterEtOverrunning',
+            'inFinalPlay', 'finalPlayMs', 'finalPlayPendingNext', 'awaitingEndConfirm',
+          ] as const;
+          const before = Object.fromEntries(resetKeys.map(k => [k, config[k]]));
           const resetMs = config.mode === 'countdown' ? config.durationMs : 0;
           updateWidgetConfig(widgetId, {
             currentMs: resetMs, running: false,
@@ -1445,6 +1482,7 @@ export const useCanvasStore = create<CanvasStore>()(
             inFinalPlay: false, finalPlayMs: 0, finalPlayPendingNext: false,
             awaitingEndConfirm: false,
           });
+          useUndoStore.getState().pushUndo('Reset timer', () => updateWidgetConfig(widgetId, before));
           const { client } = useVmixStore.getState();
           timerSendAll(client, config, formatTime(resetMs, config.format));
           sendOverrunColor(config, client, false);
@@ -1850,7 +1888,12 @@ export const useCanvasStore = create<CanvasStore>()(
           // Also clear scoreLog/cards — the center stat pill (tries/cards
           // tally) is derived from them, so leaving them behind after a
           // reset would show stale counts alongside a zeroed score.
+          const before = {
+            scoreA: config.scoreA, scoreB: config.scoreB,
+            scoreLog: config.scoreLog, cardsA: config.cardsA, cardsB: config.cardsB,
+          };
           updateWidgetConfig(widgetId, { scoreA: 0, scoreB: 0, scoreLog: [], cardsA: [], cardsB: [] });
+          useUndoStore.getState().pushUndo('Reset score', () => updateWidgetConfig(widgetId, before));
           {
             const { client } = useVmixStore.getState();
             const targets = config.vmixInputs?.length
@@ -1865,7 +1908,11 @@ export const useCanvasStore = create<CanvasStore>()(
           }
         },
 
-        clearWidgetScoreLog: (widgetId) => updateWidgetConfig(widgetId, { scoreLog: [] }),
+        clearWidgetScoreLog: (widgetId) => {
+          const before = findWidgetConfig(widgetId)?.scoreLog;
+          updateWidgetConfig(widgetId, { scoreLog: [] });
+          useUndoStore.getState().pushUndo('Cleared score log', () => updateWidgetConfig(widgetId, { scoreLog: before }));
+        },
 
         returnPlayerFromSinBin: (playerListWidgetId, playerId) => {
           const cfg = findWidgetConfig(playerListWidgetId);
@@ -1959,7 +2006,8 @@ export const useCanvasStore = create<CanvasStore>()(
                       fieldTeamA: cfg.fieldTeamA, fieldTeamB: cfg.fieldTeamB,
                       fieldShortA: cfg.fieldShortA, fieldShortB: cfg.fieldShortB,
                       fieldLogoA: cfg.fieldLogoA, fieldLogoB: cfg.fieldLogoB,
-                      fieldCompetition: cfg.fieldCompetition, fieldRound: cfg.fieldRound,
+                      fieldCompetition: cfg.fieldCompetition,
+                      fieldCategory: cfg.fieldCategory, fieldGroup: cfg.fieldGroup, fieldScheduledTime: cfg.fieldScheduledTime,
                     }]
                   : [];
               for (const t of targets) {
@@ -1973,7 +2021,9 @@ export const useCanvasStore = create<CanvasStore>()(
                 if (t.fieldLogoA && cfg.teamALogo) client.setImageField(t.inputKey, t.fieldLogoA, cfg.teamALogo);
                 if (t.fieldLogoB && cfg.teamBLogo) client.setImageField(t.inputKey, t.fieldLogoB, cfg.teamBLogo);
                 if (t.fieldCompetition && cfg.competition) client.setTextField(t.inputKey, t.fieldCompetition, cfg.competition);
-                if (t.fieldRound && cfg.subtitle) client.setTextField(t.inputKey, t.fieldRound, cfg.subtitle);
+                if (t.fieldCategory && cfg.category) client.setTextField(t.inputKey, t.fieldCategory, cfg.category);
+                if (t.fieldGroup && cfg.group) client.setTextField(t.inputKey, t.fieldGroup, cfg.group);
+                if (t.fieldScheduledTime && cfg.scheduledTime) client.setTextField(t.inputKey, t.fieldScheduledTime, cfg.scheduledTime);
               }
             }
           }
@@ -2022,6 +2072,7 @@ export const useCanvasStore = create<CanvasStore>()(
             }
           }
           set({ matchDataSnapshot: snapshot });
+          useUndoStore.getState().pushUndo('Reset match data', () => get().restoreMatchData());
         },
 
         restoreMatchData: () => {
@@ -2212,6 +2263,11 @@ export function initCanvasSync() {
       case 'renamePage': {
         const [pid, name] = msg.args as [string, string];
         store.renamePage(pid, name);
+        break;
+      }
+      case 'setPageTournament': {
+        const [pid, tid] = msg.args as [string, string | undefined];
+        useCanvasStore.setState((s) => ({ pages: s.pages.map((p) => p.id === pid ? { ...p, tournamentId: tid } : p) }));
         break;
       }
     }

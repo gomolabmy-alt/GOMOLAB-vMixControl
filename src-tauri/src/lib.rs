@@ -24,6 +24,17 @@ pub(crate) fn get_lan_ip() -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be registered before the deep-link plugin: on Windows/Linux a
+        // gomolab:// click while the app is already running spawns a SECOND
+        // OS process (macOS instead fires an in-process reopen event) — this
+        // plugin detects the already-running instance, forwards the new
+        // process's argv into it, and exits the second process. Without it,
+        // that second process would try to rebind the fixed sync-server
+        // ports below (see server::start_servers) and collide.
+        .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_os::init())
         .setup(|app| {
             let lan_ip = get_lan_ip();
 
@@ -91,6 +102,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_build_number,
+            commands::get_machine_id,
             commands::http_get,
             commands::tcp_test,
             commands::diagnose_vmix,

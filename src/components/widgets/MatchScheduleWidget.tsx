@@ -2,9 +2,11 @@ import { useMemo, useState, useEffect, useRef, useContext } from 'react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useMatchScheduleStore } from '../../stores/matchScheduleStore';
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
+import { useAppSettings } from '../../stores/appSettingsStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
-import { guardScoreboardOverwrite, buildLoadMatchPatch } from '../../utils/scoreboardSnapshot';
+import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, findDuplicateResult } from '../../utils/scoreboardSnapshot';
 import { ConfirmButton } from '../ConfirmButton';
+import { ConfirmModal } from '../ConfirmModal';
 import { CanvasActionContext } from '../../lib/canvasContext';
 
 interface Props {
@@ -44,14 +46,48 @@ function formatLate(ms: number): string {
   return `${d}d ${h % 24}h`;
 }
 
-export function MatchScheduleWidget({ config }: Props) {
+export function MatchScheduleWidget({ widgetId, config }: Props) {
   // CanvasActionContext is only provided on the commentator canvas — a
   // commentator shouldn't be able to wipe/reset the tournament's schedule.
   const isCommentator = !!useContext(CanvasActionContext);
   const { pages, updateWidgetConfig, resetWidgetTimer } = useCanvasStore();
-  const { matches, markSent, unmarkSent, resetAllSent, clearMatches } = useMatchScheduleStore();
-  const { addResult } = useMatchResultsStore();
+  const { matches: allMatches, markSent, unmarkSent, resetAllSent, clearMatches } = useMatchScheduleStore();
+  const { results: savedResults, addResult, deleteResult } = useMatchResultsStore();
+  const [undoTarget, setUndoTarget] = useState<{ matchId: string; resultId: string } | null>(null);
+
+  // Undoing "sent" would otherwise silently orphan an already-saved result —
+  // confirm first when one exists; no result → just undo immediately.
+  const handleUndoSent = (m: typeof allMatches[number]) => {
+    const existing = findDuplicateResult(savedResults, {
+      linkedScheduleMatchId: m.id, linkedTournamentId: m.tournamentId,
+      subtitle: m.round, teamAName: m.teamAName, teamBName: m.teamBName,
+    });
+    if (existing) setUndoTarget({ matchId: m.id, resultId: existing.id });
+    else unmarkSent(m.id);
+  };
+  const { canvasTournamentId, canvasVenue } = useAppSettings();
   const title: string = config.title ?? 'Upcoming Matches';
+
+  // Scoping: a widget with its own Tournament picked in its config filters
+  // independently (so several "Upcoming Matches" widgets on one canvas can
+  // each pin to a different venue/category/group at once); otherwise it
+  // falls back to the canvas's own bound tournament (a canvas is normally
+  // dedicated to one tournament), then the title bar's 🏟 picker — this
+  // install's shared default scope.
+  const pageTournamentId = pages.find(p => p.widgets.some(w => w.id === widgetId))?.tournamentId;
+  const effectiveTournamentId: string = config.filterTournamentId || pageTournamentId || canvasTournamentId;
+  const effectiveVenue: string = config.filterTournamentId ? (config.filterVenue ?? '') : canvasVenue;
+  const effectiveCategory: string = config.filterCategory ?? '';
+  const effectiveGroup: string = config.filterGroup ?? '';
+  const matches = useMemo(
+    () => allMatches.filter(m =>
+      (!effectiveTournamentId || m.tournamentId === effectiveTournamentId) &&
+      (!effectiveVenue || m.venue === effectiveVenue) &&
+      (!effectiveCategory || m.category === effectiveCategory) &&
+      (!effectiveGroup || m.group === effectiveGroup)
+    ),
+    [allMatches, effectiveTournamentId, effectiveVenue, effectiveCategory, effectiveGroup]
+  );
 
   const allWidgets = useMemo(() => pages.flatMap(p => p.widgets), [pages]);
   const targetScoreboard = config.linkedScoreboardId
@@ -59,6 +95,7 @@ export function MatchScheduleWidget({ config }: Props) {
     : null;
 
   const sentCount = matches.filter(m => m.sentAt).length;
+  const liveFixtureIds = useLiveFixtureIds();
 
   // Ticks the "how late" durations forward against the local system clock.
   const [now, setNow] = useState(() => Date.now());
@@ -100,14 +137,14 @@ export function MatchScheduleWidget({ config }: Props) {
                   label="↺ Reset"
                   confirmLabel="Reset"
                   message="Mark all fixtures as not sent?"
-                  onConfirm={resetAllSent}
+                  onConfirm={() => resetAllSent(matches.map(m => m.id))}
                 />
                 <ConfirmButton
                   className="wgt-ms-tool-btn wgt-ms-tool-btn--danger"
                   label="🗑 Clear"
                   confirmLabel="Delete all"
-                  message="Delete all scheduled fixtures? This can't be undone."
-                  onConfirm={clearMatches}
+                  message="Delete all scheduled fixtures?"
+                  onConfirm={() => clearMatches(matches.map(m => m.id))}
                 />
               </>
             )}
@@ -115,7 +152,11 @@ export function MatchScheduleWidget({ config }: Props) {
         )}
       </div>
       {matches.length === 0 ? (
-        <div className="wgt-ms-empty">No scheduled matches yet — add fixtures in 🏆 DB → Schedule</div>
+        <div className="wgt-ms-empty">
+          {allMatches.length > 0 && (effectiveTournamentId || effectiveVenue || effectiveCategory || effectiveGroup)
+            ? 'No fixtures match this filter — check this widget\'s Tournament/Venue/Category/Group settings (or the title bar 🏟 picker)'
+            : 'No scheduled matches yet — add fixtures in 🏆 DB → Schedule'}
+        </div>
       ) : (
         // fade-y: content dissolves into the top/bottom edge instead of
         // clipping abruptly, via a mask-image gradient on the scroll container.
@@ -126,22 +167,26 @@ export function MatchScheduleWidget({ config }: Props) {
             const lateStr = isLate ? formatLate(now - scheduledTs!) : null;
 
             const isNext = m.id === nextMatchId;
+            const isLive = liveFixtureIds.has(m.id);
 
             return (
               <div
                 key={m.id}
                 ref={isNext ? nextRowRef : undefined}
-                className={`wgt-ms-row${m.sentAt ? ' wgt-ms-row--sent' : ''}${isLate ? ' wgt-ms-row--late' : ''}${isNext ? ' wgt-ms-row--next' : ''}`}
+                className={`wgt-ms-row${m.sentAt ? ' wgt-ms-row--sent' : ''}${isLate ? ' wgt-ms-row--late' : ''}${isNext ? ' wgt-ms-row--next' : ''}${isLive ? ' wgt-ms-row--live' : ''}`}
               >
                 <div className="wgt-ms-row-meta">
                   <span className="wgt-ms-date">{m.date}{m.time ? ` · ${m.time}` : ''}</span>
                   {m.competition && <span className="wgt-ms-comp">{m.competition}{m.round ? ` — ${m.round}` : ''}</span>}
                 </div>
 
-                {isLate && (
+                {isLive && (
+                  <div className="wgt-ms-live-badge">● LIVE — on scoreboard</div>
+                )}
+                {isLate && !isLive && (
                   <div className="wgt-ms-late-badge">⏰ LATE — {lateStr} behind schedule</div>
                 )}
-                {isNext && !isLate && (
+                {isNext && !isLate && !isLive && (
                   <div className="wgt-ms-next-badge">▶ NEXT UP</div>
                 )}
 
@@ -161,15 +206,15 @@ export function MatchScheduleWidget({ config }: Props) {
                   </div>
                 </div>
 
-                {(m.venue || m.broadcaster) && (
+                {(m.venue || m.group || m.category) && (
                   <div className="wgt-ms-footer">
                     {m.venue && <span>{m.venue}</span>}
-                    {m.broadcaster && <span>{m.broadcaster}</span>}
+                    {(m.category || m.group) && <span>{[m.category, m.group].filter(Boolean).join(' · ')}</span>}
                   </div>
                 )}
 
                 {m.sentAt ? (
-                  <button className="wgt-ms-send wgt-ms-send--sent" onClick={() => unmarkSent(m.id)} title="Mark as not sent">
+                  <button className="wgt-ms-send wgt-ms-send--sent" onClick={() => handleUndoSent(m)} title="Mark as not sent">
                     ✓ Sent — click to undo
                   </button>
                 ) : (
@@ -186,6 +231,16 @@ export function MatchScheduleWidget({ config }: Props) {
             );
           })}
         </div>
+      )}
+      {undoTarget && (
+        <ConfirmModal
+          title="Undo sent?"
+          message="This fixture has a saved result. Undoing will remove that result and mark the fixture as not sent."
+          confirmLabel="Undo & Remove Result"
+          danger
+          onConfirm={() => { deleteResult(undoTarget.resultId); unmarkSent(undoTarget.matchId); setUndoTarget(null); }}
+          onCancel={() => setUndoTarget(null)}
+        />
       )}
     </div>
   );

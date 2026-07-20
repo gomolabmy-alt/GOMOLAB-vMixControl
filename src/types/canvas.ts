@@ -26,7 +26,9 @@ export type WidgetType =
   | 'pomodoro'
   | 'image-display'
   | 'recent-matches'
-  | 'match-schedule';
+  | 'match-schedule'
+  | 'standings'
+  | 'bracket';
 
 export type TimelineEventType = 'score' | 'yellow-card' | 'orange-card' | 'red-card' | 'substitution' | 'period' | 'custom';
 
@@ -60,6 +62,10 @@ export interface CanvasPage {
   id: string;
   name: string;
   widgets: CanvasWidget[];
+  /** Tournament this canvas is dedicated to — since a canvas is normally
+   *  built for one specific tournament, widgets on it fall back to this
+   *  instead of each needing its own "which tournament" picker. */
+  tournamentId?: string;
 }
 
 export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config: Record<string, any> }> = {
@@ -353,7 +359,15 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
   },
   pomodoro: {
     w: 360, h: 200,
-    config: { focusMins: 25, breakMins: 5, totalCycles: 4 },
+    config: {
+      label: 'Custom Timer',
+      timerMode: 'countdown',
+      durationMs: 10 * 60 * 1000,
+      currentMs: 10 * 60 * 1000,
+      running: false,
+      showClock: false,
+      clockFormat: '24h',
+    },
   },
   'image-display': {
     w: 240, h: 160,
@@ -375,6 +389,21 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       linkedScoreboardId: '',
     },
   },
+  standings: {
+    w: 360, h: 320,
+    config: {
+      title: 'Standings',
+      filterTournamentId: '',
+      filterCategory: '',
+    },
+  },
+  bracket: {
+    w: 520, h: 400,
+    config: {
+      filterTournamentId: '',
+      filterCategory: '',
+    },
+  },
 };
 
 export const WIDGET_TYPE_LABELS: Record<WidgetType, string> = {
@@ -391,10 +420,12 @@ export const WIDGET_TYPE_LABELS: Record<WidgetType, string> = {
   'vmix-titles': 'vMix Titles',
   'rugby-lineup': 'Rugby Lineup',
   'card-lower-third': 'Card LT',
-  pomodoro: 'Pomodoro',
+  pomodoro: 'Custom Timer',
   'image-display': 'Image',
   'recent-matches': 'Latest Results',
   'match-schedule': 'Match Schedule',
+  standings: 'Standings',
+  bracket: 'Bracket',
 };
 
 export const WIDGET_TYPE_ICONS: Record<WidgetType, string> = {
@@ -411,8 +442,10 @@ export const WIDGET_TYPE_ICONS: Record<WidgetType, string> = {
   'vmix-titles': 'Aa',
   'rugby-lineup': '🏉',
   'card-lower-third': '🟨',
-  pomodoro: '🍅',
+  pomodoro: '⏲',
   'image-display': '🖼',
   'recent-matches': '🏆',
   'match-schedule': '📅',
+  standings: '📊',
+  bracket: '🌳',
 };

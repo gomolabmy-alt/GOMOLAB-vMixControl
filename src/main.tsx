@@ -9,6 +9,7 @@ import { useTournamentStore, initTournamentSync } from './stores/tournamentStore
 import { useTeamDbStore } from './stores/teamDbStore';
 import { useMatchScheduleStore } from './stores/matchScheduleStore';
 import { useMatchResultsStore } from './stores/matchResultsStore';
+import { useAuthStore } from './stores/authStore';
 
 class RootErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null };
@@ -49,6 +50,19 @@ const isDesktopHost = typeof window !== 'undefined' && (
   '__TAURI_INTERNALS__' in window ||
   ((import.meta as any).env?.DEV && window.location.hostname === 'localhost')
 );
+
+// Sign-in gate only applies to the actual packaged app — a plain Tauri
+// runtime check, not the broader dev/localhost fallback above (the deep-link
+// plugin only exists inside a real Tauri process).
+if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+  import('./lib/deepLink').then(({ initDeepLink }) => initDeepLink());
+  useAuthStore.getState().verify();
+  // Re-checks periodically (not just at launch) so a remote "Force Sign Out"
+  // from the Desktop Sessions admin page actually takes effect without the
+  // user needing to relaunch the app.
+  setInterval(() => useAuthStore.getState().verify(), 120_000);
+}
+
 syncClient.connect(isDesktopHost ? () => ({
   type: 'FULL_STATE' as const,
   canvas: (() => {

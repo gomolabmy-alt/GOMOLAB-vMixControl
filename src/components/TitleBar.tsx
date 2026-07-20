@@ -2,11 +2,97 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useVmixStore } from '../stores/vmixStore';
 import { useCanvasStore } from '../stores/canvasStore';
 import { useAppSettings } from '../stores/appSettingsStore';
+import { useTournamentStore } from '../stores/tournamentStore';
+import { useAuthStore } from '../stores/authStore';
 import { syncClient } from '../lib/syncClient';
 import type { VmixConnectionEntry } from '../types/vmix';
 import type { SavedConnection } from '../types/vmix';
 
 type ScanState = 'idle' | 'scanning' | 'done';
+
+// Local-only "which venue is this install running" scope — lets a
+// multi-venue tournament's shared, synced schedule be filtered down to just
+// this physical install's fixtures for the canvas's Upcoming Matches widget
+// and "Load Match" picker, without affecting what any other venue's install
+// (or the Tournament Database itself) sees.
+function TitleBarVenueScope() {
+  const { tournaments } = useTournamentStore();
+  const { canvasTournamentId, setCanvasTournamentId, canvasVenue, setCanvasVenue } = useAppSettings();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const activeTournament = tournaments.find(t => t.id === canvasTournamentId);
+  const venues = activeTournament?.venues ?? [];
+  const label = activeTournament ? (canvasVenue || 'All Venues') : 'All Tournaments';
+
+  return (
+    <div className="titlebar-venue" ref={ref}>
+      <button className="titlebar-venue-btn" onClick={() => setOpen(o => !o)} title="Filter Upcoming Matches / Load Match to one tournament & venue">
+        🏟 <span className="titlebar-venue-label">{label}</span>
+      </button>
+      {open && (
+        <div className="titlebar-venue-dropdown">
+          <label className="titlebar-venue-field-label">Tournament</label>
+          <select className="titlebar-venue-select" value={canvasTournamentId} onChange={e => setCanvasTournamentId(e.target.value)}>
+            <option value="">All Tournaments</option>
+            {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+          {activeTournament && (
+            <>
+              <label className="titlebar-venue-field-label">Venue</label>
+              <select className="titlebar-venue-select" value={canvasVenue} onChange={e => setCanvasVenue(e.target.value)} disabled={venues.length === 0}>
+                <option value="">All Venues</option>
+                {venues.map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+              {venues.length === 0 && <div className="titlebar-venue-hint">No venues set up — 🏆 DB → Schedule tab</div>}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TitleBarAuthChip() {
+  const { user, signOut } = useAuthStore();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  if (!user) return null;
+
+  return (
+    <div className="titlebar-venue" ref={ref}>
+      <button className="titlebar-venue-btn" onClick={() => setOpen(o => !o)} title={user.email}>
+        👤 <span className="titlebar-venue-label">{user.name}</span>
+      </button>
+      {open && (
+        <div className="titlebar-venue-dropdown">
+          <button className="titlebar-venue-select" style={{ cursor: 'pointer' }} onClick={() => { signOut(); setOpen(false); }}>
+            Sign Out
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function TitleBarClock() {
   const { clockTimeZone, setClockTimeZone } = useAppSettings();
@@ -488,6 +574,14 @@ export function TitleBar() {
 
       {/* Right — transport buttons + connections */}
       <div className="titlebar-right">
+        {isTauri && (
+          <>
+            <TitleBarAuthChip />
+            <div className="titlebar-sep" />
+          </>
+        )}
+        <TitleBarVenueScope />
+        <div className="titlebar-sep" />
         <TitleBarClock />
         <div className="titlebar-sep" />
 

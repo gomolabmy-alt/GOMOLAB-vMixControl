@@ -4,6 +4,7 @@ import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
+import { useUndoStore } from '../../stores/undoStore';
 import { SPORT_DEFAULTS, DEFAULT_STAFF_ROLES } from '../../types/tournament';
 import type { Player, StaffMember } from '../../types/tournament';
 
@@ -48,7 +49,10 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
 
   // Tournament link is now settings-only (maxOnField/maxSubs/etc); team
   // identity + roster comes directly from the linked SavedTeam (teamDbStore).
-  const tournament = tournaments.find(t => t.id === cfg.linkedTournamentId);
+  // A canvas is normally dedicated to one tournament — falls back to that
+  // instead of requiring "which tournament" to be picked on every widget.
+  const pageTournamentId = pages.find(p => p.widgets.some(w => w.id === widgetId))?.tournamentId;
+  const tournament = tournaments.find(t => t.id === (cfg.linkedTournamentId || pageTournamentId));
   const side: 'A' | 'B' = cfg.teamSide ?? 'A';
   const team = teamDbTeams.find(t => t.id === cfg.linkedTeamId);
   const players: Player[] = team?.players ?? [];
@@ -577,7 +581,13 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
 
   const resetSession = () => {
     if (!confirm('Reset all playtime data and cards?')) return;
+    const before = {
+      onField: cfg.onField, entries: cfg.entries, accumulated: cfg.accumulated,
+      playerCards: cfg.playerCards, sinBinEntries: cfg.sinBinEntries, orangeCardEntries: cfg.orangeCardEntries,
+      subbedOnPlayers: cfg.subbedOnPlayers,
+    };
     updateWidgetConfig(widgetId, { onField: [], entries: {}, accumulated: {}, playerCards: {}, sinBinEntries: {}, orangeCardEntries: {}, subbedOnPlayers: [] });
+    useUndoStore.getState().pushUndo('Reset playtime & cards', () => updateWidgetConfig(widgetId, before));
   };
 
   // ── Render helpers ────────────────────────────────────────────────

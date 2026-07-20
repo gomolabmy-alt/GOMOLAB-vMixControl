@@ -63,9 +63,12 @@ interface Props {
    *  first (a much shorter, more relevant list) — the full server image
    *  library is still one click away via "Browse full library". */
   tournamentId?: string;
+  /** Compact mode only: shows the thumbnail read-only — no click to open the
+   *  library, no "remove logo" button. */
+  disabled?: boolean;
 }
 
-export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbContent, thumbSize, tournamentId }: Props) {
+export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbContent, thumbSize, tournamentId, disabled }: Props) {
   const [showLibrary, setShowLibrary] = useState(false);
   const [browseAll, setBrowseAll] = useState(false);
   const [libPos, setLibPos] = useState<{ left: number; bottom: number } | null>(null);
@@ -290,19 +293,19 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
       <div ref={anchorRef} style={{ position: 'relative', display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <div
           className="tm-team-logo-thumb-wrap"
-          onClick={toggleLibrary}
-          style={thumbContent ? { cursor: 'pointer', position: 'relative', width: w, height: h, overflow: 'hidden' } : {
-            cursor: 'pointer', position: 'relative', width: w, height: h,
+          onClick={disabled ? undefined : toggleLibrary}
+          style={thumbContent ? { cursor: disabled ? 'default' : 'pointer', position: 'relative', width: w, height: h, overflow: 'hidden' } : {
+            cursor: disabled ? 'default' : 'pointer', position: 'relative', width: w, height: h,
             border: '1px dashed var(--border)', borderRadius: 4, background: '#111',
             display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}
-          title={value ? 'Change logo' : 'Pick logo'}
+          title={disabled ? undefined : (value ? 'Change logo' : 'Pick logo')}
         >
           {thumbContent ?? (value
             ? <img src={resolveImageUrl(value)} alt="logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
             : <span style={{ fontSize: 18, opacity: 0.4 }}>🖼</span>
           )}
         </div>
-        {value && !thumbContent && (
+        {value && !thumbContent && !disabled && (
           <button className="tm-team-logo-clear" title="Remove logo" onClick={() => onChange('')}>×</button>
         )}
         <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileChange} />

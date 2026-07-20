@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+import { useUndoStore } from './undoStore';
 
 // A saved snapshot of a finished match, captured from a scoreboard widget's
 // current state at the moment "Save Result" is pressed — powers the
@@ -15,6 +16,10 @@ export interface SavedMatchResult {
   time?: string;
   competition?: string;
   round?: string;
+  /** Tournament category (e.g. "Men", "U21") this result belongs to — carried
+   *  over from the originating fixture so a same-named team entered in
+   *  multiple categories doesn't get its stats/history mixed together. */
+  category?: string;
   teamAName: string;
   teamAShortName?: string;
   teamALogo?: string;
@@ -30,11 +35,36 @@ export interface SavedMatchResult {
    *  originating Schedule fixture so Results/standings can badge it. */
   matchType?: 'bye' | 'walkover';
   walkoverLoser?: 'A' | 'B';
-  /** Set only for bye/walkover results auto-generated directly from the
-   *  Schedule tab (no live scoreboard match ever ran) — lets the sync effect
-   *  find-and-update this same result instead of creating duplicates each
-   *  time the fixture's score changes. Normal played results never set this. */
+  /** The ScheduledMatch this result came from, when there was one (bye/walkover
+   *  auto-generated results, or a normal result saved from a scoreboard that
+   *  had a fixture loaded onto it via Load Match/Send to Scoreboard) — lets a
+   *  future save for the same fixture find-and-update this result instead of
+   *  creating a duplicate. Unset for results entered with no linked fixture. */
   sourceScheduleId?: string;
+  /** Trimmed snapshot of the scoreboard's live scoreLog at save time — every
+   *  score event that made up the final score (e.g. Try/Conversion/Penalty),
+   *  not just the total. Powers head-to-head breakdowns. Absent for
+   *  bye/walkover results (no live match ever ran) and any result saved
+   *  before this field existed. */
+  scoreLog?: { team: 'A' | 'B'; action: string; points: number; scorer?: string; jerseyNo?: string; timeStr?: string }[];
+  /** Kick-by-kick decider recorded when a match stayed level and a shootout
+   *  was used to decide it — soccer penalty shootout, rugby place-kick
+   *  competition, or any sport's equivalent. Does NOT change scoreA/scoreB
+   *  (which stay as the tied regulation score); only decides the winner for
+   *  bracket advancement/standings. Absent for any match not decided by one. */
+  shootout?: {
+    kicks: { a?: boolean; b?: boolean }[]; // chronological rounds, regulation + sudden death
+    scoreA: number; // total makes by A across all rounds
+    scoreB: number;
+    winner: 'A' | 'B';
+  };
+  /** Cards given during the match, captured from the linked Player Picker
+   *  lists at save time (mirrors the scoreLog capture above). Absent when no
+   *  Player Picker was linked or no cards were given. */
+  cards?: { team: 'A' | 'B'; type: 'yellow' | 'orange' | 'red' }[];
+  /** Which physical venue pushed this result, for multi-venue cloud sync
+   *  (see src/lib/cloudSync.ts) — same convention as ScheduledMatch.venueLabel. */
+  venueLabel?: string;
   savedAt: number;
 }
 
@@ -49,7 +79,7 @@ interface MatchResultsStore {
 
 export const useMatchResultsStore = create<MatchResultsStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       results: [],
 
       addResult: (result) => {
@@ -62,9 +92,19 @@ export const useMatchResultsStore = create<MatchResultsStore>()(
         results: s.results.map(r => r.id === id ? { ...r, ...patch } : r),
       })),
 
-      deleteResult: (id) => set(s => ({ results: s.results.filter(r => r.id !== id) })),
+      deleteResult: (id) => {
+        const result = get().results.find(r => r.id === id);
+        set(s => ({ results: s.results.filter(r => r.id !== id) }));
+        if (result) useUndoStore.getState().pushUndo(`Deleted result "${result.teamAName} vs ${result.teamBName}"`, () =>
+          useMatchResultsStore.setState(s => ({ results: [result, ...s.results] })));
+      },
 
-      clearResults: () => set({ results: [] }),
+      clearResults: () => {
+        const removed = get().results.slice();
+        set({ results: [] });
+        if (removed.length > 0) useUndoStore.getState().pushUndo(`Cleared ${removed.length} result${removed.length === 1 ? '' : 's'}`, () =>
+          useMatchResultsStore.setState(s => ({ results: [...removed, ...s.results] })));
+      },
 
       restoreResults: (results) => set({ results: results as SavedMatchResult[] }),
     }),

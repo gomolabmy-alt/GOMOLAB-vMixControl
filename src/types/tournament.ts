@@ -70,6 +70,11 @@ export interface Tournament {
    *  than one category duplicates its team entry per category since rosters
    *  differ (see teamDbStore.duplicateTeam). */
   categories?: string[];
+  /** Freely-defined venues (e.g. "Court 1", "Main Hall") — each fixture in
+   *  the Schedule tab picks one via ScheduledMatch.venue. Lets a multi-venue
+   *  tournament's schedule be filtered down to a single venue per physical
+   *  install (see appSettingsStore's canvasTournamentId/canvasVenue). */
+  venues?: string[];
   /** How the next team is picked from the current pot — 'random' (default)
    *  picks blindly; 'manual' lets the operator click a specific team chip in
    *  the current pot to draw it (e.g. a physical ball was already pulled by
@@ -92,6 +97,20 @@ export interface Tournament {
    *  and the digit + ".Text" suffix is stripped to a reusable prefix, so
    *  team N lands in `{prefix}N.Text`). */
   groupListVmix?: GroupListVmixTarget[];
+  /** Multi-venue cloud sync opt-in — local-only, deliberately never
+   *  overwritten by an incoming cloud pull (see src/lib/cloudSync.ts), so
+   *  each device decides independently whether its edits to this tournament
+   *  get shared. A tournament that arrives via a pull (created by another
+   *  venue) starts with this true, since its presence in the cloud already
+   *  means some venue opted it in. */
+  cloudSyncEnabled?: boolean;
+  /** The eventmanagementsystem Event this tournament is linked to (via
+   *  "Load Shared Event") — lets the website's live scoring overview page
+   *  find this tournament's data. Undefined for a purely local tournament. */
+  eventId?: string;
+  /** The linked event's name, captured at link time purely for display (so
+   *  the toolbar can show which event without re-fetching the event list). */
+  eventName?: string;
 }
 
 export interface GroupListVmixTarget {

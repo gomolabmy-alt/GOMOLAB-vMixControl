@@ -1,10 +1,10 @@
-import { useMemo, useState, useRef, useEffect, useContext } from 'react';
+import { useMemo, useState, useRef, useEffect } from 'react';
 import { useMatchResultsStore, type SavedMatchResult } from '../../stores/matchResultsStore';
+import { useCanvasStore } from '../../stores/canvasStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
-import { ConfirmButton } from '../ConfirmButton';
-import { CanvasActionContext } from '../../lib/canvasContext';
 
 interface Props {
+  widgetId: string;
   config: Record<string, any>;
   w: number;
   h: number;
@@ -60,17 +60,24 @@ function EditableSpan({ value, onChange, className, type = 'text', title, placeh
   );
 }
 
-export function RecentMatchesWidget({ config }: Props) {
-  // CanvasActionContext is only provided on the commentator canvas — a
-  // commentator shouldn't be able to wipe the tournament's saved results.
-  const isCommentator = !!useContext(CanvasActionContext);
-  const { results, updateResult, deleteResult, clearResults } = useMatchResultsStore();
+export function RecentMatchesWidget({ widgetId, config }: Props) {
+  const { results: allResults, updateResult, deleteResult } = useMatchResultsStore();
+  const { pages } = useCanvasStore();
   const maxResults: number = config.maxResults ?? 8;
   const groupByCompetition: boolean = config.groupByCompetition ?? true;
   const showDate: boolean = config.showDate ?? true;
   const title: string = config.title ?? 'Latest Results';
   const useFullName: boolean = config.nameDisplay === 'full';
   const compact: boolean = config.compactSize ?? false;
+
+  // A canvas is normally dedicated to one tournament — falls back to that
+  // instead of requiring "which tournament" to be picked on every widget.
+  const pageTournamentId = pages.find(p => p.widgets.some(w => w.id === widgetId))?.tournamentId;
+  const effectiveTournamentId: string | undefined = config.filterTournamentId || pageTournamentId;
+  const results = useMemo(
+    () => effectiveTournamentId ? allResults.filter(r => r.tournamentId === effectiveTournamentId) : allResults,
+    [allResults, effectiveTournamentId]
+  );
 
   const shown = useMemo(() => results.slice(0, maxResults), [results, maxResults]);
 
@@ -90,15 +97,6 @@ export function RecentMatchesWidget({ config }: Props) {
     <div className={`wgt-rm${compact ? ' wgt-rm--compact' : ''}`}>
       <div className="wgt-rm-header">
         <span>{title}</span>
-        {results.length > 0 && !isCommentator && (
-          <ConfirmButton
-            className="wgt-rm-tool-btn"
-            label="🗑 Clear"
-            confirmLabel="Delete all"
-            message="Delete all saved results? This can't be undone."
-            onConfirm={clearResults}
-          />
-        )}
       </div>
       {shown.length === 0 ? (
         <div className="wgt-rm-empty">No saved results yet — use "💾 Save Result" on a scoreboard widget</div>
@@ -163,6 +161,7 @@ export function RecentMatchesWidget({ config }: Props) {
                   </div>
                   <div className="wgt-rm-round-row">
                     {r.matchType && <span className="wgt-rm-type-badge">{r.matchType === 'bye' ? 'BYE' : 'W/O'}</span>}
+                    {r.shootout && <span className="wgt-rm-type-badge">{r.shootout.scoreA}-{r.shootout.scoreB} PENS</span>}
                     <EditableSpan
                       className="wgt-rm-round"
                       placeholder="Round/Group"

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+import { useUndoStore } from './undoStore';
 
 // Upcoming fixtures — separate from matchResultsStore (completed matches with
 // a final score). A scheduled match has no score; picking one from the
@@ -14,7 +15,17 @@ export interface ScheduledMatch {
   competition?: string;
   round?: string;
   venue?: string;
-  broadcaster?: string;
+  /** Tournament category (e.g. "Men", "U21") this fixture belongs to. */
+  category?: string;
+  /** Draw group (e.g. "Group A") this fixture belongs to. */
+  group?: string;
+  /** Manual tiebreaker for display order among fixtures sharing the same
+   *  date (very common — every group/category's "Round 1" is deliberately
+   *  scheduled on the same day). The Schedule tab's Move Up/Down swaps this
+   *  (along with date/time) between two fixtures — without it, reordering
+   *  two same-date fixtures was a no-op, since the sort below only ever
+   *  looked at `date`. */
+  sortIndex?: number;
   teamAName: string;
   teamAShortName?: string;
   teamALogo?: string;
@@ -40,6 +51,23 @@ export interface ScheduledMatch {
    *  sent to had "💾 Save Result" pressed, or auto-saved on overwrite) — marks
    *  it fully completed, distinct from just having been sent. */
   completedAt?: number;
+  /** Which physical venue pushed this fixture, for multi-venue cloud sync
+   *  (see src/lib/cloudSync.ts) — stamped from the pushing device's own
+   *  App Settings "Venue" field (appSettingsStore's `canvasVenue`), shown as
+   *  a small badge so an operator can tell which venue a merged-in row came
+   *  from. Undefined for fixtures that have never been pushed/pulled. */
+  venueLabel?: string;
+}
+
+// sortIndex is the real ordering — an explicit, manually-arrangeable
+// sequence (via the Schedule tab's Move Up/Down) independent of the
+// fixture's calendar date, since many fixtures deliberately share the same
+// date (every group/category's Round 1 lines up on the same day) and the
+// operator wants direct control over running order regardless of that.
+// Date is only a fallback tiebreaker for legacy fixtures that predate this
+// field (both would tie at sortIndex 0).
+export function sortMatches(a: ScheduledMatch, b: ScheduledMatch): number {
+  return ((a.sortIndex ?? 0) - (b.sortIndex ?? 0)) || a.date.localeCompare(b.date);
 }
 
 interface MatchScheduleStore {
@@ -50,46 +78,67 @@ interface MatchScheduleStore {
   markSent: (id: string) => void;
   unmarkSent: (id: string) => void;
   markCompleted: (id: string) => void;
-  resetAllSent: () => void;
-  clearMatches: () => void;
+  /** Resets sentAt/completedAt on every match, or only those in `ids` when given
+   *  (e.g. the widget's currently venue-filtered view, so a scoped operator
+   *  can't reset fixtures belonging to a different venue they can't even see). */
+  resetAllSent: (ids?: string[]) => void;
+  /** Deletes every match, or only those in `ids` when given — same scoping reason. */
+  clearMatches: (ids?: string[]) => void;
   restoreMatches: (matches: unknown[]) => void;
 }
 
 export const useMatchScheduleStore = create<MatchScheduleStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       matches: [],
 
       addMatch: (match) => {
         const id = crypto.randomUUID();
-        set(s => ({ matches: [...s.matches, { ...match, id }].sort((a, b) => a.date.localeCompare(b.date)) }));
+        set(s => {
+          const nextSortIndex = s.matches.reduce((max, m) => Math.max(max, m.sortIndex ?? 0), 0) + 1;
+          return { matches: [...s.matches, { ...match, id, sortIndex: match.sortIndex ?? nextSortIndex }].sort(sortMatches) };
+        });
         return id;
       },
 
       updateMatch: (id, patch) => set(s => ({
-        matches: s.matches.map(m => m.id === id ? { ...m, ...patch } : m)
-          .sort((a, b) => a.date.localeCompare(b.date)),
+        matches: s.matches.map(m => m.id === id ? { ...m, ...patch } : m).sort(sortMatches),
       })),
 
-      deleteMatch: (id) => set(s => ({ matches: s.matches.filter(m => m.id !== id) })),
+      deleteMatch: (id) => {
+        const match = get().matches.find(m => m.id === id);
+        set(s => ({ matches: s.matches.filter(m => m.id !== id) }));
+        if (match) useUndoStore.getState().pushUndo(`Deleted fixture "${match.teamAName} vs ${match.teamBName}"`, () =>
+          useMatchScheduleStore.setState(s => ({ matches: [...s.matches, match].sort(sortMatches) })));
+      },
 
       markSent: (id) => set(s => ({
         matches: s.matches.map(m => m.id === id ? { ...m, sentAt: Date.now() } : m),
       })),
 
+      // Clears completedAt alongside sentAt (matching resetAllSent's existing
+      // both-together behavior) — a fixture that's no longer "sent" shouldn't
+      // still read as "completed" either.
       unmarkSent: (id) => set(s => ({
-        matches: s.matches.map(m => m.id === id ? { ...m, sentAt: undefined } : m),
+        matches: s.matches.map(m => m.id === id ? { ...m, sentAt: undefined, completedAt: undefined } : m),
       })),
 
       markCompleted: (id) => set(s => ({
         matches: s.matches.map(m => m.id === id ? { ...m, completedAt: Date.now() } : m),
       })),
 
-      resetAllSent: () => set(s => ({
-        matches: s.matches.map(m => ({ ...m, sentAt: undefined, completedAt: undefined })),
+      resetAllSent: (ids) => set(s => ({
+        matches: s.matches.map(m => (!ids || ids.includes(m.id)) ? { ...m, sentAt: undefined, completedAt: undefined } : m),
       })),
 
-      clearMatches: () => set({ matches: [] }),
+      clearMatches: (ids) => {
+        const removed = ids ? get().matches.filter(m => ids.includes(m.id)) : get().matches.slice();
+        set(s => ({
+          matches: ids ? s.matches.filter(m => !ids.includes(m.id)) : [],
+        }));
+        if (removed.length > 0) useUndoStore.getState().pushUndo(`Cleared ${removed.length} fixture${removed.length === 1 ? '' : 's'}`, () =>
+          useMatchScheduleStore.setState(s => ({ matches: [...s.matches, ...removed].sort(sortMatches) })));
+      },
 
       restoreMatches: (matches) => set({ matches: matches as ScheduledMatch[] }),
     }),
@@ -104,6 +153,24 @@ export const useMatchScheduleStore = create<MatchScheduleStore>()(
       // FULL_STATE — never persist locally, or a reload could show stale
       // data before (or instead of) the synced copy.
       partialize: (s) => (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) ? {} : { matches: s.matches },
+      // v1: backfills `sortIndex` for every fixture saved before that field
+      // existed. Without this they'd ALL tie at sortIndex 0 — reordering any
+      // one of them relative to another would silently do nothing (or look
+      // like it "moved the wrong thing"), since the swap has nothing real to
+      // exchange. Seeds them in their old effective order (date, then id) so
+      // the pre-existing running order is preserved as the new baseline.
+      version: 1,
+      migrate: (persisted: any) => {
+        if (!persisted?.matches) return persisted;
+        const baseline = [...persisted.matches].sort((a: ScheduledMatch, b: ScheduledMatch) =>
+          a.date.localeCompare(b.date) || a.id.localeCompare(b.id)
+        );
+        const seeded = new Map(baseline.map((m: ScheduledMatch, i: number) => [m.id, m.sortIndex ?? i]));
+        return {
+          ...persisted,
+          matches: persisted.matches.map((m: ScheduledMatch) => ({ ...m, sortIndex: m.sortIndex ?? seeded.get(m.id) })),
+        };
+      },
     }
   )
 );

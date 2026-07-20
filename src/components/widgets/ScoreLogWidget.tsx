@@ -3,6 +3,7 @@ import { useCanvasStore } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useTeamDbStore } from '../../stores/teamDbStore';
+import { useUndoStore } from '../../stores/undoStore';
 import { buildActionSummary } from '../../utils/scoreActions';
 
 interface Props {
@@ -81,7 +82,10 @@ export function ScoreLogWidget({ config }: Props) {
   const dotColor = teamFilter === 'A' ? teamAColor : teamFilter === 'B' ? teamBColor : undefined;
 
   const clearLog = () => {
-    if (config.linkedScoreboardId) updateWidgetConfig(config.linkedScoreboardId, { scoreLog: [] });
+    if (!config.linkedScoreboardId) return;
+    const before = log;
+    updateWidgetConfig(config.linkedScoreboardId, { scoreLog: [] });
+    useUndoStore.getState().pushUndo('Cleared score log', () => updateWidgetConfig(config.linkedScoreboardId, { scoreLog: before }));
   };
 
   // vMix summary output

@@ -387,6 +387,16 @@ pub fn get_build_number() -> &'static str {
     env!("BUILD_NUMBER")
 }
 
+// The OS's own stable machine identifier (macOS IOPlatformUUID, Windows
+// MachineGuid, Linux /etc/machine-id) — survives app reinstalls/data resets,
+// unlike a randomly-generated id stored in app data. Sent alongside sign-in
+// so the web admin's Desktop Sessions page can recognize the same physical
+// machine across multiple logins/users.
+#[tauri::command]
+pub fn get_machine_id() -> Result<String, String> {
+    machine_uid::get().map_err(|e| e.to_string())
+}
+
 // ── vMix HTTP proxy ──────────────────────────────────────────────────────────
 
 #[tauri::command]

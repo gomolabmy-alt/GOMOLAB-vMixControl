@@ -5,17 +5,22 @@ import { useAppSettings } from '../stores/appSettingsStore';
 import { syncClient } from '../lib/syncClient';
 import { useVmixStore } from '../stores/vmixStore';
 import { ConfirmButton } from './ConfirmButton';
+import { EventPicker } from './EventPicker';
 import { useCanvasStore } from '../stores/canvasStore';
 import type { Tournament, SportType, TournamentSettings, TournamentGroup, TournamentPot, GroupListVmixTarget } from '../types/tournament';
 import { SPORT_LABELS, SPORT_POSITIONS, SPORT_DEFAULTS } from '../types/tournament';
 import type { Player } from '../types/tournament';
 import { LogoUrlPicker } from './LogoUrlPicker';
 import { InputPickerDropdown } from './WidgetConfigPanel';
+import {
+  generateRoundRobin, generateDoubleRoundRobin, generateKnockout, generateKnockoutFromSlots,
+  buildGroupKnockoutSlots, offsetRounds, shuffle, PLACEHOLDER_COLOR, type ScheduleTeamRef, type GeneratedFixture,
+} from '../lib/scheduleGen';
 import { useTeamDbStore, type SavedTeam } from '../stores/teamDbStore';
 import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
 import { useMatchResultsStore, type SavedMatchResult } from '../stores/matchResultsStore';
 import { resolveImageUrl, transparentLogoUrl } from '../lib/imageUrl';
-import { guardScoreboardOverwrite, buildLoadMatchPatch } from '../utils/scoreboardSnapshot';
+import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds } from '../utils/scoreboardSnapshot';
 
 // ── Import / Export helpers ───────────────────────────────────────────────────
 
@@ -52,8 +57,8 @@ function downloadCSV(header: string[], rows: string[][], filename: string) {
 function exportFixturesCSV(matches: ScheduledMatch[], tournamentName: string) {
   // Same column order the CSV importer expects, so an exported file can be
   // re-imported (or edited in Excel and brought back in) without remapping.
-  const header = ['Date', 'Time', 'Team A', 'Team B', 'Venue', 'Broadcaster', 'Round'];
-  const rows = matches.map(m => [m.date, m.time ?? '', m.teamAName, m.teamBName, m.venue ?? '', m.broadcaster ?? '', m.round ?? '']);
+  const header = ['Date', 'Time', 'Team A', 'Team B', 'Venue', 'Category', 'Group', 'Round'];
+  const rows = matches.map(m => [m.date, m.time ?? '', m.teamAName, m.teamBName, m.venue ?? '', m.category ?? '', m.group ?? '', m.round ?? '']);
   downloadCSV(header, rows, `${tournamentName.replace(/[^a-z0-9]/gi, '_')}_schedule.csv`);
 }
 
@@ -126,10 +131,10 @@ function parsePlayerFile(text: string): Omit<Player, 'id'>[] {
 
 interface ParsedFixtureRow {
   date: string; time?: string; teamAName: string; teamBName: string;
-  venue?: string; broadcaster?: string; round?: string;
+  venue?: string; category?: string; group?: string; round?: string;
 }
 
-// Expected columns: Date (YYYY-MM-DD), Time, Team A, Team B, Venue, Broadcaster, Round.
+// Expected columns: Date (YYYY-MM-DD), Time, Team A, Team B, Venue, Category, Group, Round.
 // Only Date + both team names are required; the rest may be left blank.
 function parseFixtureFile(text: string): ParsedFixtureRow[] {
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
@@ -139,13 +144,13 @@ function parseFixtureFile(text: string): ParsedFixtureRow[] {
   const result: ParsedFixtureRow[] = [];
   for (const line of lines) {
     const cols = splitDelimitedRow(line, sep).map(c => c.replace(/^"|"$/g, '').trim());
-    const [date = '', time = '', teamAName = '', teamBName = '', venue = '', broadcaster = '', round = ''] = cols;
+    const [date = '', time = '', teamAName = '', teamBName = '', venue = '', category = '', group = '', round = ''] = cols;
     if (/^date$/i.test(date)) continue; // header row
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
     if (!teamAName || !teamBName) continue;
     result.push({
       date, time: time || undefined, teamAName, teamBName,
-      venue: venue || undefined, broadcaster: broadcaster || undefined, round: round || undefined,
+      venue: venue || undefined, category: category || undefined, group: group || undefined, round: round || undefined,
     });
   }
   return result;
@@ -409,22 +414,44 @@ function SettingsBar({ tournament, onApply }: { tournament: Tournament; onApply:
 interface ImportPreview { players: Omit<Player, 'id'>[]; }
 
 // ── Players tab: manage a team's roster, scoped to the selected tournament ────
-function PlayersPanel({ tournamentId }: { tournamentId: string }) {
+function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; activeCategory: string }) {
   const { teams: allTeams, addPlayer, updatePlayer, deletePlayer, replaceTeamPlayers } = useTeamDbStore();
+  const tournamentId = tournament.id;
+  const categories = tournament.categories ?? [];
   const teams = useMemo(() => allTeams.filter(t => t.tournamentId === tournamentId), [allTeams, tournamentId]);
-  const [selectedTeamId, setSelectedTeamId] = useState(teams[0]?.id ?? '');
+  const teamSections = useMemo(() => {
+    if (categories.length === 0) return [{ label: null as string | null, items: teams }];
+    // A specific category is selected in the top bar — filter down to just it.
+    if (activeCategory) return [{ label: null as string | null, items: teams.filter(t => t.category === activeCategory) }];
+    return [...categories.map(c => ({ label: c, items: teams.filter(t => t.category === c) })), { label: 'Uncategorized', items: teams.filter(t => !t.category) }]
+      .filter(section => section.items.length > 0);
+  }, [teams, categories, activeCategory]);
+  const visibleTeams = useMemo(() => teamSections.flatMap(s => s.items), [teamSections]);
+  const [selectedTeamId, setSelectedTeamId] = useState(visibleTeams[0]?.id ?? '');
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Re-picks the selected team whenever it falls out of view — either it was
+  // deleted, or the top bar's category filter changed to one it's not in.
   useEffect(() => {
-    if (!teams.find(t => t.id === selectedTeamId)) setSelectedTeamId(teams[0]?.id ?? '');
-  }, [teams, selectedTeamId]);
+    if (!visibleTeams.find(t => t.id === selectedTeamId)) setSelectedTeamId(visibleTeams[0]?.id ?? '');
+  }, [visibleTeams, selectedTeamId]);
 
   if (teams.length === 0) {
     return (
       <div className="tm-win-content" style={{ padding: 16 }}>
         <div className="tm-win-placeholder">
           <span>No teams in this tournament yet — add one in the 👥 Teams tab first, then manage its roster here.</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (visibleTeams.length === 0) {
+    return (
+      <div className="tm-win-content" style={{ padding: 16 }}>
+        <div className="tm-win-placeholder">
+          <span>No teams in the "{activeCategory}" category — pick a different one from the top bar, or add teams to it in the 👥 Teams tab.</span>
         </div>
       </div>
     );
@@ -466,14 +493,20 @@ function PlayersPanel({ tournamentId }: { tournamentId: string }) {
       {/* Left: team list */}
       <div className="tm-win-sidebar">
         <div className="tm-sidebar-list">
-          {teams.map(t => (
-            <div
-              key={t.id}
-              className={`tm-tourn-item ${t.id === selectedTeamId ? 'tm-tourn-item--active' : ''}`}
-              onClick={() => setSelectedTeamId(t.id)}
-            >
-              <span className="tm-tourn-sport-tag">{t.players.length} player{t.players.length !== 1 ? 's' : ''}</span>
-              <span className="tm-tourn-item-name">{t.name}</span>
+          {teamSections.map(section => (
+            <div key={section.label ?? '__all__'}>
+              {section.label && <div className="tm-sidebar-section-label">{section.label}</div>}
+              {section.items.map(t => (
+                <div
+                  key={t.id}
+                  className={`tm-tourn-item ${t.id === selectedTeamId ? 'tm-tourn-item--active' : ''}`}
+                  onClick={() => setSelectedTeamId(t.id)}
+                >
+                  <span className="tm-tourn-sport-tag">{t.players.length} player{t.players.length !== 1 ? 's' : ''}</span>
+                  <span className="tm-tourn-item-name">{t.name}</span>
+                  {t.category && <span className="tm-tourn-item-category">{t.category}</span>}
+                </div>
+              ))}
             </div>
           ))}
         </div>
@@ -489,7 +522,10 @@ function PlayersPanel({ tournamentId }: { tournamentId: string }) {
                   ? <img src={resolveImageUrl(team.logo)} alt="" style={{ width: 32, height: 32, objectFit: 'contain', borderRadius: '50%' }} />
                   : <div style={{ width: 32, height: 32, borderRadius: '50%', background: team.color }} />}
               </div>
-              <span className="tm-team-col-name">{team.name}</span>
+              <div className="tm-team-name-wrap">
+                <span className="tm-team-col-name">{team.name}</span>
+                {team.category && <span className="tm-tourn-item-category">{team.category}</span>}
+              </div>
               <span className="tm-team-col-count">{team.players.length}</span>
             </div>
 
@@ -571,7 +607,7 @@ function PlayersPanel({ tournamentId }: { tournamentId: string }) {
 // Tournament.groups was a plain string[] before group prefixes/capacity were
 // added — tolerate any group that's still in that shape (e.g. a stale
 // pre-migration remote client) instead of crashing on `.name`.
-function normalizeGroups(groups: unknown): TournamentGroup[] {
+export function normalizeGroups(groups: unknown): TournamentGroup[] {
   return ((groups as TournamentGroup[] | undefined) ?? []).map(g =>
     typeof g === 'string' ? { name: g as string, prefix: (g as string).charAt(0).toUpperCase() } : g
   );
@@ -621,9 +657,11 @@ function TeamsPanel({ tournament }: { tournament: Tournament }) {
   const { teams: allTeams, addTeam, updateTeam, deleteTeam, duplicateTeam } = useTeamDbStore();
   const { updateTournament } = useTournamentStore();
   const { matches, updateMatch: updateScheduleMatch } = useMatchScheduleStore();
+  const { results, updateResult } = useMatchResultsStore();
   const teams = useMemo(() => allTeams.filter(t => t.tournamentId === tournamentId), [allTeams, tournamentId]);
   const categories = tournament.categories ?? [];
   const [newCategoryName, setNewCategoryName] = useState('');
+  const [categoryEditMode, setCategoryEditMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [duplicateTarget, setDuplicateTarget] = useState('');
   // Drag a team card onto a category section header to move it there —
@@ -685,6 +723,29 @@ function TeamsPanel({ tournament }: { tournament: Tournament }) {
     }
   };
 
+  // Renames a category and cascades the new name everywhere it's stored by
+  // name — teams, draw groups/pots tagged to it, scheduled fixtures, and
+  // saved results — since a plain rename-in-place would otherwise silently
+  // orphan every team/fixture/result already tagged with the old name.
+  const renameCategory = (oldName: string, newName: string) => {
+    const name = newName.trim();
+    if (!name || name === oldName || categories.includes(name)) return;
+    updateTournament(tournamentId, {
+      categories: categories.map(c => c === oldName ? name : c),
+      groups: (tournament.groups ?? []).map(g => g.category === oldName ? { ...g, category: name } : g),
+      pots: (tournament.pots ?? []).map(p => p.category === oldName ? { ...p, category: name } : p),
+    });
+    for (const t of teams) {
+      if (t.category === oldName) updateTeam(t.id, { category: name });
+    }
+    for (const m of matches) {
+      if (m.tournamentId === tournamentId && m.category === oldName) updateScheduleMatch(m.id, { category: name });
+    }
+    for (const r of results) {
+      if (r.tournamentId === tournamentId && r.category === oldName) updateResult(r.id, { category: name });
+    }
+  };
+
   // Setting a team's status auto-applies the same matchType to that team's
   // not-yet-completed fixtures — matching by name since ScheduledMatch only
   // stores a denormalized team name, not a team id.
@@ -716,22 +777,38 @@ function TeamsPanel({ tournament }: { tournament: Tournament }) {
 
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
-      <div className="tm-groups-bar">
-        <span className="tm-groups-label">Categories:</span>
+      <div className="tm-groups-bar tm-groups-bar--lg">
+        <span className="tm-groups-label tm-groups-label--lg">Categories:</span>
         {categories.map(c => (
-          <span key={c} className="tm-group-chip">
-            {c}
+          <span key={c} className="tm-group-chip tm-group-chip--lg">
+            {categoryEditMode ? (
+              <input
+                className="tm-group-chip-input tm-group-chip-input--lg"
+                defaultValue={c}
+                title="Rename category"
+                onClick={e => e.stopPropagation()}
+                onBlur={e => renameCategory(c, e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+              />
+            ) : c}
             <button onClick={() => removeCategory(c)} title={`Remove ${c} (unassigns any teams in it)`}>×</button>
           </span>
         ))}
         <input
-          className="tm-input tm-groups-add-input"
+          className="tm-input tm-groups-add-input tm-groups-add-input--lg"
           placeholder="e.g. Men, Women, U21"
           value={newCategoryName}
           onChange={e => setNewCategoryName(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') addCategory(); }}
         />
         <button className="tm-io-btn" onClick={addCategory} disabled={!newCategoryName.trim()}>+ Add Category</button>
+        {categories.length > 0 && (
+          <button
+            className={`tm-io-btn${categoryEditMode ? ' tm-io-btn--active' : ''}`}
+            title="Rename existing categories"
+            onClick={() => setCategoryEditMode(v => !v)}
+          >{categoryEditMode ? '🔓 Editing' : '✏️ Edit'}</button>
+        )}
       </div>
 
       {categories.length > 0 && selectedIds.size > 0 && (
@@ -955,8 +1032,8 @@ function ScheduleTeamPicker({ side, tournamentId, onPick }: {
 }
 
 // Plain label that turns into an <input> on double-click, and commits on blur/Enter.
-function EditableText({ value, onChange, placeholder, className }: {
-  value: string; onChange: (v: string) => void; placeholder?: string; className?: string;
+function EditableText({ value, onChange, placeholder, className, disabled }: {
+  value: string; onChange: (v: string) => void; placeholder?: string; className?: string; disabled?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -985,13 +1062,17 @@ function EditableText({ value, onChange, placeholder, className }: {
   }
 
   return (
-    <span className={`tm-sched-editable ${className ?? ''}`} onDoubleClick={() => { setDraft(value); setEditing(true); }} title="Double-click to edit">
+    <span
+      className={`tm-sched-editable ${className ?? ''}`}
+      onDoubleClick={disabled ? undefined : () => { setDraft(value); setEditing(true); }}
+      title={disabled ? undefined : 'Double-click to edit'}
+    >
       {value || <span className="tm-sched-placeholder">{placeholder}</span>}
     </span>
   );
 }
 
-function EditableDate({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function EditableDate({ value, onChange, disabled }: { value: string; onChange: (v: string) => void; disabled?: boolean }) {
   const [editing, setEditing] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => { if (editing) requestAnimationFrame(() => ref.current?.focus()); }, [editing]);
@@ -1009,14 +1090,14 @@ function EditableDate({ value, onChange }: { value: string; onChange: (v: string
     );
   }
   return (
-    <div className="tm-sched-date" onDoubleClick={() => setEditing(true)} title="Double-click to change date">
+    <div className="tm-sched-date" onDoubleClick={disabled ? undefined : () => setEditing(true)} title={disabled ? undefined : 'Double-click to change date'}>
       <span className="tm-sched-date-num">{valid ? d!.getDate() : '—'}</span>
       <span className="tm-sched-date-dow">{valid ? d!.toLocaleDateString('en-US', { weekday: 'short' }) : ''}</span>
     </div>
   );
 }
 
-function EditableTime({ value, onChange }: { value?: string; onChange: (v: string) => void }) {
+function EditableTime({ value, onChange, disabled }: { value?: string; onChange: (v: string) => void; disabled?: boolean }) {
   const [editing, setEditing] = useState(false);
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => { if (editing) requestAnimationFrame(() => ref.current?.focus()); }, [editing]);
@@ -1032,17 +1113,17 @@ function EditableTime({ value, onChange }: { value?: string; onChange: (v: strin
     );
   }
   return (
-    <div className="tm-sched-time" onDoubleClick={() => setEditing(true)} title="Double-click to change time">
+    <div className="tm-sched-time" onDoubleClick={disabled ? undefined : () => setEditing(true)} title={disabled ? undefined : 'Double-click to change time'}>
       <span className="tm-sched-time-val">{formatTimeDisplay(value)}</span>
       <span className="tm-sched-time-tz">{value ? tz : ''}</span>
     </div>
   );
 }
 
-function ScheduleBadge({ logo, color }: { logo?: string; color: string }) {
+export function ScheduleBadge({ logo, color }: { logo?: string; color: string }) {
   return (
     <div className="tm-sched-badge" style={{ background: logo ? 'transparent' : color }}>
-      {logo && <img src={resolveImageUrl(logo)} alt="" className="tm-sched-badge-img" />}
+      {logo && <img src={resolveImageUrl(logo)} alt="" className="tm-sched-badge-img" draggable={false} />}
     </div>
   );
 }
@@ -1114,19 +1195,266 @@ function ScoreboardSendButton({ match, scoreboards, onSend }: {
   );
 }
 
-function SchedulePanel({ tournament }: { tournament: Tournament }) {
+function addDaysToDateStr(dateStr: string, days: number): string {
+  const d = new Date(dateStr + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+type ScheduleFormat = 'rr-single' | 'rr-double' | 'knockout' | 'groups-knockout';
+
+const SCHEDULE_FORMAT_LABELS: Record<ScheduleFormat, string> = {
+  'rr-single': 'Round Robin (Single)',
+  'rr-double': 'Round Robin (Double / Home & Away)',
+  'knockout': 'Knockout (Single Elimination)',
+  'groups-knockout': 'Groups + Knockout',
+};
+
+// Auto-generates fixtures for the Schedule tab — reads groups/teams from the
+// Draw tab (when present) so a tournament that's already been drawn doesn't
+// need every fixture typed in by hand. Round-robin formats use real drawn
+// groups when available (or the whole team pool as one group otherwise);
+// knockout formats placeholder unresolved entrants (e.g. "Winner of
+// Semifinal 1", "1st Group A") since real names aren't known until earlier
+// rounds/groups are completed — the operator swaps those in via the normal
+// team picker as results come in.
+function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }: {
+  tournament: Tournament;
+  scopedTeams: SavedTeam[];
+  onClose: () => void;
+  onGenerate: (fixtures: { date: string; time?: string; round: string; category?: string; group?: string; teamA: ScheduleTeamRef; teamB: ScheduleTeamRef | null }[]) => void;
+}) {
+  const categories = tournament.categories ?? [];
+  const ALL_CATEGORIES = '__all__';
+  const [format, setFormat] = useState<ScheduleFormat>('rr-single');
+  const [category, setCategory] = useState<string>(categories.length > 0 ? ALL_CATEGORIES : '');
+  const [advanceCount, setAdvanceCount] = useState(2);
+  const [startDate, setStartDate] = useState(() => {
+    const t = new Date();
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+  });
+  const [daysBetween, setDaysBetween] = useState(7);
+  const [time, setTime] = useState('');
+  const [randomize, setRandomize] = useState(true);
+  const [thirdPlacePlayoff, setThirdPlacePlayoff] = useState(false);
+
+  const toRef = (t: SavedTeam): ScheduleTeamRef => ({ name: t.name, shortName: t.shortName, color: t.color, logo: t.logo });
+
+  type PreviewFixture = GeneratedFixture & { groupName?: string; fixtureCategory?: string };
+
+  // Runs the whole generator for ONE category (or the whole tournament, when
+  // `cat` is undefined) — pulled out so "All Categories" can just call this
+  // once per category and concatenate the results, each staying tagged with
+  // its own category. Every category's rounds start at roundIndex 0, so
+  // running "All" schedules every category in parallel on the same calendar
+  // dates (Round 1 for Men and Women both land on the start date, etc.) —
+  // the normal way multi-category tournaments actually run.
+  const generateForCategory = (cat: string | undefined): { fixtures: PreviewFixture[]; warnings: string[] } => {
+    const inScope = (c?: string) => !cat || !c || c === cat;
+    const teamsInScope = scopedTeams.filter(t => inScope(t.category));
+    const groupsInScope = normalizeGroups(tournament.groups).filter(g => inScope(g.category));
+    const groupMembers = (groupName: string) =>
+      teamsInScope.filter(t => t.group === groupName)
+        .sort((a, b) => (a.groupPosition ?? 9999) - (b.groupPosition ?? 9999) || a.name.localeCompare(b.name));
+
+    const warnPrefix = cat ? `[${cat}] ` : '';
+    const warnings: string[] = [];
+    let fixtures: PreviewFixture[] = [];
+
+    if (format === 'rr-single' || format === 'rr-double') {
+      const gen = format === 'rr-single' ? generateRoundRobin : generateDoubleRoundRobin;
+      if (groupsInScope.length > 0) {
+        for (const g of groupsInScope) {
+          let members = groupMembers(g.name).map(toRef);
+          if (members.length < 2) {
+            if (members.length === 1) warnings.push(`${warnPrefix}Group ${g.name} has only 1 team — skipped.`);
+            continue;
+          }
+          if (randomize) members = shuffle(members);
+          fixtures = fixtures.concat(gen(members, g.name).map(f => ({ ...f, groupName: g.name })));
+        }
+        const assignedIds = new Set(groupsInScope.flatMap(g => groupMembers(g.name).map(t => t.id)));
+        const unassigned = teamsInScope.filter(t => !assignedIds.has(t.id));
+        if (unassigned.length > 0) warnings.push(`${warnPrefix}${unassigned.length} team(s) not assigned to a group were skipped.`);
+      } else {
+        let members = teamsInScope.map(toRef);
+        if (members.length < 2) warnings.push(`${warnPrefix}Not enough teams to schedule (need at least 2).`);
+        else {
+          if (randomize) members = shuffle(members);
+          fixtures = gen(members);
+        }
+      }
+    } else if (format === 'knockout') {
+      let members = teamsInScope.map(toRef);
+      if (members.length < 2) warnings.push(`${warnPrefix}Not enough teams to schedule (need at least 2).`);
+      else {
+        if (randomize) members = shuffle(members);
+        fixtures = generateKnockout(members, thirdPlacePlayoff);
+      }
+    } else if (format === 'groups-knockout') {
+      if (groupsInScope.length === 0) {
+        warnings.push(`${warnPrefix}No groups found for this scope — set up groups in the Draw tab first.`);
+      } else {
+        let maxRoundIdx = -1;
+        for (const g of groupsInScope) {
+          let members = groupMembers(g.name).map(toRef);
+          if (members.length < 2) {
+            if (members.length === 1) warnings.push(`${warnPrefix}Group ${g.name} has only 1 team — skipped.`);
+            continue;
+          }
+          if (randomize) members = shuffle(members);
+          const f = generateRoundRobin(members, g.name);
+          fixtures = fixtures.concat(f.map(x => ({ ...x, groupName: g.name })));
+          if (f.length) maxRoundIdx = Math.max(maxRoundIdx, Math.max(...f.map(x => x.roundIndex)));
+        }
+        const slots = buildGroupKnockoutSlots(groupsInScope.map(g => g.name), advanceCount);
+        fixtures = fixtures.concat(offsetRounds(generateKnockoutFromSlots(slots, thirdPlacePlayoff), maxRoundIdx + 1));
+      }
+    }
+
+    const prefix = cat ? `${cat} · ` : '';
+    fixtures = fixtures.map(f => ({ ...f, round: prefix ? `${prefix}${f.round}` : f.round, fixtureCategory: cat }));
+
+    return { fixtures, warnings };
+  };
+
+  const preview = useMemo(() => {
+    if (category === ALL_CATEGORIES) {
+      let fixtures: PreviewFixture[] = [];
+      let warnings: string[] = [];
+      for (const cat of categories) {
+        const result = generateForCategory(cat);
+        fixtures = fixtures.concat(result.fixtures);
+        warnings = warnings.concat(result.warnings);
+      }
+      return { fixtures, warnings };
+    }
+    return generateForCategory(categories.length > 0 ? category : undefined);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [format, scopedTeams, tournament.groups, randomize, advanceCount, category, categories, thirdPlacePlayoff]);
+
+  const matchCount = preview.fixtures.length;
+  const roundCount = matchCount ? Math.max(...preview.fixtures.map(f => f.roundIndex)) + 1 : 0;
+
+  const handleGenerate = () => {
+    if (matchCount === 0) return;
+    // The Schedule tab's display/running order now follows insertion order
+    // (via each fixture's auto-assigned sortIndex), not date — so fixtures
+    // must be handed to onGenerate already interleaved by round: every
+    // Round 1 (across every group and category) first, then every Round 2,
+    // etc. A stable sort by roundIndex does this while preserving each
+    // round's original group/category ordering as the tiebreak.
+    const inRoundOrder = [...preview.fixtures].sort((a, b) => a.roundIndex - b.roundIndex);
+    onGenerate(inRoundOrder.map(f => ({
+      date: addDaysToDateStr(startDate, f.roundIndex * daysBetween),
+      time: time || undefined,
+      round: f.round,
+      category: f.fixtureCategory,
+      group: f.groupName ?? f.stage,
+      teamA: f.a,
+      teamB: f.b,
+    })));
+    onClose();
+  };
+
+  return (
+    <div className="tm-gen-backdrop" onClick={onClose}>
+      <div className="tm-gen-modal" onClick={e => e.stopPropagation()}>
+        <div className="tm-gen-title">🪄 Generate Schedule</div>
+
+        <label className="tm-gen-label">Format</label>
+        <select className="tm-input" value={format} onChange={e => setFormat(e.target.value as ScheduleFormat)}>
+          {(Object.keys(SCHEDULE_FORMAT_LABELS) as ScheduleFormat[]).map(f => (
+            <option key={f} value={f}>{SCHEDULE_FORMAT_LABELS[f]}</option>
+          ))}
+        </select>
+
+        {categories.length > 0 && (
+          <>
+            <label className="tm-gen-label">Category</label>
+            <select className="tm-input" value={category} onChange={e => setCategory(e.target.value)}>
+              <option value={ALL_CATEGORIES}>All Categories (generates one schedule per category)</option>
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </>
+        )}
+
+        {format === 'groups-knockout' && (
+          <>
+            <label className="tm-gen-label">Teams advancing per group to knockout stage</label>
+            <input className="tm-input" type="number" min={1} value={advanceCount}
+              onChange={e => setAdvanceCount(Math.max(1, parseInt(e.target.value, 10) || 1))} />
+          </>
+        )}
+
+        <div className="tm-gen-row">
+          <div style={{ flex: 1 }}>
+            <label className="tm-gen-label">Start Date</label>
+            <input className="tm-input" type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={{ width: '100%' }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label className="tm-gen-label">Time (optional)</label>
+            <input className="tm-input" type="time" value={time} onChange={e => setTime(e.target.value)} style={{ width: '100%' }} />
+          </div>
+        </div>
+
+        <label className="tm-gen-label">Days between rounds</label>
+        <input className="tm-input" type="number" min={0} value={daysBetween}
+          onChange={e => setDaysBetween(Math.max(0, parseInt(e.target.value, 10) || 0))} />
+
+        <label className="tm-gen-checkbox">
+          <input type="checkbox" checked={randomize} onChange={e => setRandomize(e.target.checked)} />
+          Randomize team order / seeding
+        </label>
+
+        {(format === 'knockout' || format === 'groups-knockout') && (
+          <label className="tm-gen-checkbox">
+            <input type="checkbox" checked={thirdPlacePlayoff} onChange={e => setThirdPlacePlayoff(e.target.checked)} />
+            Play 3rd/4th place — Semifinal losers play for 3rd
+          </label>
+        )}
+
+        {preview.warnings.length > 0 && (
+          <div className="tm-gen-warn">
+            {preview.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}
+          </div>
+        )}
+
+        <div className="tm-gen-actions">
+          <button className="tm-io-btn tm-io-btn--ok" onClick={handleGenerate} disabled={matchCount === 0}>
+            Generate {matchCount} fixture{matchCount !== 1 ? 's' : ''}{roundCount ? ` · ${roundCount} round${roundCount !== 1 ? 's' : ''}` : ''}
+          </button>
+          <button className="tm-io-btn" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SchedulePanel({ tournament, activeCategory }: { tournament: Tournament; activeCategory: string }) {
   const { matches: allMatches, addMatch, updateMatch, deleteMatch, markSent } = useMatchScheduleStore();
+  const { updateTournament } = useTournamentStore();
   const { teams: allTeams } = useTeamDbStore();
   const { pages, updateWidgetConfig, resetWidgetTimer } = useCanvasStore();
-  const { results: allResults, addResult, updateResult, deleteResult } = useMatchResultsStore();
-  const matches = useMemo(
+  const { addResult } = useMatchResultsStore();
+  // Every fixture in this tournament, regardless of the category filter —
+  // used when sending a fixture to a scoreboard from any category view.
+  const allTournamentMatches = useMemo(
     () => allMatches.filter(m => m.tournamentId === tournament.id),
     [allMatches, tournament.id]
+  );
+  // View-filtered for everything the operator actually sees/acts on. Untagged
+  // fixtures stay visible under every category filter — same "untagged =
+  // universal" convention used for groups/pots in the Draw tab.
+  const matches = useMemo(
+    () => allTournamentMatches.filter(m => !activeCategory || !m.category || m.category === activeCategory),
+    [allTournamentMatches, activeCategory]
   );
   const scoreboards = useMemo(
     () => pages.flatMap(p => p.widgets).filter(w => w.type === 'scoreboard').map(w => ({ id: w.id, label: w.label })),
     [pages]
   );
+  const liveFixtureIds = useLiveFixtureIds();
   const sendToScoreboard = (m: typeof matches[number], targetId: string) => {
     const allWidgets = pages.flatMap(p => p.widgets);
     const target = allWidgets.find(w => w.id === targetId);
@@ -1144,93 +1472,167 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
 
   const [importPreview, setImportPreview] = useState<ParsedFixtureRow[] | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showGenerate, setShowGenerate] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  // Two-step swap: click 🔄 Swap on one fixture to arm it, then click ↔ Swap
+  // Here on the target fixture to complete it — a distinct button on the
+  // target row rather than a dropdown, so it's obvious which click does what.
+  const [armedSwapId, setArmedSwapId] = useState<string | null>(null);
+
+  const venues = tournament.venues ?? [];
+  const [newVenueName, setNewVenueName] = useState('');
+  const addVenue = () => {
+    const name = newVenueName.trim();
+    if (!name || venues.includes(name)) return;
+    updateTournament(tournament.id, { venues: [...venues, name] });
+    setNewVenueName('');
+  };
+  const removeVenue = (name: string) => {
+    updateTournament(tournament.id, { venues: venues.filter(v => v !== name) });
+    for (const m of matches) {
+      if (m.venue === name) updateMatch(m.id, { venue: undefined });
+    }
+  };
+
+  // Bulk fixture selection — numbers/checkboxes on each row, "Select
+  // All"/"Deselect All", and a bulk-edit/delete bar for whatever's checked.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const toggleSelected = (id: string) => setSelectedIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const selectAll = () => setSelectedIds(new Set(matches.map(m => m.id)));
+  const deselectAll = () => setSelectedIds(new Set());
+  const toggleEditMode = () => setEditMode(v => { if (v) { setSelectedIds(new Set()); setArmedSwapId(null); } return !v; });
+  const [bulkVenue, setBulkVenue] = useState('');
+  const [bulkCategory, setBulkCategory] = useState('');
+  const [bulkGroup, setBulkGroup] = useState('');
+  const applyBulkVenue = () => {
+    if (selectedIds.size === 0 || !bulkVenue) return;
+    for (const id of selectedIds) updateMatch(id, { venue: bulkVenue === '__clear__' ? undefined : bulkVenue });
+  };
+  const applyBulkCategory = () => {
+    if (selectedIds.size === 0 || !bulkCategory) return;
+    for (const id of selectedIds) updateMatch(id, { category: bulkCategory === '__clear__' ? undefined : bulkCategory });
+  };
+  const applyBulkGroup = () => {
+    if (selectedIds.size === 0 || !bulkGroup) return;
+    for (const id of selectedIds) updateMatch(id, { group: bulkGroup === '__clear__' ? undefined : bulkGroup });
+  };
+  const deleteSelected = () => {
+    for (const id of selectedIds) deleteMatch(id);
+    setSelectedIds(new Set());
+  };
+
+  // Each position in the list is a fixed SLOT — its id, date, time,
+  // sortIndex (count number), venue, competition never move. Reordering
+  // swaps the MATCH CONTENT (which teams are playing, round/category/group,
+  // score/progress) between slots instead — the count number and the
+  // manually-set time you gave that slot stay exactly where they are;
+  // only which fixture occupies the slot changes.
+  const [draggedFixtureId, setDraggedFixtureId] = useState<string | null>(null);
+  const [dragOverFixtureId, setDragOverFixtureId] = useState<string | null>(null);
+  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  const dragStateRef = useRef<{ id: string; startX: number; startY: number; active: boolean } | null>(null);
+  const matchContentOf = (m: ScheduledMatch) => ({
+    teamAName: m.teamAName, teamAShortName: m.teamAShortName, teamALogo: m.teamALogo, teamAColor: m.teamAColor,
+    teamBName: m.teamBName, teamBShortName: m.teamBShortName, teamBLogo: m.teamBLogo, teamBColor: m.teamBColor,
+    round: m.round, category: m.category, group: m.group,
+    matchType: m.matchType, walkoverLoser: m.walkoverLoser, scoreA: m.scoreA, scoreB: m.scoreB,
+    sentAt: m.sentAt, completedAt: m.completedAt,
+  });
+  const moveFixture = (draggedId: string, targetId: string) => {
+    if (draggedId === targetId) return;
+    const ordered = matches; // already ordered by sortIndex (the count number)
+    const fromIdx = ordered.findIndex(m => m.id === draggedId);
+    const toIdx = ordered.findIndex(m => m.id === targetId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    // Simulate moving the CONTENT (not the slot) from fromIdx to toIdx —
+    // everything between shifts by one, same as a normal list reorder —
+    // then hand each slot whichever content should now sit in it.
+    const contents = ordered.map(matchContentOf);
+    const reorderedContents = [...contents];
+    const [movedContent] = reorderedContents.splice(fromIdx, 1);
+    reorderedContents.splice(toIdx, 0, movedContent);
+    const lo = Math.min(fromIdx, toIdx);
+    const hi = Math.max(fromIdx, toIdx);
+    for (let k = lo; k <= hi; k++) {
+      updateMatch(ordered[k].id, reorderedContents[k]);
+    }
+  };
+  const moveFixtureBy = (id: string, direction: -1 | 1) => {
+    const idx = matches.findIndex(m => m.id === id);
+    const neighbor = matches[idx + direction];
+    if (idx === -1 || !neighbor) return;
+    moveFixture(id, neighbor.id);
+  };
+
+  // Native HTML5 drag-and-drop (draggable/dragstart/dragover/drop) doesn't
+  // fire reliably in this app's WebView, so dragging is done with plain mouse
+  // events instead: press, move past a small threshold to arm it (so normal
+  // clicks/double-clicks on the card's fields still work), then hit-test
+  // whichever row is under the cursor via elementFromPoint so the card being
+  // dragged visually "snaps"/highlights onto whatever it's covering.
+  const startFixtureDrag = (m: ScheduledMatch) => (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('input, button, select, textarea, a')) return;
+    const startX = e.clientX, startY = e.clientY;
+    dragStateRef.current = { id: m.id, startX, startY, active: false };
+    const onMove = (ev: MouseEvent) => {
+      const st = dragStateRef.current;
+      if (!st) return;
+      if (!st.active) {
+        if (Math.hypot(ev.clientX - st.startX, ev.clientY - st.startY) < 6) return;
+        st.active = true;
+        setDraggedFixtureId(st.id);
+        document.body.style.userSelect = 'none';
+      }
+      ev.preventDefault();
+      setDragPos({ x: ev.clientX, y: ev.clientY });
+      const under = document.elementFromPoint(ev.clientX, ev.clientY);
+      const rowEl = under?.closest('[data-fixture-row]') as HTMLElement | null;
+      const overId = rowEl?.getAttribute('data-fixture-row') ?? null;
+      setDragOverFixtureId(overId && overId !== st.id ? overId : null);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+      const st = dragStateRef.current;
+      if (st?.active) {
+        setDragOverFixtureId(overId => {
+          if (overId) moveFixture(st.id, overId);
+          return null;
+        });
+      }
+      dragStateRef.current = null;
+      setDraggedFixtureId(null);
+      setDragPos(null);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  const handleGeneratedFixtures = (fixtures: { date: string; time?: string; round: string; category?: string; group?: string; teamA: ScheduleTeamRef; teamB: ScheduleTeamRef | null }[]) => {
+    for (const f of fixtures) {
+      addMatch({
+        tournamentId: tournament.id, competition: tournament.name,
+        date: f.date, time: f.time, round: f.round, category: f.category, group: f.group,
+        teamAName: f.teamA.name, teamAShortName: f.teamA.shortName, teamAColor: f.teamA.color, teamALogo: f.teamA.logo,
+        teamBName: f.teamB?.name ?? '', teamBShortName: f.teamB?.shortName, teamBColor: f.teamB?.color ?? '#95a5a6', teamBLogo: f.teamB?.logo,
+      });
+    }
+  };
 
   // Fixtures always show the CURRENT tournament name — keep the stored
   // `competition` field in sync (it's what downstream widgets/results read)
   // so renaming the tournament doesn't leave stale fixtures behind.
   useEffect(() => {
-    for (const m of matches) {
+    for (const m of allTournamentMatches) {
       if (m.competition !== tournament.name) updateMatch(m.id, { competition: tournament.name });
     }
-  }, [tournament.name, matches, updateMatch]);
-
-  // Bye/Walkover are fully automatic, no manual per-fixture picker: a fixture
-  // with no Team B name is a bye; a fixture where either team currently has
-  // 'walkover' status set in the Team Database is a walkover for that side.
-  // Keeps every not-yet-completed fixture in sync as fixtures/team statuses change.
-  useEffect(() => {
-    const win = tournament.settings?.walkoverWinScore ?? SPORT_DEFAULTS[tournament.sport].walkoverWinScore;
-    const statusOf = (name: string, shortName?: string) => {
-      const key = name.trim().toLowerCase();
-      const shortKey = (shortName ?? '').trim().toLowerCase();
-      return scopedTeams.find(t =>
-        t.name.trim().toLowerCase() === key || (!!shortKey && (t.shortName ?? '').trim().toLowerCase() === shortKey)
-      )?.status;
-    };
-    for (const m of matches) {
-      if (m.completedAt) continue;
-      const isByeAuto = !m.teamBName || !m.teamBName.trim();
-      let nextType: ScheduledMatch['matchType'];
-      let nextLoser: 'A' | 'B' | undefined;
-      if (isByeAuto) {
-        nextType = 'bye';
-      } else if (statusOf(m.teamAName, m.teamAShortName) === 'walkover') {
-        nextType = 'walkover'; nextLoser = 'A';
-      } else if (statusOf(m.teamBName, m.teamBShortName) === 'walkover') {
-        nextType = 'walkover'; nextLoser = 'B';
-      }
-      if (nextType === m.matchType && nextLoser === m.walkoverLoser) continue;
-      if (!nextType) {
-        updateMatch(m.id, { matchType: undefined, walkoverLoser: undefined });
-      } else {
-        updateMatch(m.id, {
-          matchType: nextType, walkoverLoser: nextLoser,
-          scoreA: nextLoser === 'A' ? 0 : win,
-          scoreB: nextLoser === 'A' ? win : 0,
-        });
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [matches, scopedTeams, tournament.settings?.walkoverWinScore, tournament.sport]);
-
-  // A bye/walkover has no live match to run on a scoreboard, so it never
-  // reaches the normal "Save Result" step — without this, the score set on
-  // the fixture just sits on the Schedule row and never becomes a Result,
-  // which looked like "the score I set doesn't show up, it's stuck at 0-0".
-  // Writes/updates/removes a linked Result directly as the fixture changes.
-  useEffect(() => {
-    for (const m of matches) {
-      const existing = allResults.find(r => r.sourceScheduleId === m.id);
-      if (m.matchType) {
-        const data = {
-          tournamentId: tournament.id,
-          date: m.date, time: m.time,
-          competition: m.competition ?? tournament.name, round: m.round,
-          teamAName: m.teamAName, teamAShortName: m.teamAShortName, teamALogo: m.teamALogo, teamAColor: m.teamAColor,
-          scoreA: m.scoreA ?? 0,
-          teamBName: m.teamBName, teamBShortName: m.teamBShortName, teamBLogo: m.teamBLogo, teamBColor: m.teamBColor,
-          scoreB: m.scoreB ?? 0,
-          matchType: m.matchType, walkoverLoser: m.walkoverLoser,
-          sourceScheduleId: m.id,
-        };
-        if (!existing) {
-          addResult(data);
-        } else if (
-          existing.scoreA !== data.scoreA || existing.scoreB !== data.scoreB ||
-          existing.walkoverLoser !== data.walkoverLoser || existing.round !== data.round ||
-          existing.date !== data.date || existing.time !== data.time ||
-          existing.teamAName !== data.teamAName || existing.teamBName !== data.teamBName ||
-          existing.teamAShortName !== data.teamAShortName || existing.teamBShortName !== data.teamBShortName
-        ) {
-          updateResult(existing.id, data);
-        }
-      } else if (existing) {
-        // No longer a bye/walkover (e.g. team reinstated) — drop the auto result.
-        deleteResult(existing.id);
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [matches, allResults, tournament.id, tournament.name]);
+  }, [tournament.name, allTournamentMatches, updateMatch]);
 
   const handleAdd = () => {
     const today = new Date();
@@ -1249,7 +1651,7 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
       const text = ev.target?.result as string;
       const rows = parseFixtureFile(text);
       if (rows.length > 0) setImportPreview(rows);
-      else alert('No valid fixtures found in file.\n\nExpected columns: Date (YYYY-MM-DD), Time, Team A, Team B, Venue, Broadcaster, Round\nFormats: CSV, TSV, or plain text');
+      else alert('No valid fixtures found in file.\n\nExpected columns: Date (YYYY-MM-DD), Time, Team A, Team B, Venue, Category, Group, Round\nFormats: CSV, TSV, or plain text');
     };
     reader.readAsText(file);
     e.target.value = '';
@@ -1271,7 +1673,7 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
       const b = resolveTeam(row.teamBName, '#3498db');
       addMatch({
         tournamentId: tournament.id, competition: tournament.name,
-        date: row.date, time: row.time, venue: row.venue, broadcaster: row.broadcaster, round: row.round,
+        date: row.date, time: row.time, venue: row.venue, category: row.category, group: row.group, round: row.round,
         teamAName: a.name, teamAShortName: a.shortName, teamAColor: a.color, teamALogo: a.logo,
         teamBName: b.name, teamBShortName: b.shortName, teamBColor: b.color, teamBLogo: b.logo,
       });
@@ -1290,19 +1692,109 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
     return Array.from(map.entries());
   }, [matches]);
 
+  // Sequential fixture numbers in the same order they're displayed, spanning
+  // every month group — not reset per group.
+  const numberOf = useMemo(
+    () => new Map(groups.flatMap(([, rows]) => rows).map((m, i) => [m.id, i + 1])),
+    [groups]
+  );
+  const allSelected = matches.length > 0 && selectedIds.size === matches.length;
+
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 12 }}>
-        <button className="tm-io-btn" title="Import fixtures from CSV / TSV / TXT" onClick={() => fileInputRef.current?.click()}>
-          ↑ Import
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <button className={`tm-io-btn${editMode ? ' tm-io-btn--ok' : ''}`} onClick={toggleEditMode}>
+          {editMode ? '✓ Done Editing' : '✏️ Edit'}
         </button>
         <button className="tm-io-btn" title="Export fixtures as CSV (Excel compatible)"
           onClick={() => exportFixturesCSV(matches, tournament.name)} disabled={matches.length === 0}>
           ↓ Export CSV
         </button>
-        <button className="tm-sidebar-new-btn" onClick={handleAdd}>＋ Add Fixture</button>
-        <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt" style={{ display: 'none' }} onChange={handleFileChange} />
       </div>
+
+      {editMode && (
+        <div className="tm-groups-bar">
+          <span className="tm-groups-label">Venues:</span>
+          {venues.map(v => (
+            <span key={v} className="tm-group-chip">
+              {v}
+              <button onClick={() => removeVenue(v)} title={`Remove ${v} (unassigns any fixtures using it)`}>×</button>
+            </span>
+          ))}
+          <input
+            className="tm-input tm-groups-add-input"
+            placeholder="e.g. Court 1, Main Hall"
+            value={newVenueName}
+            onChange={e => setNewVenueName(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') addVenue(); }}
+          />
+          <button className="tm-io-btn" onClick={addVenue} disabled={!newVenueName.trim()}>+ Add Venue</button>
+        </div>
+      )}
+
+      {editMode && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 10, marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="tm-io-btn" onClick={selectAll} disabled={matches.length === 0 || allSelected}>☑ Select All</button>
+            <button className="tm-io-btn" onClick={deselectAll} disabled={selectedIds.size === 0}>☐ Deselect All</button>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="tm-io-btn" title="Auto-generate fixtures (round robin, knockout, groups + knockout)" onClick={() => setShowGenerate(true)}>
+              🪄 Generate Schedule
+            </button>
+            <button className="tm-io-btn" title="Import fixtures from CSV / TSV / TXT" onClick={() => fileInputRef.current?.click()}>
+              ↑ Import
+            </button>
+            <button className="tm-sidebar-new-btn" onClick={handleAdd}>＋ Add Fixture</button>
+            <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt" style={{ display: 'none' }} onChange={handleFileChange} />
+          </div>
+        </div>
+      )}
+
+      {editMode && selectedIds.size > 0 && (
+        <div className="tm-draw-vmix-cfg" style={{ marginBottom: 12 }}>
+          <span className="tm-groups-label">{selectedIds.size} selected —</span>
+          <select className="tm-input" value={bulkVenue} onChange={e => setBulkVenue(e.target.value)} style={{ width: 140 }}>
+            <option value="">— pick venue —</option>
+            {venues.map(v => <option key={v} value={v}>{v}</option>)}
+            <option value="__clear__">— No Venue —</option>
+          </select>
+          <button className="tm-io-btn" onClick={applyBulkVenue} disabled={!bulkVenue}>Apply Venue</button>
+          {(tournament.categories ?? []).length > 0 && (
+            <>
+              <select className="tm-input" value={bulkCategory} onChange={e => setBulkCategory(e.target.value)} style={{ width: 140 }}>
+                <option value="">— pick category —</option>
+                {(tournament.categories ?? []).map(c => <option key={c} value={c}>{c}</option>)}
+                <option value="__clear__">— No Category —</option>
+              </select>
+              <button className="tm-io-btn" onClick={applyBulkCategory} disabled={!bulkCategory}>Apply Category</button>
+            </>
+          )}
+          <select className="tm-input" value={bulkGroup} onChange={e => setBulkGroup(e.target.value)} style={{ width: 140 }}>
+            <option value="">— pick group —</option>
+            {normalizeGroups(tournament.groups).map(g => <option key={g.name} value={g.name}>{g.name}</option>)}
+            <option value="__clear__">— No Group —</option>
+          </select>
+          <button className="tm-io-btn" onClick={applyBulkGroup} disabled={!bulkGroup}>Apply Group</button>
+          <ConfirmButton
+            className="tm-io-btn tm-io-btn--danger"
+            label={`🗑 Delete ${selectedIds.size}`}
+            confirmLabel="Delete"
+            message={`Delete ${selectedIds.size} selected fixture${selectedIds.size !== 1 ? 's' : ''}?`}
+            onConfirm={deleteSelected}
+          />
+          <button className="tm-io-btn" onClick={deselectAll}>Clear Selection</button>
+        </div>
+      )}
+
+      {showGenerate && (
+        <GenerateScheduleModal
+          tournament={tournament}
+          scopedTeams={scopedTeams}
+          onClose={() => setShowGenerate(false)}
+          onGenerate={handleGeneratedFixtures}
+        />
+      )}
 
       {importPreview && (
         <div className="tm-import-preview" style={{ marginBottom: 12 }}>
@@ -1337,19 +1829,55 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
           <div key={label} className="tm-sched-group">
             <div className="tm-sched-group-title">{label}</div>
             <div className="tm-sched-rows">
-              {rows.map(m => (
-                <div key={m.id} className={`tm-sched-row${m.completedAt ? ' tm-sched-row--completed' : ''}`}>
+              {rows.map(m => {
+                const idxInAll = matches.findIndex(x => x.id === m.id);
+                const isLive = liveFixtureIds.has(m.id);
+                return (
+                <div
+                  key={m.id}
+                  data-fixture-row={m.id}
+                  className={`tm-sched-row${m.completedAt ? ' tm-sched-row--completed' : ''}${selectedIds.has(m.id) ? ' tm-sched-row--selected' : ''}${editMode ? ' tm-sched-row--draggable' : ''}${draggedFixtureId === m.id ? ' tm-sched-row--dragging' : ''}${dragOverFixtureId === m.id && draggedFixtureId !== m.id ? ' tm-sched-row--drag-over' : ''}${isLive ? ' tm-sched-row--live' : ''}`}
+                  onMouseDown={editMode ? startFixtureDrag(m) : undefined}
+                  title={editMode ? 'Drag onto another slot to swap which match plays there — that slot\'s count/time stays put' : undefined}
+                >
+                  {editMode && (
+                    <div className="tm-sched-row-move">
+                      <button
+                        className="tm-sched-row-move-btn"
+                        disabled={idxInAll <= 0}
+                        title="Swap into the slot above (count/time stays with the slot)"
+                        onClick={() => moveFixtureBy(m.id, -1)}
+                      >▲</button>
+                      <button
+                        className="tm-sched-row-move-btn"
+                        disabled={idxInAll < 0 || idxInAll >= matches.length - 1}
+                        title="Swap into the slot below (count/time stays with the slot)"
+                        onClick={() => moveFixtureBy(m.id, 1)}
+                      >▼</button>
+                    </div>
+                  )}
+                  <input
+                    type="checkbox"
+                    className="tm-sched-row-check"
+                    checked={selectedIds.has(m.id)}
+                    onChange={() => toggleSelected(m.id)}
+                    title="Select for bulk edit/delete"
+                    style={editMode ? undefined : { visibility: 'hidden' }}
+                  />
+                  <span className="tm-sched-row-num">{numberOf.get(m.id)}</span>
+                  <div className="tm-sched-divider" />
+                  {isLive && <span className="tm-sched-live-badge">● LIVE</span>}
                   {m.completedAt && <span className="tm-sched-completed-badge">✓ Completed</span>}
-                  <EditableDate value={m.date} onChange={date => updateMatch(m.id, { date })} />
+                  <EditableDate value={m.date} onChange={date => updateMatch(m.id, { date })} disabled={!editMode} />
                   <div className="tm-sched-divider" />
 
                   <div className="tm-sched-matchup">
                     <div className="tm-sched-team">
-                      <LogoUrlPicker compact value={m.teamALogo ?? ''} onChange={logo => updateMatch(m.id, { teamALogo: logo })}
-                        thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamALogo} color={m.teamAColor} />} tournamentId={tournament.id} />
                       <EditableText className="tm-sched-team-name" value={m.teamAName} placeholder="Team A"
-                        onChange={v => updateMatch(m.id, { teamAName: v })} />
-                      <ScheduleTeamPicker side="A" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamAName: t.name, teamAShortName: t.shortName, teamAColor: t.color, teamALogo: t.logo })} />
+                        onChange={v => updateMatch(m.id, { teamAName: v })} disabled={!editMode} />
+                      <LogoUrlPicker compact value={m.teamALogo ?? ''} onChange={logo => updateMatch(m.id, { teamALogo: logo })}
+                        thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamALogo} color={m.teamAColor} />} tournamentId={tournament.id} disabled={!editMode} />
+                      {editMode && <ScheduleTeamPicker side="A" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamAName: t.name, teamAShortName: t.shortName, teamAColor: t.color, teamALogo: t.logo })} />}
                     </div>
                     <div className="tm-sched-vs-col">
                       {m.matchType && (
@@ -1359,55 +1887,146 @@ function SchedulePanel({ tournament }: { tournament: Tournament }) {
                             : `Automatic — ${m.walkoverLoser === 'A' ? m.teamAName : m.teamBName} is on Walkover status in the Team Database`
                         }>{m.matchType === 'bye' ? 'BYE' : 'W/O'}</span>
                       )}
+                      {m.venueLabel && (
+                        <span className="tm-sched-venue-badge" title={`Synced from venue: ${m.venueLabel}`}>📍 {m.venueLabel}</span>
+                      )}
                       {m.matchType ? (
                         <span className="tm-sched-vs tm-sched-score">
-                          <EditableText value={String(m.scoreA ?? 0)} onChange={v => updateMatch(m.id, { scoreA: Number(v) || 0 })} />
+                          <EditableText value={String(m.scoreA ?? 0)} onChange={v => updateMatch(m.id, { scoreA: Number(v) || 0 })} disabled={!editMode} />
                           <span className="tm-sched-score-sep">–</span>
-                          <EditableText value={String(m.scoreB ?? 0)} onChange={v => updateMatch(m.id, { scoreB: Number(v) || 0 })} />
+                          <EditableText value={String(m.scoreB ?? 0)} onChange={v => updateMatch(m.id, { scoreB: Number(v) || 0 })} disabled={!editMode} />
                         </span>
                       ) : (
                         <span className="tm-sched-vs">VS</span>
                       )}
-                      <EditableText className="tm-sched-round" value={m.round ?? ''} placeholder="Round"
-                        onChange={v => updateMatch(m.id, { round: v })} />
+                      {editMode ? (
+                        <EditableText className="tm-sched-round" value={m.round ?? ''} placeholder="Round"
+                          onChange={v => updateMatch(m.id, { round: v })} />
+                      ) : (
+                        m.round && <span className="tm-sched-round">{m.round}</span>
+                      )}
                     </div>
                     <div className="tm-sched-team tm-sched-team--b">
-                      <ScheduleTeamPicker side="B" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamBName: t.name, teamBShortName: t.shortName, teamBColor: t.color, teamBLogo: t.logo })} />
-                      <EditableText className="tm-sched-team-name" value={m.teamBName} placeholder="Team B"
-                        onChange={v => updateMatch(m.id, { teamBName: v })} />
+                      {editMode && <ScheduleTeamPicker side="B" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamBName: t.name, teamBShortName: t.shortName, teamBColor: t.color, teamBLogo: t.logo })} />}
                       <LogoUrlPicker compact value={m.teamBLogo ?? ''} onChange={logo => updateMatch(m.id, { teamBLogo: logo })}
-                        thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamBLogo} color={m.teamBColor} />} tournamentId={tournament.id} />
+                        thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamBLogo} color={m.teamBColor} />} tournamentId={tournament.id} disabled={!editMode} />
+                      <EditableText className="tm-sched-team-name" value={m.teamBName} placeholder="Team B"
+                        onChange={v => updateMatch(m.id, { teamBName: v })} disabled={!editMode} />
                     </div>
                   </div>
 
                   <div className="tm-sched-divider" />
                   <div className="tm-sched-venue">
-                    <EditableText className="tm-sched-venue-name" value={m.venue ?? ''} placeholder="Venue"
-                      onChange={v => updateMatch(m.id, { venue: v })} />
+                    {editMode ? (
+                      venues.length > 0 ? (
+                        <select
+                          className="tm-sched-catgroup-select"
+                          value={m.venue ?? ''}
+                          onChange={e => updateMatch(m.id, { venue: e.target.value || undefined })}
+                        >
+                          <option value="">— Venue —</option>
+                          {m.venue && !venues.includes(m.venue) && <option value={m.venue}>{m.venue}</option>}
+                          {venues.map(v => <option key={v} value={v}>{v}</option>)}
+                        </select>
+                      ) : (
+                        <EditableText className="tm-sched-venue-name" value={m.venue ?? ''} placeholder="Venue"
+                          onChange={v => updateMatch(m.id, { venue: v })} />
+                      )
+                    ) : (
+                      m.venue && <span className="tm-sched-venue-name">{m.venue}</span>
+                    )}
                     <span className="tm-sched-venue-league" title="Competition (follows this tournament's name)">{tournament.name}</span>
                   </div>
 
                   <div className="tm-sched-divider" />
-                  <div className="tm-sched-broadcaster">
-                    <EditableText className="tm-sched-broadcaster-name" value={m.broadcaster ?? ''} placeholder="Broadcaster"
-                      onChange={v => updateMatch(m.id, { broadcaster: v })} />
-                    <span className="tm-sched-broadcaster-label">Watch on</span>
+                  <div className="tm-sched-catgroup">
+                    {editMode ? (() => {
+                      const knownGroups = normalizeGroups(tournament.groups)
+                        .filter(g => !m.category || !g.category || g.category === m.category);
+                      // A knockout-generated fixture's group is auto-set to its bracket
+                      // stage (e.g. "Quarterfinal") rather than a real Draw group — show
+                      // it as a selectable option even though it isn't one of those.
+                      const isAutoStage = !!m.group && !knownGroups.some(g => g.name === m.group);
+                      return (
+                        <select
+                          className="tm-sched-catgroup-select"
+                          value={m.group ?? ''}
+                          onChange={e => updateMatch(m.id, { group: e.target.value || undefined })}
+                          title={isAutoStage ? 'Auto-set from the knockout bracket stage' : undefined}
+                        >
+                          <option value="">— Group —</option>
+                          {isAutoStage && <option value={m.group}>{m.group} (stage)</option>}
+                          {knownGroups.map(g => <option key={g.name} value={g.name}>{g.name}</option>)}
+                        </select>
+                      );
+                    })() : (
+                      m.group && <span className="tm-sched-catgroup-select">{m.group}</span>
+                    )}
+                    {editMode ? (
+                      (tournament.categories ?? []).length > 0 && (
+                        <select
+                          className="tm-sched-catgroup-select tm-sched-catgroup-select--secondary"
+                          value={m.category ?? ''}
+                          onChange={e => updateMatch(m.id, { category: e.target.value || undefined })}
+                        >
+                          <option value="">— Category —</option>
+                          {m.category && !(tournament.categories ?? []).includes(m.category) && <option value={m.category}>{m.category}</option>}
+                          {(tournament.categories ?? []).map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      )
+                    ) : (
+                      m.category && <span className="tm-sched-catgroup-select tm-sched-catgroup-select--secondary">{m.category}</span>
+                    )}
                   </div>
 
                   <div className="tm-sched-divider" />
-                  <EditableTime value={m.time} onChange={time => updateMatch(m.id, { time })} />
+                  {editMode ? (
+                    <EditableTime value={m.time} onChange={time => updateMatch(m.id, { time })} />
+                  ) : (
+                    m.time && (
+                      <div className="tm-sched-time">
+                        <span className="tm-sched-time-val">{formatTimeDisplay(m.time)}</span>
+                        <span className="tm-sched-time-tz">{getTzAbbrev()}</span>
+                      </div>
+                    )
+                  )}
 
                   <div className="tm-sched-divider" />
                   <div className="tm-sched-send-col">
-                    <ScoreboardSendButton match={m} scoreboards={scoreboards} onSend={id => sendToScoreboard(m, id)} />
+                    {editMode ? (
+                      armedSwapId === m.id ? (
+                        <button className="tm-sched-send-btn tm-sched-send-btn--cancel" title="Cancel swap" onClick={() => setArmedSwapId(null)}>✕ Cancel</button>
+                      ) : armedSwapId ? (
+                        <button className="tm-sched-send-btn tm-sched-send-btn--swap-here" title="Complete the swap with this fixture" onClick={() => { moveFixture(armedSwapId, m.id); setArmedSwapId(null); }}>↔ Swap Here</button>
+                      ) : (
+                        <button className="tm-sched-send-btn" title="Pick this fixture to swap, then click Swap Here on the target" onClick={() => setArmedSwapId(m.id)}>🔄 Swap</button>
+                      )
+                    ) : (
+                      <ScoreboardSendButton match={m} scoreboards={scoreboards} onSend={id => sendToScoreboard(m, id)} />
+                    )}
                   </div>
 
-                  <button className="tm-sched-del" title="Delete fixture" onClick={() => deleteMatch(m.id)}>×</button>
+                  {editMode && <button className="tm-sched-del" title="Delete fixture" onClick={() => deleteMatch(m.id)}>×</button>}
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         ))
+      )}
+      {draggedFixtureId && dragPos && createPortal(
+        (() => {
+          const dm = matches.find(x => x.id === draggedFixtureId);
+          if (!dm) return null;
+          return (
+            <div className="tm-sched-drag-ghost" style={{ left: dragPos.x, top: dragPos.y }}>
+              <ScheduleBadge logo={dm.teamALogo} color={dm.teamAColor} />
+              <span className="tm-sched-drag-ghost-vs">{dm.teamAShortName || dm.teamAName} vs {dm.teamBShortName || dm.teamBName}</span>
+              <ScheduleBadge logo={dm.teamBLogo} color={dm.teamBColor} />
+            </div>
+          );
+        })(),
+        document.body
       )}
     </div>
   );
@@ -1422,10 +2041,92 @@ function formatSavedAt(ms: number): string {
 }
 
 // Same fixture-card layout as the Schedule tab (score in place of "VS",
-// competition/saved-time in place of venue/broadcaster) so a finished match
+// competition/saved-time in place of venue/category-group) so a finished match
 // visually reads as the same object moving from one tab to the other.
+// Union of two per-team count maps into aligned rows (a label present on
+// only one side still gets a row, with 0 on the other) — same idiom used by
+// HeadToHeadPanel/computeTeamTournamentStats, kept local here since this one
+// is scoped to a single result rather than a whole tournament.
+function mergeCountRows(a: Record<string, number>, b: Record<string, number>): { label: string; a: number; b: number }[] {
+  const labels = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return Array.from(labels)
+    .map(label => ({ label, a: a[label] ?? 0, b: b[label] ?? 0 }))
+    .sort((x, y) => (y.a + y.b) - (x.a + x.b));
+}
+
+// Expanded detail for a single result — point-type breakdown, shootout
+// outcome, and card counts, whichever were actually captured for that match
+// (older/manually-entered results may have none of this, hence the empty
+// state). Reuses the scoreboard widget's `.wgt-h2h-table` styling so the
+// "two teams either side of a bordered label column" look stays consistent
+// across the app.
+function ResultDetail({ r }: { r: SavedMatchResult }) {
+  const aBreakdown: Record<string, number> = {};
+  const bBreakdown: Record<string, number> = {};
+  for (const e of r.scoreLog ?? []) {
+    const map = e.team === 'A' ? aBreakdown : bBreakdown;
+    map[e.action] = (map[e.action] ?? 0) + 1;
+  }
+  const rows = mergeCountRows(aBreakdown, bBreakdown);
+
+  const cardTally = (team: 'A' | 'B') => {
+    const t = { yellow: 0, orange: 0, red: 0 };
+    for (const c of r.cards ?? []) if (c.team === team) t[c.type]++;
+    return t;
+  };
+  const aCards = cardTally('A');
+  const bCards = cardTally('B');
+  const hasCards = aCards.yellow + aCards.orange + aCards.red + bCards.yellow + bCards.orange + bCards.red > 0;
+  const hasTable = rows.length > 0 || hasCards;
+
+  if (!hasTable && !r.shootout) {
+    return <div className="tm-result-detail"><div className="tm-result-detail-empty">No further detail captured for this match.</div></div>;
+  }
+
+  return (
+    <div className="tm-result-detail">
+      {r.shootout && (
+        <div className="tm-result-detail-shootout">
+          🥅 Decided on penalties: <span style={{ color: r.teamAColor }}>{r.shootout.scoreA}</span>
+          {' – '}
+          <span style={{ color: r.teamBColor }}>{r.shootout.scoreB}</span>
+        </div>
+      )}
+      {hasTable && (
+        <table className="wgt-h2h-table">
+          <tbody>
+            {rows.map(row => (
+              <tr className="wgt-h2h-row" key={row.label}>
+                <td className="wgt-h2h-cell--a" style={{ color: r.teamAColor }}>{row.a}</td>
+                <td className="wgt-h2h-cell--label">{row.label}</td>
+                <td className="wgt-h2h-cell--b" style={{ color: r.teamBColor }}>{row.b}</td>
+              </tr>
+            ))}
+            {aCards.yellow + bCards.yellow > 0 && (
+              <tr className="wgt-h2h-row"><td className="wgt-h2h-cell--a" style={{ color: r.teamAColor }}>{aCards.yellow}</td><td className="wgt-h2h-cell--label">🟨 Yellow</td><td className="wgt-h2h-cell--b" style={{ color: r.teamBColor }}>{bCards.yellow}</td></tr>
+            )}
+            {aCards.orange + bCards.orange > 0 && (
+              <tr className="wgt-h2h-row"><td className="wgt-h2h-cell--a" style={{ color: r.teamAColor }}>{aCards.orange}</td><td className="wgt-h2h-cell--label">🟧 Orange</td><td className="wgt-h2h-cell--b" style={{ color: r.teamBColor }}>{bCards.orange}</td></tr>
+            )}
+            {aCards.red + bCards.red > 0 && (
+              <tr className="wgt-h2h-row"><td className="wgt-h2h-cell--a" style={{ color: r.teamAColor }}>{aCards.red}</td><td className="wgt-h2h-cell--label">🟥 Red</td><td className="wgt-h2h-cell--b" style={{ color: r.teamBColor }}>{bCards.red}</td></tr>
+            )}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 function ResultsPanel({ tournament }: { tournament: Tournament }) {
   const { results: allResults, updateResult, deleteResult } = useMatchResultsStore();
+  const [editMode, setEditMode] = useState(false);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const toggleExpanded = (id: string) => setExpandedIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   const results = useMemo(
     () => allResults.filter(r => r.tournamentId === tournament.id),
     [allResults, tournament.id]
@@ -1443,7 +2144,10 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
 
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 12 }}>
+        <button className={`tm-io-btn${editMode ? ' tm-io-btn--ok' : ''}`} onClick={() => setEditMode(v => !v)}>
+          {editMode ? '✓ Done Editing' : '✏️ Edit'}
+        </button>
         <button className="tm-io-btn" title="Export results as CSV (Excel compatible)"
           onClick={() => exportResultsCSV(results, tournament.name)}>
           ↓ Export CSV
@@ -1451,39 +2155,48 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
       </div>
       <div className="tm-sched-rows">
         {results.map(r => (
-          <div key={r.id} className="tm-sched-row">
-            <EditableDate value={r.date} onChange={date => updateResult(r.id, { date })} />
+          <div key={r.id} className="tm-sched-row-wrap">
+          <div className="tm-sched-row">
+            <button
+              className={`tm-result-expand-btn${expandedIds.has(r.id) ? ' tm-result-expand-btn--open' : ''}`}
+              title={expandedIds.has(r.id) ? 'Hide details' : 'Show details (score breakdown, shootout, cards)'}
+              onClick={() => toggleExpanded(r.id)}
+            >▸</button>
+            <EditableDate value={r.date} onChange={date => updateResult(r.id, { date })} disabled={!editMode} />
             <div className="tm-sched-divider" />
 
             <div className="tm-sched-matchup">
               <div className="tm-sched-team">
-                <div style={{ width: 36, height: 36, flexShrink: 0 }}><ScheduleBadge logo={r.teamALogo} color={r.teamAColor} /></div>
                 <EditableText className="tm-sched-team-name" value={r.teamAShortName || r.teamAName}
-                  onChange={v => updateResult(r.id, r.teamAShortName ? { teamAShortName: v } : { teamAName: v })} />
+                  onChange={v => updateResult(r.id, r.teamAShortName ? { teamAShortName: v } : { teamAName: v })} disabled={!editMode} />
+                <div style={{ width: 36, height: 36, flexShrink: 0 }}><ScheduleBadge logo={r.teamALogo} color={r.teamAColor} /></div>
               </div>
               <div className="tm-sched-vs-col">
                 {r.matchType && (
                   <span className="tm-sched-type-badge">{r.matchType === 'bye' ? 'BYE' : 'W/O'}</span>
                 )}
+                {r.venueLabel && (
+                  <span className="tm-sched-venue-badge" title={`Synced from venue: ${r.venueLabel}`}>📍 {r.venueLabel}</span>
+                )}
                 <span className="tm-sched-vs tm-sched-score">
-                  <EditableText value={String(r.scoreA)} onChange={v => updateResult(r.id, { scoreA: Number(v) || 0 })} />
+                  <EditableText value={String(r.scoreA)} onChange={v => updateResult(r.id, { scoreA: Number(v) || 0 })} disabled={!editMode} />
                   <span className="tm-sched-score-sep">–</span>
-                  <EditableText value={String(r.scoreB)} onChange={v => updateResult(r.id, { scoreB: Number(v) || 0 })} />
+                  <EditableText value={String(r.scoreB)} onChange={v => updateResult(r.id, { scoreB: Number(v) || 0 })} disabled={!editMode} />
                 </span>
                 <EditableText className="tm-sched-round" value={r.round ?? ''} placeholder="Round"
-                  onChange={v => updateResult(r.id, { round: v })} />
+                  onChange={v => updateResult(r.id, { round: v })} disabled={!editMode} />
               </div>
               <div className="tm-sched-team tm-sched-team--b">
-                <EditableText className="tm-sched-team-name" value={r.teamBShortName || r.teamBName}
-                  onChange={v => updateResult(r.id, r.teamBShortName ? { teamBShortName: v } : { teamBName: v })} />
                 <div style={{ width: 36, height: 36, flexShrink: 0 }}><ScheduleBadge logo={r.teamBLogo} color={r.teamBColor} /></div>
+                <EditableText className="tm-sched-team-name" value={r.teamBShortName || r.teamBName}
+                  onChange={v => updateResult(r.id, r.teamBShortName ? { teamBShortName: v } : { teamBName: v })} disabled={!editMode} />
               </div>
             </div>
 
             <div className="tm-sched-divider" />
             <div className="tm-sched-venue">
               <EditableText className="tm-sched-venue-name" value={r.competition ?? ''} placeholder="Competition"
-                onChange={v => updateResult(r.id, { competition: v })} />
+                onChange={v => updateResult(r.id, { competition: v })} disabled={!editMode} />
               <span className="tm-sched-venue-league">{tournament.name}</span>
             </div>
 
@@ -1499,7 +2212,9 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
               <span className="tm-sched-time-tz">End Time</span>
             </div>
 
-            <button className="tm-sched-del" title="Delete result" onClick={() => deleteResult(r.id)}>×</button>
+            {editMode && <button className="tm-sched-del" title="Delete result" onClick={() => deleteResult(r.id)}>×</button>}
+          </div>
+          {expandedIds.has(r.id) && <ResultDetail r={r} />}
           </div>
         ))}
       </div>
@@ -1511,13 +2226,13 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
 // tournament has no groups defined) computed from saved results. Byes don't
 // count at all (nothing was played); walkovers count as a normal win/loss
 // for the team that didn't forfeit, same as any other result.
-interface StandingRow {
+export interface StandingRow {
   teamId: string; name: string; shortName?: string; logo?: string; color: string;
   played: number; won: number; drawn: number; lost: number;
   pf: number; pa: number; pts: number;
 }
 
-function computeStandings(teams: SavedTeam[], results: SavedMatchResult[], settings: TournamentSettings): StandingRow[] {
+export function computeStandings(teams: SavedTeam[], results: SavedMatchResult[], settings: TournamentSettings): StandingRow[] {
   const rows = new Map<string, StandingRow>();
   for (const t of teams) {
     rows.set(t.id, { teamId: t.id, name: t.name, shortName: t.shortName, logo: t.logo, color: t.color, played: 0, won: 0, drawn: 0, lost: 0, pf: 0, pa: 0, pts: 0 });
@@ -1544,6 +2259,12 @@ function computeStandings(teams: SavedTeam[], results: SavedMatchResult[], setti
     } else if (r.scoreB > r.scoreA) {
       rowB.won++; rowB.pts += settings.pointsWin;
       rowA.lost++; rowA.pts += settings.pointsLoss;
+    } else if (r.shootout) {
+      // Level after regulation but decided by a shootout — counts as a
+      // win/loss for standings purposes, not a draw.
+      const aWon = r.shootout.winner === 'A';
+      (aWon ? rowA : rowB).won++; (aWon ? rowA : rowB).pts += settings.pointsWin;
+      (aWon ? rowB : rowA).lost++; (aWon ? rowB : rowA).pts += settings.pointsLoss;
     } else {
       rowA.drawn++; rowB.drawn++;
       rowA.pts += settings.pointsDraw; rowB.pts += settings.pointsDraw;
@@ -1554,18 +2275,24 @@ function computeStandings(teams: SavedTeam[], results: SavedMatchResult[], setti
   );
 }
 
-function StandingsTable({ title, rows }: { title: string; rows: StandingRow[] }) {
+export function StandingsTable({ title, rows, onTeamClick }: { title: string; rows: StandingRow[]; onTeamClick?: (name: string) => void }) {
   return (
     <div className="tm-standings-table">
       <div className="tm-standings-title">{title}</div>
       <div className="tm-standings-row tm-standings-row--head">
+        <span>#</span>
         <span className="tm-standings-team">Team</span>
         <span>P</span><span>W</span><span>D</span><span>L</span>
         <span>PF</span><span>PA</span><span>+/-</span><span>Pts</span>
       </div>
       {rows.map((r, i) => (
         <div key={r.teamId} className={`tm-standings-row${i < 2 ? ' tm-standings-row--top' : ''}`}>
-          <span className="tm-standings-team">
+          <span className="tm-standings-pos">{i + 1}</span>
+          <span
+            className={`tm-standings-team${onTeamClick ? ' tm-standings-team--clickable' : ''}`}
+            onClick={onTeamClick ? () => onTeamClick(r.name) : undefined}
+            title={onTeamClick ? `View ${r.name}'s tournament stats & history` : undefined}
+          >
             <div style={{ width: 22, height: 22, flexShrink: 0 }}><ScheduleBadge logo={r.logo} color={r.color} /></div>
             {r.shortName || r.name}
           </span>
@@ -1578,7 +2305,602 @@ function StandingsTable({ title, rows }: { title: string; rows: StandingRow[] })
   );
 }
 
-function StandingsPanel({ tournament }: { tournament: Tournament }) {
+// Read-only "everything about this team in this tournament" popup — opened
+// by clicking a team name in Standings or the Bracket. Resolves the clicked
+// display name back to a real SavedTeam (fails silently for a knockout
+// placeholder like "1st Group A" or "Winner of …" that hasn't resolved to a
+// real team yet — there's nothing to show for those).
+function TeamInfoModal({ tournament, teamName, category, onClose }: { tournament: Tournament; teamName: string; category?: string; onClose: () => void }) {
+  const { teams: allTeams } = useTeamDbStore();
+  const { results: allResults } = useMatchResultsStore();
+  const { matches: allMatches } = useMatchScheduleStore();
+
+  // A club entering multiple categories duplicates its team entry per
+  // category (see teamDbStore.duplicateTeam) — two SavedTeam rows can
+  // legitimately share the same name. Require the category to match too
+  // (when known) so this always resolves to the ONE team the user actually
+  // clicked, not just whichever same-named team happens to be first.
+  const team = useMemo(() => {
+    const key = teamName.trim().toLowerCase();
+    const candidates = allTeams.filter(t => t.tournamentId === tournament.id &&
+      (t.name.trim().toLowerCase() === key || (t.shortName ?? '').trim().toLowerCase() === key));
+    if (candidates.length <= 1) return candidates[0];
+    return candidates.find(t => t.category === category) ?? candidates[0];
+  }, [allTeams, tournament.id, teamName, category]);
+
+  const results = useMemo(() => allResults.filter(r => r.tournamentId === tournament.id), [allResults, tournament.id]);
+
+  // A result/fixture's category may only live in the `round` prefix ("Men ·
+  // Quarterfinal 2") on data generated before the dedicated category field
+  // existed.
+  const effectiveCat = (c?: string, round?: string) => c ?? (round?.includes(' · ') ? round.split(' · ')[0] : undefined);
+
+  const isTeam = (n?: string, s?: string, recCategory?: string, recRound?: string) => {
+    if (!team || !n) return false;
+    const nameKey = team.name.trim().toLowerCase();
+    const shortKey = (team.shortName ?? '').trim().toLowerCase();
+    const nameOk = n.trim().toLowerCase() === nameKey || (!!shortKey && (s ?? '').trim().toLowerCase() === shortKey);
+    if (!nameOk) return false;
+    // No category on this team (tournament has none, or team is unassigned) — name match is enough.
+    if (!team.category) return true;
+    // Otherwise also check the record's category — but only REJECT on an
+    // actual conflict (a different category tagged). A record with no
+    // category info at all (any result/fixture saved before this field
+    // existed, or a plain round-robin round with no "Category · " prefix)
+    // stays a match — same "untagged = visible everywhere" convention used
+    // for groups/pots elsewhere in this app. Without this leniency, every
+    // pre-existing result would wrongly disappear from a team's history.
+    const recCat = effectiveCat(recCategory, recRound);
+    return !recCat || recCat === team.category;
+  };
+
+  const standingRow = useMemo(() => {
+    if (!team) return null;
+    const settings = tournament.settings ?? SPORT_DEFAULTS[tournament.sport];
+    const scopeTeams = allTeams.filter(t => t.tournamentId === tournament.id &&
+      (team.group ? t.group === team.group : true) &&
+      (team.category ? t.category === team.category : true));
+    return computeStandings(scopeTeams, results, settings).find(row => row.teamId === team.id) ?? null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [team, allTeams, tournament.id, tournament.settings, tournament.sport, results]);
+
+  const history = useMemo(
+    () => results
+      .filter(r => isTeam(r.teamAName, r.teamAShortName, r.category, r.round) || isTeam(r.teamBName, r.teamBShortName, r.category, r.round))
+      .sort((a, b) => b.date.localeCompare(a.date)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [results, team]
+  );
+
+  const upcoming = useMemo(
+    () => allMatches
+      .filter(m => m.tournamentId === tournament.id && !m.completedAt &&
+        (isTeam(m.teamAName, m.teamAShortName, m.category, m.round) || isTeam(m.teamBName, m.teamBShortName, m.category, m.round)))
+      .sort((a, b) => a.date.localeCompare(b.date)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allMatches, tournament.id, team]
+  );
+
+  if (!team) return null;
+
+  return (
+    <div className="tm-gen-backdrop" onClick={onClose}>
+      <div className="tm-team-info-modal" onClick={e => e.stopPropagation()}>
+        <div className="tm-team-info-header">
+          <div style={{ width: 56, height: 56, flexShrink: 0 }}><ScheduleBadge logo={team.logo} color={team.color} /></div>
+          <div className="tm-team-info-heading">
+            <div className="tm-team-info-name">{team.name}</div>
+            <div className="tm-team-info-badges">
+              {team.category && <span className="tm-team-cat-badge">{team.category}</span>}
+              {team.group && <span className="tm-group-chip">{team.group}</span>}
+              {team.pot && <span className="tm-group-chip tm-group-chip--pot">{team.pot}</span>}
+              {team.players && team.players.length > 0 && <span className="tm-group-chip">{team.players.length} players</span>}
+            </div>
+          </div>
+          <button className="tm-io-btn" onClick={onClose} style={{ marginLeft: 'auto' }}>Close</button>
+        </div>
+
+        {standingRow && (
+          <div className="tm-team-info-stats">
+            <div className="tm-team-info-stat"><span>{standingRow.played}</span><label>Played</label></div>
+            <div className="tm-team-info-stat"><span>{standingRow.won}</span><label>Won</label></div>
+            <div className="tm-team-info-stat"><span>{standingRow.drawn}</span><label>Drawn</label></div>
+            <div className="tm-team-info-stat"><span>{standingRow.lost}</span><label>Lost</label></div>
+            <div className="tm-team-info-stat"><span>{standingRow.pf}</span><label>For</label></div>
+            <div className="tm-team-info-stat"><span>{standingRow.pa}</span><label>Against</label></div>
+            <div className="tm-team-info-stat"><span>{standingRow.pf - standingRow.pa > 0 ? '+' : ''}{standingRow.pf - standingRow.pa}</span><label>+/-</label></div>
+            <div className="tm-team-info-stat tm-team-info-stat--pts"><span>{standingRow.pts}</span><label>Points</label></div>
+          </div>
+        )}
+
+        <div className="tm-team-info-section-title">🕐 Match History{history.length > 0 ? ` (${history.length})` : ''}</div>
+        {history.length === 0 ? (
+          <div className="tm-team-info-empty">No completed matches yet.</div>
+        ) : (
+          <div className="tm-team-info-list">
+            {history.map(r => {
+              const isA = isTeam(r.teamAName, r.teamAShortName);
+              const oppName = isA ? r.teamBName : r.teamAName;
+              const oppShort = isA ? r.teamBShortName : r.teamAShortName;
+              const oppLogo = isA ? r.teamBLogo : r.teamALogo;
+              const oppColor = isA ? r.teamBColor : r.teamAColor;
+              const us = isA ? r.scoreA : r.scoreB;
+              const them = isA ? r.scoreB : r.scoreA;
+              const outcome = us > them ? 'W' : us < them ? 'L' : 'D';
+              return (
+                <div key={r.id} className="tm-team-info-row">
+                  <span className={`tm-team-info-outcome tm-team-info-outcome--${outcome}`}>{outcome}</span>
+                  <span className="tm-team-info-date">{r.date}</span>
+                  <div style={{ width: 20, height: 20, flexShrink: 0 }}><ScheduleBadge logo={oppLogo} color={oppColor} /></div>
+                  <span className="tm-team-info-opp">{oppShort || oppName}</span>
+                  <span className="tm-team-info-score">{us}–{them}</span>
+                  {r.round && <span className="tm-team-info-round">{r.round}</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {upcoming.length > 0 && (
+          <>
+            <div className="tm-team-info-section-title">📅 Upcoming ({upcoming.length})</div>
+            <div className="tm-team-info-list">
+              {upcoming.map(m => {
+                const isA = isTeam(m.teamAName, m.teamAShortName);
+                const oppName = isA ? m.teamBName : m.teamAName;
+                const oppShort = isA ? m.teamBShortName : m.teamAShortName;
+                const oppLogo = isA ? m.teamBLogo : m.teamALogo;
+                const oppColor = isA ? m.teamBColor : m.teamAColor;
+                return (
+                  <div key={m.id} className="tm-team-info-row">
+                    <span className="tm-team-info-date">{m.date}</span>
+                    <div style={{ width: 20, height: 20, flexShrink: 0 }}><ScheduleBadge logo={oppLogo} color={oppColor} /></div>
+                    <span className="tm-team-info-opp">{m.teamBName ? (oppShort || oppName) : 'BYE'}</span>
+                    {m.round && <span className="tm-team-info-round">{m.round}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// A regular (non-bye/walkover) played match's score lives in a separate
+// SavedMatchResult, not on the fixture itself — matched by team names since
+// there's no id link back for a manually-saved scoreboard result. Shared by
+// the bracket viewer (to bold the winner) and the auto-advance effect below
+// (to know who advances).
+export function findMatchScore(m: ScheduledMatch, results: SavedMatchResult[], tournamentId: string): { a: number; b: number } | null {
+  if (m.matchType) return { a: m.scoreA ?? 0, b: m.scoreB ?? 0 };
+  if (!m.completedAt) return null;
+  const r = results.find(res =>
+    res.tournamentId === tournamentId &&
+    ((res.teamAName === m.teamAName && res.teamBName === m.teamBName) ||
+     (res.teamAName === m.teamBName && res.teamBName === m.teamAName))
+  );
+  if (!r) return null;
+  return r.teamAName === m.teamAName ? { a: r.scoreA, b: r.scoreB } : { a: r.scoreB, b: r.scoreA };
+}
+
+// Like findMatchScore, but also resolves a shootout decider when the raw
+// score is tied — a knockout match that went to a penalty shootout/place-kick
+// competition stays level on scoreA/scoreB, so callers that need to know who
+// actually won (bracket auto-advance, bracket-view bolding) should use this
+// instead of comparing findMatchScore's {a,b} directly.
+export function findMatchWinner(m: ScheduledMatch, results: SavedMatchResult[], tournamentId: string): { side: 'A' | 'B'; shootout?: { scoreA: number; scoreB: number } } | null {
+  const score = findMatchScore(m, results, tournamentId);
+  if (!score) return null;
+  if (score.a > score.b) return { side: 'A' };
+  if (score.b > score.a) return { side: 'B' };
+  if (m.matchType || !m.completedAt) return null; // genuine unresolved draw (bye/walkover already handled above; incomplete fixture)
+  const r = results.find(res =>
+    res.tournamentId === tournamentId &&
+    ((res.teamAName === m.teamAName && res.teamBName === m.teamBName) ||
+     (res.teamAName === m.teamBName && res.teamBName === m.teamAName))
+  );
+  if (!r?.shootout) return null; // a genuine round-robin draw with no decider
+  const straight = r.teamAName === m.teamAName;
+  const side: 'A' | 'B' = straight ? r.shootout.winner : (r.shootout.winner === 'A' ? 'B' : 'A');
+  const shootout = straight ? { scoreA: r.shootout.scoreA, scoreB: r.shootout.scoreB } : { scoreA: r.shootout.scoreB, scoreB: r.shootout.scoreA };
+  return { side, shootout };
+}
+
+// Placeholder entrant names generated by the schedule generator for
+// not-yet-known bracket slots — "Winner of Quarterfinal 2", "1st Group A".
+// A slot only auto-fills while it still holds one of these; once an
+// operator manually picks a real team, it's left alone.
+export function isPlaceholderTeamName(name: string): boolean {
+  return /^(Winner|Loser) of /.test(name) || /^\d+(st|nd|rd|th) /.test(name);
+}
+
+// A knockout-generated fixture's `group` is auto-set to its bracket stage
+// name (see GenerateScheduleModal) — "Final" / "Semifinal" / "Quarterfinal" /
+// "Round of N" — distinct from a real Draw pool group name, so this is how
+// the bracket viewer tells which fixtures belong to a knockout tree.
+export function knockoutStageSize(stage: string): number {
+  if (stage === 'Final') return 2;
+  if (stage === 'Semifinal') return 4;
+  if (stage === 'Quarterfinal') return 8;
+  const m = stage.match(/^Round of (\d+)$/);
+  return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+}
+function isKnockoutStage(group?: string): boolean {
+  return !!group && (group === 'Final' || group === 'Semifinal' || group === 'Quarterfinal' || /^Round of \d+$/.test(group));
+}
+
+// A knockout fixture's stage normally lives on `group` (auto-tagged at
+// generation time). Fall back to parsing `round` — "[Category · ]Stage[
+// N]" — so fixtures from a "Groups + Knockout" run generated before that
+// tagging existed (or any hand-typed knockout fixture) still show up.
+export function extractKnockoutStage(m: ScheduledMatch): string | null {
+  if (m.group && isKnockoutStage(m.group)) return m.group;
+  if (m.round) {
+    const afterCategory = m.round.includes(' · ') ? m.round.split(' · ').pop()! : m.round;
+    const stageOnly = afterCategory.replace(/\s+\d+$/, '').trim();
+    if (isKnockoutStage(stageOnly)) return stageOnly;
+  }
+  return null;
+}
+
+// Bracket geometry — fixed sizes so connector lines can be computed exactly
+// rather than measured from the DOM. Each match's vertical center in round r
+// is the midpoint of the two matches feeding it in round r-1, so a
+// connector line drawn to that exact point always lands dead-center on the
+// next match, however many rounds there are.
+export const BRACKET_MATCH_H = 60;
+export const BRACKET_BASE_GAP = 30;
+export const BRACKET_COL_W = 240;
+export const BRACKET_COL_GAP = 60;
+
+export function computeBracketCenters(stageCounts: number[]): number[][] {
+  if (stageCounts.length === 0) return [];
+  const unit0 = BRACKET_MATCH_H + BRACKET_BASE_GAP;
+  const centers: number[][] = [Array.from({ length: stageCounts[0] }, (_, i) => unit0 / 2 + i * unit0)];
+  for (let r = 1; r < stageCounts.length; r++) {
+    const prev = centers[r - 1];
+    centers.push(Array.from({ length: stageCounts[r] }, (_, i) =>
+      ((prev[2 * i] ?? 0) + (prev[2 * i + 1] ?? prev[2 * i] ?? 0)) / 2
+    ));
+  }
+  return centers;
+}
+
+// Read-only bracket graphic for its own tab — pulls fixtures straight from
+// the Schedule (no separate bracket data model), grouped by knockout stage.
+// If the tournament has categories, each generates its own separate bracket
+// (see GenerateScheduleModal) — which one to display is the shared Category
+// picker in the top TournamentScopeHeader bar, not a picker local to this tab.
+function BracketPanel({ tournament, activeCategory }: { tournament: Tournament; activeCategory: string }) {
+  const { matches: allMatches, addMatch, updateMatch } = useMatchScheduleStore();
+  const { results: allResults } = useMatchResultsStore();
+  const categories = tournament.categories ?? [];
+  const category = activeCategory;
+  const [editMode, setEditMode] = useState(false);
+  const [selectedTeamName, setSelectedTeamName] = useState<string | null>(null);
+
+  // A fixture's category may only live in the `round` prefix ("Men ·
+  // Quarterfinal 2") on data generated before the dedicated category field
+  // existed — fall back to that so old Groups + Knockout schedules still
+  // scope correctly to the picked category.
+  const effectiveCategory = (m: ScheduledMatch): string | undefined =>
+    m.category ?? (m.round?.includes(' · ') ? m.round.split(' · ')[0] : undefined);
+
+  const matches = useMemo(
+    () => allMatches.filter(m =>
+      m.tournamentId === tournament.id &&
+      (categories.length === 0 || effectiveCategory(m) === category) &&
+      !!extractKnockoutStage(m)
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allMatches, tournament.id, category, categories.length]
+  );
+
+  const thirdPlaceMatch = useMemo(
+    () => allMatches.find(m =>
+      m.tournamentId === tournament.id &&
+      (categories.length === 0 || effectiveCategory(m) === category) &&
+      m.group === '3rd Place'
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allMatches, tournament.id, category, categories.length]
+  );
+
+  const stages = useMemo(() => {
+    const byStage = new Map<string, ScheduledMatch[]>();
+    for (const m of matches) {
+      const key = extractKnockoutStage(m)!;
+      if (!byStage.has(key)) byStage.set(key, []);
+      byStage.get(key)!.push(m);
+    }
+    return Array.from(byStage.entries()).sort((a, b) => knockoutStageSize(b[0]) - knockoutStageSize(a[0]));
+  }, [matches]);
+
+  const centers = useMemo(() => computeBracketCenters(stages.map(([, ms]) => ms.length)), [stages]);
+  const bracketHeight = centers[0] ? centers[0].length * (BRACKET_MATCH_H + BRACKET_BASE_GAP) : 0;
+  const bracketWidth = stages.length * (BRACKET_COL_W + BRACKET_COL_GAP) - BRACKET_COL_GAP;
+
+  // The 3rd Place Playoff isn't a normal bracket round (it's fed by the two
+  // Semifinal LOSERS, not winners) — position it in the Final's column, below
+  // the Final match, and draw its own connector from the Semifinal matches.
+  const semifinalStageIdx = stages.findIndex(([name]) => name === 'Semifinal');
+  const finalStageIdx = stages.length - 1;
+  const finalCenterY = centers[finalStageIdx]?.[0] ?? 0;
+  const thirdPlaceY = finalCenterY + BRACKET_MATCH_H + BRACKET_BASE_GAP * 2.5;
+  const containerHeight = thirdPlaceMatch
+    ? Math.max(bracketHeight, thirdPlaceY + BRACKET_MATCH_H / 2 + 20)
+    : bracketHeight;
+  const naturalWidth = bracketWidth;
+  const naturalHeight = containerHeight + 24;
+
+  // Scales the whole bracket to fill whatever space this tab actually has —
+  // a small 2-round bracket in a maximized window would otherwise sit tiny
+  // in a sea of whitespace; a big one shrinks to fit instead of forcing a
+  // scrollbar. Re-measures on every resize (window resize, panel resize).
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el || stages.length === 0 || naturalWidth === 0 || naturalHeight === 0) return;
+    const update = () => {
+      const s = Math.min(el.clientWidth / naturalWidth, el.clientHeight / naturalHeight, 1.6);
+      setScale(Math.max(0.35, s));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [naturalWidth, naturalHeight, stages.length]);
+
+  const findScore = (m: ScheduledMatch) => findMatchScore(m, allResults, tournament.id);
+  const findWinner = (m: ScheduledMatch) => findMatchWinner(m, allResults, tournament.id);
+
+  // Round-1 slot arrangement — lets an operator change which entrant (e.g.
+  // "1st Group A") lands in which bracket position, without regenerating the
+  // whole schedule. Only Round 1 is editable this way: later rounds are
+  // winner placeholders that already get filled in automatically as results
+  // come in (see the auto-advance effect in SchedulePanel).
+  interface BracketSlot { matchId: string; side: 'A' | 'B'; name: string; shortName?: string; color: string; logo?: string; }
+  const round1Slots: BracketSlot[] = useMemo(() => {
+    const round1 = stages[0]?.[1] ?? [];
+    const slots: BracketSlot[] = [];
+    for (const m of round1) {
+      slots.push({ matchId: m.id, side: 'A', name: m.teamAName, shortName: m.teamAShortName, color: m.teamAColor, logo: m.teamALogo });
+      if (m.teamBName) slots.push({ matchId: m.id, side: 'B', name: m.teamBName, shortName: m.teamBShortName, color: m.teamBColor, logo: m.teamBLogo });
+    }
+    return slots;
+  }, [stages]);
+
+  const swapSlot = (matchId: string, side: 'A' | 'B', newName: string) => {
+    const from = round1Slots.find(s => s.matchId === matchId && s.side === side);
+    const to = round1Slots.find(s => s.name === newName);
+    if (!from || !to || from.name === to.name) return;
+    const patchFor = (slot: BracketSlot, team: BracketSlot) => slot.side === 'A'
+      ? { teamAName: team.name, teamAShortName: team.shortName, teamAColor: team.color, teamALogo: team.logo }
+      : { teamBName: team.name, teamBShortName: team.shortName, teamBColor: team.color, teamBLogo: team.logo };
+    if (from.matchId === to.matchId) {
+      updateMatch(from.matchId, { ...patchFor(from, to), ...patchFor(to, from) });
+    } else {
+      updateMatch(from.matchId, patchFor(from, to));
+      updateMatch(to.matchId, patchFor(to, from));
+    }
+  };
+
+  // Retro-fit for a bracket generated without "Play 3rd/4th place" checked —
+  // adds the same fixture the generator would have, scheduled alongside the
+  // Final, using Semifinal-loser placeholders the auto-advance effect then
+  // fills in as each Semifinal is decided.
+  const semifinalStage = stages.find(([name]) => name === 'Semifinal');
+  const canAddThirdPlace = !!semifinalStage && !thirdPlaceMatch;
+  const addThirdPlacePlayoff = () => {
+    if (!semifinalStage) return;
+    const finalStage = stages.find(([name]) => name === 'Final');
+    const refMatch = finalStage?.[1][0] ?? semifinalStage[1][0];
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const prefix = categories.length > 0 ? `${category} · ` : '';
+    addMatch({
+      tournamentId: tournament.id,
+      competition: tournament.name,
+      date: refMatch?.date ?? todayStr,
+      time: refMatch?.time,
+      round: `${prefix}3rd Place Playoff`,
+      category: categories.length > 0 ? category : undefined,
+      group: '3rd Place',
+      teamAName: 'Loser of Semifinal 1', teamAColor: PLACEHOLDER_COLOR,
+      teamBName: 'Loser of Semifinal 2', teamBColor: PLACEHOLDER_COLOR,
+    });
+  };
+
+  return (
+    <div className="tm-win-content" style={{ padding: 16, overflow: 'auto' }}>
+      <div className="tm-bracket-panel">
+        <div className="tm-bracket-modal-header">
+          {canAddThirdPlace && (
+            <button className="tm-io-btn" onClick={addThirdPlacePlayoff} title="Add a 3rd/4th place playoff between the Semifinal losers">
+              🥉 Add 3rd Place Playoff
+            </button>
+          )}
+          {round1Slots.length > 0 && (
+            <button
+              className={`tm-io-btn${editMode ? ' tm-io-btn--ok' : ''}`}
+              onClick={() => setEditMode(v => !v)}
+              title="Swap which entrant lands in which Round 1 bracket slot"
+            >
+              {editMode ? '✓ Done Editing' : '✏️ Edit Arrangement'}
+            </button>
+          )}
+        </div>
+        {editMode && (
+          <div className="tm-gen-warn" style={{ marginTop: 0 }}>
+            ✏️ Edit mode: pick a different entrant in any Round 1 slot to swap it with whoever currently holds that spot.
+          </div>
+        )}
+
+        {categories.length > 0 && !activeCategory ? (
+          <div className="tm-win-placeholder">
+            Pick a category from the top bar to view its bracket — each category generates its own separate bracket.
+          </div>
+        ) : stages.length === 0 ? (
+          <div className="tm-win-placeholder">
+            No knockout-stage fixtures found{categories.length > 0 ? ' for this category' : ''} — generate one via 🪄 Generate Schedule (Knockout or Groups + Knockout) in the Schedule tab.
+          </div>
+        ) : (
+          <div ref={viewportRef} className="tm-bracket-viewport">
+            <div style={{ width: naturalWidth * scale, height: naturalHeight * scale, position: 'relative' }}>
+              <div
+                className="tm-bracket"
+                style={{ width: naturalWidth, height: naturalHeight, transform: `scale(${scale})`, transformOrigin: 'top left', position: 'absolute', top: 0, left: 0 }}
+              >
+            <svg
+              className="tm-bracket-lines"
+              width={bracketWidth} height={containerHeight + 24}
+              style={{ position: 'absolute', left: 0, top: 24, pointerEvents: 'none' }}
+            >
+              {stages.slice(0, -1).map(([, stageMatches], r) => {
+                const colLeft = r * (BRACKET_COL_W + BRACKET_COL_GAP);
+                const xStart = colLeft + BRACKET_COL_W;
+                const xMid = xStart + BRACKET_COL_GAP / 2;
+                const xEnd = xStart + BRACKET_COL_GAP;
+                const pairs: React.ReactNode[] = [];
+                for (let i = 0; i < stageMatches.length; i += 2) {
+                  const y1 = centers[r][i];
+                  const y2 = centers[r][i + 1] ?? y1;
+                  const yMid = centers[r + 1]?.[i / 2] ?? (y1 + y2) / 2;
+                  pairs.push(
+                    <path
+                      key={`${r}-${i}`}
+                      d={`M ${xStart} ${y1} L ${xMid} ${y1} L ${xMid} ${y2} L ${xStart} ${y2} M ${xMid} ${yMid} L ${xEnd} ${yMid}`}
+                      fill="none"
+                      className="tm-bracket-line"
+                    />
+                  );
+                }
+                return pairs;
+              })}
+              {thirdPlaceMatch && semifinalStageIdx >= 0 && (() => {
+                const colLeft = semifinalStageIdx * (BRACKET_COL_W + BRACKET_COL_GAP);
+                const xStart = colLeft + BRACKET_COL_W;
+                const xMid = xStart + BRACKET_COL_GAP / 2;
+                const xEnd = xStart + BRACKET_COL_GAP;
+                const y1 = centers[semifinalStageIdx][0];
+                const y2 = centers[semifinalStageIdx][1] ?? y1;
+                return (
+                  <path
+                    d={`M ${xStart} ${y1} L ${xMid} ${y1} L ${xMid} ${thirdPlaceY} L ${xEnd} ${thirdPlaceY} M ${xMid} ${y2} L ${xStart} ${y2}`}
+                    fill="none"
+                    className="tm-bracket-line tm-bracket-line--third"
+                  />
+                );
+              })()}
+            </svg>
+            {stages.map(([stageName, stageMatches], r) => (
+              <div
+                key={stageName}
+                className="tm-bracket-col"
+                style={{ position: 'absolute', left: r * (BRACKET_COL_W + BRACKET_COL_GAP), top: 0, width: BRACKET_COL_W, height: containerHeight + 24 }}
+              >
+                <div className="tm-bracket-col-title">{stageName}</div>
+                {stageMatches.map((m, i) => {
+                  const score = findScore(m);
+                  const win = findWinner(m);
+                  const aWins = win?.side === 'A';
+                  const bWins = win?.side === 'B';
+                  const centerY = centers[r]?.[i] ?? 0;
+                  const editable = editMode && r === 0;
+                  return (
+                    <div
+                      key={m.id}
+                      className={`tm-bracket-match${editable ? ' tm-bracket-match--editing' : ''}`}
+                      style={{ position: 'absolute', top: 24 + centerY - BRACKET_MATCH_H / 2, left: 0, width: BRACKET_COL_W, height: BRACKET_MATCH_H }}
+                      title={win?.shootout ? `Won on penalties, ${win.shootout.scoreA}-${win.shootout.scoreB}` : undefined}
+                    >
+                      <div className={`tm-bracket-team${aWins ? ' tm-bracket-team--winner' : ''}`}>
+                        <div style={{ width: 26, height: 26, flexShrink: 0 }}><ScheduleBadge logo={m.teamALogo} color={m.teamAColor} /></div>
+                        {editable ? (
+                          <select className="tm-bracket-slot-select" value={m.teamAName} onChange={e => swapSlot(m.id, 'A', e.target.value)}>
+                            {round1Slots.map(s => <option key={`${s.matchId}-${s.side}`} value={s.name}>{s.name}</option>)}
+                          </select>
+                        ) : (
+                          <span className="tm-bracket-team-name tm-bracket-team-name--clickable" onClick={() => setSelectedTeamName(m.teamAName)}>{m.teamAShortName || m.teamAName}</span>
+                        )}
+                        {score && <span className="tm-bracket-score">{score.a}{win?.shootout && aWins ? <sup className="tm-bracket-pens">p</sup> : null}</span>}
+                      </div>
+                      <div className={`tm-bracket-team${bWins ? ' tm-bracket-team--winner' : ''}`}>
+                        <div style={{ width: 26, height: 26, flexShrink: 0 }}><ScheduleBadge logo={m.teamBLogo} color={m.teamBColor} /></div>
+                        {editable && m.teamBName ? (
+                          <select className="tm-bracket-slot-select" value={m.teamBName} onChange={e => swapSlot(m.id, 'B', e.target.value)}>
+                            {round1Slots.map(s => <option key={`${s.matchId}-${s.side}`} value={s.name}>{s.name}</option>)}
+                          </select>
+                        ) : (
+                          <span
+                            className={m.teamBName ? 'tm-bracket-team-name tm-bracket-team-name--clickable' : 'tm-bracket-team-name'}
+                            onClick={m.teamBName ? () => setSelectedTeamName(m.teamBName) : undefined}
+                          >{m.teamBName ? (m.teamBShortName || m.teamBName) : 'BYE'}</span>
+                        )}
+                        {score && <span className="tm-bracket-score">{score.b}{win?.shootout && bWins ? <sup className="tm-bracket-pens">p</sup> : null}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+            {thirdPlaceMatch && (() => {
+              const score = findScore(thirdPlaceMatch);
+              const win = findWinner(thirdPlaceMatch);
+              const aWins = win?.side === 'A';
+              const bWins = win?.side === 'B';
+              return (
+                <div
+                  className="tm-bracket-col"
+                  style={{ position: 'absolute', left: finalStageIdx * (BRACKET_COL_W + BRACKET_COL_GAP), top: 0, width: BRACKET_COL_W, height: containerHeight + 24 }}
+                >
+                  <div
+                    className="tm-bracket-col-title tm-bracket-col-title--third"
+                    style={{ position: 'absolute', top: thirdPlaceY - BRACKET_MATCH_H / 2 - 16 }}
+                  >🥉 3rd Place</div>
+                  <div
+                    className="tm-bracket-match"
+                    style={{ position: 'absolute', top: thirdPlaceY - BRACKET_MATCH_H / 2, left: 0, width: BRACKET_COL_W, height: BRACKET_MATCH_H }}
+                    title={win?.shootout ? `Won on penalties, ${win.shootout.scoreA}-${win.shootout.scoreB}` : undefined}
+                  >
+                    <div className={`tm-bracket-team${aWins ? ' tm-bracket-team--winner' : ''}`}>
+                      <div style={{ width: 26, height: 26, flexShrink: 0 }}><ScheduleBadge logo={thirdPlaceMatch.teamALogo} color={thirdPlaceMatch.teamAColor} /></div>
+                      <span className="tm-bracket-team-name tm-bracket-team-name--clickable" onClick={() => setSelectedTeamName(thirdPlaceMatch.teamAName)}>{thirdPlaceMatch.teamAShortName || thirdPlaceMatch.teamAName}</span>
+                      {score && <span className="tm-bracket-score">{score.a}{win?.shootout && aWins ? <sup className="tm-bracket-pens">p</sup> : null}</span>}
+                    </div>
+                    <div className={`tm-bracket-team${bWins ? ' tm-bracket-team--winner' : ''}`}>
+                      <div style={{ width: 26, height: 26, flexShrink: 0 }}><ScheduleBadge logo={thirdPlaceMatch.teamBLogo} color={thirdPlaceMatch.teamBColor} /></div>
+                      <span
+                        className={thirdPlaceMatch.teamBName ? 'tm-bracket-team-name tm-bracket-team-name--clickable' : 'tm-bracket-team-name'}
+                        onClick={thirdPlaceMatch.teamBName ? () => setSelectedTeamName(thirdPlaceMatch.teamBName) : undefined}
+                      >{thirdPlaceMatch.teamBName ? (thirdPlaceMatch.teamBShortName || thirdPlaceMatch.teamBName) : 'BYE'}</span>
+                      {score && <span className="tm-bracket-score">{score.b}{win?.shootout && bWins ? <sup className="tm-bracket-pens">p</sup> : null}</span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+              </div>
+            </div>
+          </div>
+        )}
+        {selectedTeamName && (
+          <TeamInfoModal
+            tournament={tournament}
+            teamName={selectedTeamName}
+            category={categories.length > 0 ? category : undefined}
+            onClose={() => setSelectedTeamName(null)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StandingsPanel({ tournament, activeCategory }: { tournament: Tournament; activeCategory: string }) {
   const { teams: allTeams } = useTeamDbStore();
   const { results: allResults } = useMatchResultsStore();
   const settings = tournament.settings ?? SPORT_DEFAULTS[tournament.sport];
@@ -1586,6 +2908,7 @@ function StandingsPanel({ tournament }: { tournament: Tournament }) {
   const results = useMemo(() => allResults.filter(r => r.tournamentId === tournament.id), [allResults, tournament.id]);
   const groups = normalizeGroups(tournament.groups);
   const categories = tournament.categories ?? [];
+  const [selectedTeam, setSelectedTeam] = useState<{ name: string; category?: string } | null>(null);
 
   if (teams.length === 0) {
     return (
@@ -1597,20 +2920,23 @@ function StandingsPanel({ tournament }: { tournament: Tournament }) {
     );
   }
 
-  // Groups/tables for one scope (a category, or the whole tournament when
-  // no categories are defined) — untagged groups stay visible in every scope.
-  const renderScope = (scopeTeams: SavedTeam[], scopeGroups: TournamentGroup[], label: string | null) => (
+  // Groups/tables for one scope (a category, or the whole tournament when no
+  // categories are defined) — untagged groups stay visible in every scope.
+  // `categoryValue` is the ACTUAL category to tag a team click with (distinct
+  // from `label`, which for the "Uncategorized" bucket is display text, not
+  // a real category value) — see TeamInfoModal for why this matters.
+  const renderScope = (scopeTeams: SavedTeam[], scopeGroups: TournamentGroup[], label: string | null, categoryValue: string | undefined) => (
     <div key={label ?? '__all__'} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {label && <div className="tm-draw-section-title">{label}</div>}
       {scopeGroups.length === 0 ? (
-        <StandingsTable title={label ?? tournament.name} rows={computeStandings(scopeTeams, results, settings)} />
+        <StandingsTable title={label ?? tournament.name} rows={computeStandings(scopeTeams, results, settings)} onTeamClick={name => setSelectedTeam({ name, category: categoryValue })} />
       ) : (
         <>
           {scopeGroups.map(g => (
-            <StandingsTable key={g.name} title={g.name} rows={computeStandings(scopeTeams.filter(t => t.group === g.name), results, settings)} />
+            <StandingsTable key={g.name} title={g.name} rows={computeStandings(scopeTeams.filter(t => t.group === g.name), results, settings)} onTeamClick={name => setSelectedTeam({ name, category: categoryValue })} />
           ))}
           {scopeTeams.some(t => !t.group) && (
-            <StandingsTable title="Unassigned" rows={computeStandings(scopeTeams.filter(t => !t.group), results, settings)} />
+            <StandingsTable title="Unassigned" rows={computeStandings(scopeTeams.filter(t => !t.group), results, settings)} onTeamClick={name => setSelectedTeam({ name, category: categoryValue })} />
           )}
         </>
       )}
@@ -1620,20 +2946,33 @@ function StandingsPanel({ tournament }: { tournament: Tournament }) {
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 24 }}>
       {categories.length === 0 ? (
-        renderScope(teams, groups, null)
+        renderScope(teams, groups, null, undefined)
+      ) : activeCategory ? (
+        // A specific category is selected in the top bar — show just that one.
+        renderScope(
+          teams.filter(t => t.category === activeCategory),
+          groups.filter(g => !g.category || g.category === activeCategory),
+          activeCategory,
+          activeCategory
+        )
       ) : (
         <>
           {categories.map(c => renderScope(
             teams.filter(t => t.category === c),
             groups.filter(g => !g.category || g.category === c),
+            c,
             c
           ))}
           {teams.some(t => !t.category) && renderScope(
             teams.filter(t => !t.category),
             groups.filter(g => !g.category),
-            'Uncategorized'
+            'Uncategorized',
+            undefined
           )}
         </>
+      )}
+      {selectedTeam && (
+        <TeamInfoModal tournament={tournament} teamName={selectedTeam.name} category={selectedTeam.category} onClose={() => setSelectedTeam(null)} />
       )}
     </div>
   );
@@ -1650,7 +2989,7 @@ interface LastDrawn { team: SavedTeam; pot: string; group: string; }
 interface ArmedTeam { team: SavedTeam; pot: string; }
 interface ArmedSlot { group: string; position: number; }
 
-function DrawPanel({ tournament }: { tournament: Tournament }) {
+function DrawPanel({ tournament, activeCategory }: { tournament: Tournament; activeCategory: string }) {
   const { teams: allTeams, updateTeam } = useTeamDbStore();
   const { updateTournament } = useTournamentStore();
   const { client, vmixState } = useVmixStore();
@@ -1660,11 +2999,12 @@ function DrawPanel({ tournament }: { tournament: Tournament }) {
   // readonly and 9879 commentator clients never edit.
   const isRemoteInteractive = !isHostClient && !syncClient.isReadOnly && !syncClient.isCommentator;
   const categories = tournament.categories ?? [];
-  // Which category's draw is currently in view — groups/pots/teams tagged
-  // for another category are hidden, so each category runs its own
-  // independent draw. Untagged groups/pots/teams stay visible everywhere
-  // (keeps single-category tournaments working exactly as before).
-  const [activeCategory, setActiveCategory] = useState('');
+  // Which category's draw is in view — groups/pots/teams tagged for another
+  // category are hidden, so each category runs its own independent draw.
+  // Untagged groups/pots/teams stay visible everywhere (keeps
+  // single-category tournaments working exactly as before). Picked from the
+  // shared Category selector in the top TournamentScopeHeader bar, not a
+  // picker local to this tab.
   // Setup (Groups & Pots config + Assignments table) is one-time/occasional
   // work — split it into its own sub-tab so the daily-use Live Draw view
   // isn't buried below it.
@@ -1949,29 +3289,6 @@ function DrawPanel({ tournament }: { tournament: Tournament }) {
 
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 18 }}>
-      {categories.length > 0 && (
-        <div className="tm-draw-section">
-          <div className="tm-draw-section-title">🏷️ Category — each runs its own draw</div>
-          <div className="tm-draw-group-cards">
-            <div
-              className={`tm-draw-group-card tm-draw-group-card--pickable${!activeCategory ? ' tm-draw-group-card--armed' : ''}`}
-              onClick={() => setActiveCategory('')}
-            >
-              <div className="tm-draw-group-card-title">All</div>
-            </div>
-            {categories.map(c => (
-              <div
-                key={c}
-                className={`tm-draw-group-card tm-draw-group-card--pickable${activeCategory === c ? ' tm-draw-group-card--armed' : ''}`}
-                onClick={() => setActiveCategory(c)}
-              >
-                <div className="tm-draw-group-card-title">{c}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {isRemoteInteractive && (
         <div className="tm-draw-vmix-cfg">
           <button
@@ -2546,8 +3863,10 @@ function DrawPanel({ tournament }: { tournament: Tournament }) {
 }
 
 // ── Small persistent tournament picker shown atop tournament-scoped tabs ──────
-function TournamentScopeHeader({ tournaments, selectedId, onSelect }: {
+function TournamentScopeHeader({ tournaments, selectedId, onSelect, categories, activeCategory, onSelectCategory, children }: {
   tournaments: Tournament[]; selectedId: string; onSelect: (id: string) => void;
+  categories: string[]; activeCategory: string; onSelectCategory: (c: string) => void;
+  children?: React.ReactNode;
 }) {
   return (
     <div className="tm-scope-header">
@@ -2557,6 +3876,25 @@ function TournamentScopeHeader({ tournaments, selectedId, onSelect }: {
         {tournaments.length === 0 && <option value="">— none —</option>}
         {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
       </select>
+      {categories.length > 0 && (
+        <>
+          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>Category:</span>
+          <div className="tm-scope-cat-bar">
+            <button
+              className={`tm-scope-cat-btn${!activeCategory ? ' tm-scope-cat-btn--active' : ''}`}
+              onClick={() => onSelectCategory('')}
+            >All</button>
+            {categories.map(c => (
+              <button
+                key={c}
+                className={`tm-scope-cat-btn${activeCategory === c ? ' tm-scope-cat-btn--active' : ''}`}
+                onClick={() => onSelectCategory(c)}
+              >{c}</button>
+            ))}
+          </div>
+        </>
+      )}
+      {children}
     </div>
   );
 }
@@ -2615,10 +3953,14 @@ export function TournamentManager({ onClose }: Props) {
   const [tournNameVal, setTournNameVal] = useState('');
   const [confirmDeleteTournament, setConfirmDeleteTournament] = useState(false);
   const [applyStatus, setApplyStatus] = useState('');
-  const [tab, setTab] = useState<'tournaments' | 'teams' | 'players' | 'schedule' | 'results' | 'standings' | 'draw'>('tournaments');
+  const [tab, setTab] = useState<'tournaments' | 'teams' | 'players' | 'schedule' | 'results' | 'standings' | 'bracket' | 'draw'>('tournaments');
+  // Single category selector shared by every tournament-scoped tab (Schedule,
+  // Standings, Bracket, Draw) — lives here instead of each tab having its own,
+  // so switching category in one place scopes the whole window consistently.
+  const [activeCategory, setActiveCategory] = useState('');
   const { teams } = useTeamDbStore();
-  const { matches: scheduledMatches } = useMatchScheduleStore();
-  const { results: savedResults } = useMatchResultsStore();
+  const { matches: scheduledMatches, updateMatch } = useMatchScheduleStore();
+  const { results: savedResults, addResult, updateResult, deleteResult } = useMatchResultsStore();
 
   // Apply-to-Canvas now only resets a linked TIMER's period/duration/mode —
   // team/roster population for scoreboards and player-lists happens per-fixture
@@ -2691,6 +4033,10 @@ export function TournamentManager({ onClose }: Props) {
 
   const selected = tournaments.find(t => t.id === selectedId);
 
+  // A category picked in one tournament makes no sense once you switch to a
+  // different one (or one that doesn't even have that category) — reset.
+  useEffect(() => { setActiveCategory(''); }, [selectedId]);
+
   const selectTournament = (id: string) => {
     setSelectedId(id);
     setActiveTournament(id);
@@ -2707,6 +4053,219 @@ export function TournamentManager({ onClose }: Props) {
   const scopedPlayerCount = useMemo(() => scopedTeams.reduce((n, t) => n + t.players.length, 0), [scopedTeams]);
   const scopedMatches = useMemo(() => selected ? scheduledMatches.filter(m => m.tournamentId === selected.id) : [], [scheduledMatches, selected]);
   const scopedResults = useMemo(() => selected ? savedResults.filter(r => r.tournamentId === selected.id) : [], [savedResults, selected]);
+  // Earliest/latest fixture date, offered as a default date range when
+  // "pushing" this tournament to the cloud as a new Event — nothing to
+  // derive it from until fixtures exist, so undefined (today) otherwise.
+  const scopedDateRange = useMemo(() => {
+    const dates = scopedMatches.map(m => m.date).filter(Boolean).sort();
+    return dates.length > 0 ? { start: dates[0], end: dates[dates.length - 1] } : undefined;
+  }, [scopedMatches]);
+
+  // The four effects below used to live inside SchedulePanel, which only
+  // mounts while the Schedule tab is active — so setting a team to Walkover
+  // from the Team Database tab did nothing to Bracket/Standings until the
+  // operator happened to visit Schedule. Living here instead (this component
+  // is mounted for as long as a tournament is selected, regardless of tab)
+  // means they keep running no matter which tab is open.
+
+  // Bye/Walkover are fully automatic, no manual per-fixture picker: a fixture
+  // with no Team B name is a bye; a fixture where either team currently has
+  // 'walkover' status set in the Team Database is a walkover for that side.
+  // Keeps every not-yet-completed fixture in sync as fixtures/team statuses change.
+  useEffect(() => {
+    if (!selected) return;
+    const win = selected.settings?.walkoverWinScore ?? SPORT_DEFAULTS[selected.sport].walkoverWinScore;
+    const statusOf = (name: string, shortName?: string) => {
+      const key = name.trim().toLowerCase();
+      const shortKey = (shortName ?? '').trim().toLowerCase();
+      return scopedTeams.find(t =>
+        t.name.trim().toLowerCase() === key || (!!shortKey && (t.shortName ?? '').trim().toLowerCase() === shortKey)
+      )?.status;
+    };
+    for (const m of scopedMatches) {
+      if (m.completedAt) continue;
+      const isByeAuto = !m.teamBName || !m.teamBName.trim();
+      let nextType: ScheduledMatch['matchType'];
+      let nextLoser: 'A' | 'B' | undefined;
+      if (isByeAuto) {
+        nextType = 'bye';
+      } else if (statusOf(m.teamAName, m.teamAShortName) === 'walkover') {
+        nextType = 'walkover'; nextLoser = 'A';
+      } else if (statusOf(m.teamBName, m.teamBShortName) === 'walkover') {
+        nextType = 'walkover'; nextLoser = 'B';
+      }
+      if (nextType === m.matchType && nextLoser === m.walkoverLoser) continue;
+      if (!nextType) {
+        updateMatch(m.id, { matchType: undefined, walkoverLoser: undefined });
+      } else {
+        updateMatch(m.id, {
+          matchType: nextType, walkoverLoser: nextLoser,
+          scoreA: nextLoser === 'A' ? 0 : win,
+          scoreB: nextLoser === 'A' ? win : 0,
+        });
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedMatches, scopedTeams, selected?.settings?.walkoverWinScore, selected?.sport]);
+
+  // A bye/walkover has no live match to run on a scoreboard, so it never
+  // reaches the normal "Save Result" step — without this, the score set on
+  // the fixture just sits on the Schedule row and never becomes a Result,
+  // which looked like "the score I set doesn't show up, it's stuck at 0-0".
+  // Writes/updates/removes a linked Result directly as the fixture changes.
+  useEffect(() => {
+    if (!selected) return;
+    for (const m of scopedMatches) {
+      const existing = scopedResults.find(r => r.sourceScheduleId === m.id);
+      if (m.matchType) {
+        const data = {
+          tournamentId: selected.id,
+          date: m.date, time: m.time,
+          competition: m.competition ?? selected.name, round: m.round, category: m.category,
+          teamAName: m.teamAName, teamAShortName: m.teamAShortName, teamALogo: m.teamALogo, teamAColor: m.teamAColor,
+          scoreA: m.scoreA ?? 0,
+          teamBName: m.teamBName, teamBShortName: m.teamBShortName, teamBLogo: m.teamBLogo, teamBColor: m.teamBColor,
+          scoreB: m.scoreB ?? 0,
+          matchType: m.matchType, walkoverLoser: m.walkoverLoser,
+          sourceScheduleId: m.id,
+        };
+        if (!existing) {
+          addResult(data);
+        } else if (
+          existing.scoreA !== data.scoreA || existing.scoreB !== data.scoreB ||
+          existing.walkoverLoser !== data.walkoverLoser || existing.round !== data.round ||
+          existing.category !== data.category ||
+          existing.date !== data.date || existing.time !== data.time ||
+          existing.teamAName !== data.teamAName || existing.teamBName !== data.teamBName ||
+          existing.teamAShortName !== data.teamAShortName || existing.teamBShortName !== data.teamBShortName
+        ) {
+          updateResult(existing.id, data);
+        }
+      } else if (existing && existing.matchType) {
+        // Only ever remove a result THIS effect auto-generated (existing.matchType
+        // set means it came from the bye/walkover branch above) — a normal result
+        // saved from a live-played match has no matchType and must never be
+        // touched here just because its fixture currently isn't a bye/walkover.
+        deleteResult(existing.id);
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedMatches, scopedResults, selected?.id, selected?.name]);
+
+  // Knockout bracket auto-advance: once a stage's match has a decided winner
+  // (bye/walkover, or a completed regular match with a saved result), that
+  // winner is written into its slot in the next stage's match — but only
+  // while that slot still holds a placeholder ("Winner of …", "1st Group
+  // A"); a manually-picked real team is never overwritten. Scoped per
+  // category, since each category's bracket (see GenerateScheduleModal)
+  // advances independently.
+  useEffect(() => {
+    if (!selected) return;
+    const categories = selected.categories ?? [];
+    const buckets: (string | undefined)[] = categories.length > 0 ? categories : [undefined];
+    const matchIndexOf = (m: ScheduledMatch) => {
+      const mm = m.round?.match(/(\d+)\s*$/);
+      return mm ? parseInt(mm[1], 10) - 1 : 0;
+    };
+    for (const cat of buckets) {
+      const bracketMatches = scopedMatches.filter(m => (cat === undefined || m.category === cat) && !!extractKnockoutStage(m));
+      const thirdPlaceMatch = scopedMatches.find(m => (cat === undefined || m.category === cat) && m.group === '3rd Place');
+      const byStage = new Map<string, ScheduledMatch[]>();
+      for (const m of bracketMatches) {
+        const key = extractKnockoutStage(m)!;
+        if (!byStage.has(key)) byStage.set(key, []);
+        byStage.get(key)!.push(m);
+      }
+      const stages = Array.from(byStage.entries()).sort((a, b) => knockoutStageSize(b[0]) - knockoutStageSize(a[0]));
+      for (let r = 0; r < stages.length - 1; r++) {
+        const stageName = stages[r][0];
+        const curMatches = stages[r][1];
+        const nextMatches = stages[r + 1][1];
+        const nextByIndex = new Map(nextMatches.map(m => [matchIndexOf(m), m]));
+        for (const cur of curMatches) {
+          const win = findMatchWinner(cur, scopedResults, selected.id);
+          if (!win) continue;
+          const k = matchIndexOf(cur);
+          const slot: 'A' | 'B' = k % 2 === 0 ? 'A' : 'B';
+          const winner = win.side === 'A'
+            ? { name: cur.teamAName, shortName: cur.teamAShortName, color: cur.teamAColor, logo: cur.teamALogo }
+            : { name: cur.teamBName, shortName: cur.teamBShortName, color: cur.teamBColor, logo: cur.teamBLogo };
+          const next = nextByIndex.get(Math.floor(k / 2));
+          if (next && winner.name) {
+            const curName = slot === 'A' ? next.teamAName : next.teamBName;
+            if (curName !== winner.name && isPlaceholderTeamName(curName)) {
+              updateMatch(next.id, slot === 'A'
+                ? { teamAName: winner.name, teamAShortName: winner.shortName, teamAColor: winner.color, teamALogo: winner.logo }
+                : { teamBName: winner.name, teamBShortName: winner.shortName, teamBColor: winner.color, teamBLogo: winner.logo });
+            }
+          }
+          // 3rd/4th place playoff: the Semifinal LOSER fills the corresponding slot.
+          if (thirdPlaceMatch && stageName === 'Semifinal') {
+            const loser = win.side === 'A'
+              ? { name: cur.teamBName, shortName: cur.teamBShortName, color: cur.teamBColor, logo: cur.teamBLogo }
+              : { name: cur.teamAName, shortName: cur.teamAShortName, color: cur.teamAColor, logo: cur.teamALogo };
+            if (loser.name) {
+              const curName = slot === 'A' ? thirdPlaceMatch.teamAName : thirdPlaceMatch.teamBName;
+              if (curName !== loser.name && isPlaceholderTeamName(curName)) {
+                updateMatch(thirdPlaceMatch.id, slot === 'A'
+                  ? { teamAName: loser.name, teamAShortName: loser.shortName, teamAColor: loser.color, teamALogo: loser.logo }
+                  : { teamBName: loser.name, teamBShortName: loser.shortName, teamBColor: loser.color, teamBLogo: loser.logo });
+              }
+            }
+          }
+        }
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedMatches, scopedResults, selected?.id, selected?.categories]);
+
+  // Groups → Knockout auto-fill: once every fixture in a Draw group's
+  // round-robin stage is decided (completed or bye/walkover), that group's
+  // final standings are computed and used to fill any "1st Group A"/"2nd
+  // Group A" placeholder still sitting in the knockout stage — same
+  // placeholder-only rule as the bracket auto-advance above, so a manual
+  // pick is never overwritten.
+  useEffect(() => {
+    if (!selected) return;
+    const allGroups = normalizeGroups(selected.groups);
+    const categories = selected.categories ?? [];
+    const buckets: (string | undefined)[] = categories.length > 0 ? categories : [undefined];
+    const settings = selected.settings ?? SPORT_DEFAULTS[selected.sport];
+    const placeholderRe = /^(\d+)(?:st|nd|rd|th) (.+)$/;
+
+    for (const cat of buckets) {
+      const catGroups = allGroups.filter(g => cat === undefined || !g.category || g.category === cat);
+      if (catGroups.length === 0) continue;
+      const bracketMatches = scopedMatches.filter(m => (cat === undefined || m.category === cat) && !!extractKnockoutStage(m));
+      if (bracketMatches.length === 0) continue;
+
+      const standingsByGroup = new Map<string, ReturnType<typeof computeStandings>>();
+      for (const g of catGroups) {
+        const groupMatches = scopedMatches.filter(m => m.group === g.name);
+        if (groupMatches.length === 0) continue;
+        if (!groupMatches.every(m => !!m.completedAt || !!m.matchType)) continue;
+        const groupTeams = scopedTeams.filter(t => t.group === g.name && (cat === undefined || t.category === cat));
+        standingsByGroup.set(g.name, computeStandings(groupTeams, scopedResults, settings));
+      }
+      if (standingsByGroup.size === 0) continue;
+
+      for (const m of bracketMatches) {
+        for (const side of ['A', 'B'] as const) {
+          const curName = side === 'A' ? m.teamAName : m.teamBName;
+          const placeholderMatch = curName?.match(placeholderRe);
+          if (!placeholderMatch) continue;
+          const rank = parseInt(placeholderMatch[1], 10);
+          const groupName = placeholderMatch[2];
+          const standing = standingsByGroup.get(groupName)?.[rank - 1];
+          if (!standing) continue;
+          updateMatch(m.id, side === 'A'
+            ? { teamAName: standing.name, teamAShortName: standing.shortName, teamAColor: standing.color, teamALogo: standing.logo }
+            : { teamBName: standing.name, teamBShortName: standing.shortName, teamBColor: standing.color, teamBLogo: standing.logo });
+        }
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedMatches, scopedResults, scopedTeams, selected?.id, selected?.categories, selected?.groups, selected?.settings, selected?.sport]);
 
   return (
     <>
@@ -2791,6 +4350,14 @@ export function TournamentManager({ onClose }: Props) {
             }}
           >🏅 Standings</button>
           <button
+            onClick={() => setTab('bracket')}
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+              background: 'transparent', color: tab === 'bracket' ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: tab === 'bracket' ? '2px solid var(--accent)' : '2px solid transparent',
+            }}
+          >🏆 Bracket</button>
+          <button
             onClick={() => setTab('draw')}
             style={{
               padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
@@ -2820,9 +4387,12 @@ export function TournamentManager({ onClose }: Props) {
         )}
 
         {/* Main area */}
-        {tab === 'teams' || tab === 'players' || tab === 'schedule' || tab === 'results' || tab === 'standings' || tab === 'draw' ? (
+        {tab === 'teams' || tab === 'players' || tab === 'schedule' || tab === 'results' || tab === 'standings' || tab === 'bracket' || tab === 'draw' ? (
           <div className="tm-win-body--scoped">
-            <TournamentScopeHeader tournaments={tournaments} selectedId={selectedId} onSelect={selectTournament} />
+            <TournamentScopeHeader
+              tournaments={tournaments} selectedId={selectedId} onSelect={selectTournament}
+              categories={selected?.categories ?? []} activeCategory={activeCategory} onSelectCategory={setActiveCategory}
+            />
             {!selected ? (
               <div className="tm-win-placeholder">
                 <span>Create a tournament first in the 🏆 Tournaments tab.</span>
@@ -2830,13 +4400,15 @@ export function TournamentManager({ onClose }: Props) {
             ) : tab === 'teams' ? (
               <TeamsPanel tournament={selected} />
             ) : tab === 'players' ? (
-              <PlayersPanel tournamentId={selected.id} />
+              <PlayersPanel tournament={selected} activeCategory={activeCategory} />
             ) : tab === 'schedule' ? (
-              <SchedulePanel tournament={selected} />
+              <SchedulePanel tournament={selected} activeCategory={activeCategory} />
             ) : tab === 'standings' ? (
-              <StandingsPanel tournament={selected} />
+              <StandingsPanel tournament={selected} activeCategory={activeCategory} />
+            ) : tab === 'bracket' ? (
+              <BracketPanel tournament={selected} activeCategory={activeCategory} />
             ) : tab === 'draw' ? (
-              <DrawPanel tournament={selected} />
+              <DrawPanel tournament={selected} activeCategory={activeCategory} />
             ) : (
               <ResultsPanel tournament={selected} />
             )}
@@ -2911,6 +4483,23 @@ export function TournamentManager({ onClose }: Props) {
                       {SPORT_TYPES.map(s => <option key={s} value={s}>{SPORT_LABELS[s]}</option>)}
                     </select>
                   </div>
+                  <button
+                    className={`tm-btn${selected.cloudSyncEnabled ? ' tm-btn--cloud-active' : ''}`}
+                    title={selected.cloudSyncEnabled
+                      ? 'Cloud Sync is ON — this tournament\'s fixtures/results push to and pull from every other venue on the same account'
+                      : 'Cloud Sync is OFF — this tournament stays local to this device only'}
+                    onClick={() => updateTournament(selected.id, { cloudSyncEnabled: !selected.cloudSyncEnabled })}
+                  >{selected.cloudSyncEnabled ? '☁ Cloud Sync On' : '☁ Cloud Sync Off'}</button>
+                  <EventPicker
+                    defaultName={selected.name}
+                    defaultDateRange={scopedDateRange}
+                    onPick={ev => updateTournament(selected.id, { eventId: ev.id, eventName: ev.name, cloudSyncEnabled: true })}
+                  />
+                  {selected.eventId && (
+                    <span className="tm-event-linked-badge" title={`Linked to event: ${selected.eventName ?? selected.eventId}`}>
+                      🔗 {selected.eventName ?? 'Linked event'}
+                    </span>
+                  )}
                   <button
                     className="tm-btn"
                     title={defaultTournamentId === selected.id ? 'Unset as default (Tournament Database will open to the first tournament instead)' : 'Set as default — the Tournament Database opens to this tournament automatically'}

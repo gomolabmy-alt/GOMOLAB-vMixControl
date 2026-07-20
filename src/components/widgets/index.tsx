@@ -24,10 +24,12 @@ import { PanelWidget } from './PanelWidget';
 import { VmixTitlesWidget } from './VmixTitlesWidget';
 import { RugbyLineupWidget } from './RugbyLineupWidget';
 import { CardLowerThirdWidget } from './CardLowerThirdWidget';
-import { PomodoroWidget } from './PomodoroWidget';
+import { CustomTimerWidget } from './CustomTimerWidget';
 import { ImageDisplayWidget } from './ImageDisplayWidget';
 import { RecentMatchesWidget } from './RecentMatchesWidget';
 import { MatchScheduleWidget } from './MatchScheduleWidget';
+import { StandingsWidget } from './StandingsWidget';
+import { BracketWidget } from './BracketWidget';
 
 interface Props {
   widget: CanvasWidget;
@@ -64,10 +66,12 @@ export function WidgetRenderer({ widget }: Props) {
     case 'vmix-titles':   content = <VmixTitlesWidget {...sharedProps} />; break;
     case 'rugby-lineup':       content = <RugbyLineupWidget widgetId={id} {...sharedProps} />; break;
     case 'card-lower-third':   content = <CardLowerThirdWidget widgetId={id} {...sharedProps} />; break;
-    case 'pomodoro':           content = <PomodoroWidget {...sharedProps} />; break;
+    case 'pomodoro':           content = <CustomTimerWidget widgetId={id} {...sharedProps} />; break;
     case 'image-display':      content = <ImageDisplayWidget config={config} />; break;
-    case 'recent-matches':     content = <RecentMatchesWidget {...sharedProps} />; break;
+    case 'recent-matches':     content = <RecentMatchesWidget widgetId={id} {...sharedProps} />; break;
     case 'match-schedule':     content = <MatchScheduleWidget widgetId={id} {...sharedProps} />; break;
+    case 'standings':          content = <StandingsWidget widgetId={id} {...sharedProps} />; break;
+    case 'bracket':            content = <BracketWidget widgetId={id} {...sharedProps} />; break;
     default:            content = <div style={{ padding: 8, fontSize: 11 }}>Unknown widget</div>;
   }
 

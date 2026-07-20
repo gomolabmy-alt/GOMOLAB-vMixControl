@@ -1,10 +1,15 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
+import { useAppSettings } from '../stores/appSettingsStore';
 import { resolveImageUrl } from '../lib/imageUrl';
 
 interface Props {
   onPick: (match: ScheduledMatch) => void;
+  /** Overrides the title bar 🏟 picker's tournament scope — typically the
+   *  canvas's own bound tournament (a canvas is normally dedicated to one),
+   *  so this picker doesn't need its own separate tournament selector. */
+  tournamentId?: string;
 }
 
 // Popup listing upcoming scheduled matches — picking one fills in both
@@ -12,8 +17,20 @@ interface Props {
 // in one click. Rendered via a portal (same reasoning as TeamPicker): the
 // scoreboard's team column has overflow:hidden, which would clip a nested
 // absolutely-positioned popup.
-export function MatchSchedulePicker({ onPick }: Props) {
-  const { matches, deleteMatch } = useMatchScheduleStore();
+export function MatchSchedulePicker({ onPick, tournamentId }: Props) {
+  const { matches: allMatches, deleteMatch } = useMatchScheduleStore();
+  const { canvasTournamentId, canvasVenue } = useAppSettings();
+  const effTournamentId = tournamentId || canvasTournamentId;
+  // Scoped to this canvas's tournament, or (if unbound) this install's
+  // selected tournament/venue (title bar 🏟 picker) — so a venue operator
+  // can't accidentally load another venue's fixture.
+  const matches = useMemo(
+    () => allMatches.filter(m =>
+      (!effTournamentId || m.tournamentId === effTournamentId) &&
+      (!canvasVenue || m.venue === canvasVenue)
+    ),
+    [allMatches, effTournamentId, canvasVenue]
+  );
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
@@ -66,7 +83,9 @@ export function MatchSchedulePicker({ onPick }: Props) {
           </div>
           {matches.length === 0 ? (
             <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
-              No scheduled matches yet — add some in 🏆 DB → Schedule
+              {allMatches.length > 0 && (canvasTournamentId || canvasVenue)
+                ? 'No fixtures for the selected tournament/venue — check the 🏟 picker in the title bar'
+                : 'No scheduled matches yet — add some in 🏆 DB → Schedule'}
             </div>
           ) : (
             matches.map(m => (

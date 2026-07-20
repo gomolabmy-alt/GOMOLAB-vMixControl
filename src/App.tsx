@@ -5,7 +5,11 @@ import { TitleBar } from './components/TitleBar';
 import { StatusBar } from './components/StatusBar';
 import { Canvas } from './components/Canvas';
 import { SplashScreen } from './components/SplashScreen';
+import { SignInGate } from './components/SignInGate';
+import { UndoToast } from './components/UndoToast';
+import { useAuthStore } from './stores/authStore';
 import { syncClient } from './lib/syncClient';
+import { startCloudSync } from './lib/cloudSync';
 
 function CommentatorApp() {
   const { theme, setTheme } = useAppSettings();
@@ -27,6 +31,7 @@ export function App() {
   const [canvasMode, setCanvasMode] = useState<'main' | 'commentator'>('main');
   const isDesktopHost = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   const [splashDone, setSplashDone] = useState(!isDesktopHost);
+  const authStatus = useAuthStore(s => s.status);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -41,8 +46,29 @@ export function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Multi-venue cloud sync — only the desktop host itself runs this (LAN
+  // remote/commentator clients mirror the host's state instead, and never
+  // hold a sign-in token of their own). Push/pull both silently no-op until
+  // signed in, so this is safe to start before that happens.
+  useEffect(() => {
+    if (!isDesktopHost) return;
+    startCloudSync();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   if (syncClient.isCommentator) {
     return <CommentatorApp />;
+  }
+
+  // Remote/commentator browser clients connecting to an already-running,
+  // already-signed-in host are never gated here — isDesktopHost is only ever
+  // true for the actual packaged app.
+  if (isDesktopHost && splashDone && authStatus !== 'signed-in') {
+    return (
+      <div className="app-layout">
+        <SignInGate />
+      </div>
+    );
   }
 
   return (
@@ -50,6 +76,7 @@ export function App() {
       {!splashDone && <SplashScreen onDone={() => setSplashDone(true)} />}
       <TitleBar />
       <StatusBar />
+      <UndoToast />
       {isDesktopHost && (
         <div className="canvas-mode-bar">
           <button

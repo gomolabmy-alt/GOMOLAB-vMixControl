@@ -3,9 +3,11 @@ import { useVmixStore } from '../stores/vmixStore';
 import { useCanvasStore } from '../stores/canvasStore';
 import { useAppSettings } from '../stores/appSettingsStore';
 import { ProjectMenu } from './ProjectMenu';
+import { CanvasTournamentPicker } from './CanvasTournamentPicker';
 import { TournamentManager } from './TournamentManager';
 import { AppSettingsModal } from './AppSettingsModal';
 import { VmixStatsPanel } from './VmixStatsPanel';
+import { UndoControl } from './UndoControl';
 import { syncClient } from '../lib/syncClient';
 
 export function StatusBar() {
@@ -22,7 +24,7 @@ export function StatusBar() {
   // a connection list) doesn't need to change shape.
   const connections = connection ? [connection] : [];
 
-  const { resetMatchData, restoreMatchData, matchDataSnapshot, editMode, setEditMode } = useCanvasStore();
+  const { resetMatchData, editMode, setEditMode } = useCanvasStore();
   const { theme, setTheme } = useAppSettings();
   const isReadOnly = syncClient.isReadOnly;
   const [showTournamentDb, setShowTournamentDb] = useState(false);
@@ -167,13 +169,8 @@ export function StatusBar() {
           onClick={() => setShowTournamentDb(true)}
           title="Tournament Database"
         >🏆 DB</button>
-        {matchDataSnapshot ? (
-          <button
-            className="status-btn status-btn--restore"
-            onClick={() => restoreMatchData()}
-            title="Restore match data to state before last reset"
-          >↩ Restore</button>
-        ) : null}
+        <CanvasTournamentPicker />
+        <UndoControl />
         {confirmReset ? (
           <span className="status-reset-confirm">
             <span className="status-reset-confirm-label">Reset match?</span>

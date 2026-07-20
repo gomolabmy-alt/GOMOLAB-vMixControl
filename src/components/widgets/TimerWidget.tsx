@@ -43,8 +43,12 @@ export function TimerWidget({ widgetId, config, h }: Props) {
   const isLinked = !!sourceWidget;
   const dc: Record<string, any> = sourceWidget?.config ?? config;
 
-  const tournament = config.linkedTournamentId
-    ? tournaments.find(t => t.id === config.linkedTournamentId)
+  // A canvas is normally dedicated to one tournament — falls back to that
+  // instead of requiring "which tournament" to be picked on every widget.
+  const pageTournamentId = pages.find(p => p.widgets.some(w => w.id === widgetId))?.tournamentId;
+  const effTournamentId = config.linkedTournamentId || pageTournamentId;
+  const tournament = effTournamentId
+    ? tournaments.find(t => t.id === effTournamentId)
     : null;
 
   // Live-follow tournament settings when not running

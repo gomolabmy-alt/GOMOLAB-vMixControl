@@ -4,13 +4,19 @@ import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
+import { useUndoStore } from '../../stores/undoStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
 import { LogoUrlPicker } from '../LogoUrlPicker';
 import { TeamPicker } from '../TeamPicker';
 import { TeamMatchHistoryButton } from '../TeamMatchHistoryButton';
 import { MatchSchedulePicker } from '../MatchSchedulePicker';
 import { useMatchScheduleStore, type ScheduledMatch } from '../../stores/matchScheduleStore';
-import { computeMatchSignature, buildResultFromConfig, buildLoadMatchPatch, guardScoreboardOverwrite } from '../../utils/scoreboardSnapshot';
+import { computeMatchSignature, buildResultFromConfig, buildLoadMatchPatch, guardScoreboardOverwrite, findDuplicateResult } from '../../utils/scoreboardSnapshot';
+import { ConfirmModal } from '../ConfirmModal';
+import { computeHeadToHead } from '../../lib/headToHead';
+import { computeTeamTournamentStats } from '../../lib/teamTournamentStats';
+import { HeadToHeadPanel } from './HeadToHeadPanel';
+import { computeShootoutStatus, shootoutRoundsNeeded, type ShootoutRound } from '../../lib/shootout';
 
 interface Props {
   widgetId: string;
@@ -109,8 +115,8 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { teams: teamDbTeams } = useTeamDbStore();
   const { client, vmixSyncVersion } = useVmixStore();
-  const { addResult } = useMatchResultsStore();
-  const { markSent, markCompleted } = useMatchScheduleStore();
+  const { results: savedResults, addResult, updateResult } = useMatchResultsStore();
+  const { markSent, markCompleted, matches: scheduledMatches } = useMatchScheduleStore();
 
   // When linked, mirror the source scoreboard's display state
   const allWidgets = useMemo(() => pages.flatMap(p => p.widgets), [pages]);
@@ -119,6 +125,11 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
     : null;
   const isLinked = !!sourceWidget;
   const dc: Record<string, any> = sourceWidget?.config ?? config;
+
+  // A canvas is normally dedicated to one tournament — falls back to that
+  // instead of requiring "which tournament" to be picked on every widget.
+  const pageTournamentId = pages.find(p => p.widgets.some(w => w.id === widgetId))?.tournamentId;
+  const effTournamentId: string | undefined = dc.linkedTournamentId || pageTournamentId;
 
   // Live status pill reflects the linked timer's actual state (reusing the
   // same linkedTimerWidgetId already used for score-log timestamps) instead
@@ -210,10 +221,12 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
       const c = client;
       if (!c) continue;
       if (t.fieldCompetition && config.competition != null) c.setTextField(t.inputKey, t.fieldCompetition, config.competition);
-      if (t.fieldRound && config.subtitle != null) c.setTextField(t.inputKey, t.fieldRound, config.subtitle);
+      if (t.fieldCategory && config.category != null) c.setTextField(t.inputKey, t.fieldCategory, config.category);
+      if (t.fieldGroup && config.group != null) c.setTextField(t.inputKey, t.fieldGroup, config.group);
+      if (t.fieldScheduledTime && config.scheduledTime != null) c.setTextField(t.inputKey, t.fieldScheduledTime, config.scheduledTime);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.competition, config.subtitle, vmixSyncVersion]);
+  }, [config.competition, config.category, config.group, config.scheduledTime, vmixSyncVersion]);
 
   useEffect(() => {
     if (isLinked) return;
@@ -299,13 +312,21 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   // Snapshots the current matchup into the saved results list (powers the
   // "recent-matches" widget) — doesn't touch the live score/log, just records it.
   const [savedFlash, setSavedFlash] = useState(false);
-  const saveResult = () => {
-    addResult(buildResultFromConfig(dc));
+  const [duplicateResultId, setDuplicateResultId] = useState<string | null>(null);
+  const commitSaveResult = (existingId?: string) => {
+    const patch = buildResultFromConfig({ ...dc, linkedTournamentId: effTournamentId });
+    if (existingId) updateResult(existingId, patch);
+    else addResult(patch);
     updateWidgetConfig(widgetId, { lastSavedSignature: computeMatchSignature(dc) });
     // If this match came from the Schedule tab, mark that fixture completed.
     if (dc.linkedScheduleMatchId) markCompleted(dc.linkedScheduleMatchId);
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 1200);
+  };
+  const saveResult = () => {
+    const existing = findDuplicateResult(savedResults, { ...dc, linkedTournamentId: effTournamentId });
+    if (existing) { setDuplicateResultId(existing.id); return; }
+    commitSaveResult();
   };
 
   // Applies a scheduled fixture's team details + competition/round to this
@@ -314,7 +335,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   // Guards against silently losing the outgoing match: auto-saves it if it
   // was never saved, or confirms before overwriting if it already was.
   const loadScheduledMatch = (m: ScheduledMatch) => {
-    if (!guardScoreboardOverwrite(dc, addResult)) return;
+    if (!guardScoreboardOverwrite({ ...dc, linkedTournamentId: effTournamentId }, addResult)) return;
     updateWidgetConfig(widgetId, buildLoadMatchPatch(m));
     // A new match starting means the previous one's clock shouldn't carry over.
     if (dc.linkedTimerWidgetId) resetWidgetTimer(dc.linkedTimerWidgetId);
@@ -353,6 +374,42 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
     : (config.teamBName ?? 'Team B');
   const pendingSquad = pending ? (pending.team === 'A' ? squadA : squadB) : [];
 
+  // Fixtures not yet marked completed — a saved result can exist for one of
+  // these (an in-progress "Save Result" click, or the auto-save that runs
+  // before a board gets overwritten) without the match actually being over,
+  // so H2H/tournament stats shouldn't count it as played yet.
+  const incompleteScheduleIds = useMemo(
+    () => new Set(scheduledMatches.filter(m => !m.completedAt).map(m => m.id)),
+    [scheduledMatches]
+  );
+  const h2h = useMemo(
+    () => computeHeadToHead(
+      savedResults,
+      { name: dc.teamAName ?? 'Team A', shortName: dc.teamAShortName },
+      { name: dc.teamBName ?? 'Team B', shortName: dc.teamBShortName },
+      incompleteScheduleIds,
+    ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [savedResults, dc.teamAName, dc.teamBName, dc.teamAShortName, dc.teamBShortName, incompleteScheduleIds]
+  );
+  const aTeamStats = useMemo(
+    () => computeTeamTournamentStats(savedResults, { name: dc.teamAName ?? 'Team A', shortName: dc.teamAShortName }, effTournamentId, incompleteScheduleIds),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [savedResults, dc.teamAName, dc.teamAShortName, effTournamentId, incompleteScheduleIds]
+  );
+  const bTeamStats = useMemo(
+    () => computeTeamTournamentStats(savedResults, { name: dc.teamBName ?? 'Team B', shortName: dc.teamBShortName }, effTournamentId, incompleteScheduleIds),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [savedResults, dc.teamBName, dc.teamBShortName, effTournamentId, incompleteScheduleIds]
+  );
+  // The board's own configured scoring categories (e.g. Try/Conversion/Drop
+  // Goal for rugby) — passed to the H2H panel so its breakdown rows always
+  // list every point type this sport uses, not just whichever were scored.
+  const pointTypeLabels = useMemo(
+    () => ((dc.increments ?? [1, 2, 5, 10]) as Increment[]).map(inc => resolveInc(inc).label),
+    [dc.increments]
+  );
+
   return (
     <div className="wgt-score" onClick={() => { pending && setPending(null); pendingDec && setPendingDec(null); }}>
 
@@ -384,7 +441,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
         </div>
       )}
 
-      {/* ── Header: LIVE pill + competition ──────────────────────── */}
+      {/* ── Header: LIVE pill + competition + category/group/time ─── */}
       <div className="wgt-score-top">
         <div className="wgt-score-live-pill">
           <span className="wgt-score-live-dot" style={{ background: liveStatus.color, animation: liveStatus.pulse ? undefined : 'none' }} />
@@ -393,7 +450,9 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
         {isLinked ? (
           <>
             {dc.competition && <span className="wgt-score-comp-name">{dc.competition}</span>}
-            {dc.subtitle    && <span className="wgt-score-comp-sub">{dc.subtitle}</span>}
+            {dc.category && <span className="wgt-score-meta-badge">🏷 {dc.category}</span>}
+            {dc.group && <span className="wgt-score-meta-badge">📋 {dc.group}</span>}
+            {dc.scheduledTime && <span className="wgt-score-meta-badge">🕐 {dc.scheduledTime}</span>}
           </>
         ) : (
           <>
@@ -405,17 +464,40 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
               onClick={e => e.stopPropagation()}
             />
             <input
-              className="wgt-score-comp-sub"
-              value={config.subtitle ?? ''}
-              placeholder="Round / week"
-              onChange={e => updateWidgetConfig(widgetId, { subtitle: e.target.value })}
+              className="wgt-score-meta-input"
+              value={config.category ?? ''}
+              placeholder="Category"
+              onChange={e => updateWidgetConfig(widgetId, { category: e.target.value })}
+              onClick={e => e.stopPropagation()}
+            />
+            <input
+              className="wgt-score-meta-input"
+              value={config.group ?? ''}
+              placeholder="Group"
+              onChange={e => updateWidgetConfig(widgetId, { group: e.target.value })}
+              onClick={e => e.stopPropagation()}
+            />
+            <input
+              className="wgt-score-meta-input"
+              type="time"
+              value={config.scheduledTime ?? ''}
+              title="Scheduled kickoff time"
+              onChange={e => updateWidgetConfig(widgetId, { scheduledTime: e.target.value })}
               onClick={e => e.stopPropagation()}
             />
           </>
         )}
         {!isLinked && (
           <div style={{ display: 'flex', gap: 4, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
-            <MatchSchedulePicker onPick={loadScheduledMatch} />
+            <MatchSchedulePicker onPick={loadScheduledMatch} tournamentId={effTournamentId} />
+            {dc.enableShootout && (
+              <button
+                className={`wgt-score-shootout-btn${dc.shootoutOpen ? ' wgt-score-shootout-btn--active' : ''}`}
+                title="Penalty Shootout / Place-Kick Competition"
+                onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); updateWidgetConfig(widgetId, { shootoutOpen: !dc.shootoutOpen }); }}
+                onClick={e => e.stopPropagation()}
+              >🥅 Shootout</button>
+            )}
             <button
               className={`wgt-score-save-btn${savedFlash ? ' wgt-score-save-btn--flash' : ''}`}
               title="Save this result to Latest Results"
@@ -433,7 +515,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
           <div className="wgt-score-mlogo-wrap" onClick={e => e.stopPropagation()}>
             {isLinked ? (
               isCommentator ? (
-                <TeamMatchHistoryButton teamName={dc.teamAName ?? 'Team A'} teamShortName={dc.teamAShortName} logo={dc.teamALogo} color={teamAColor} />
+                <TeamMatchHistoryButton teamName={dc.teamAName ?? 'Team A'} teamShortName={dc.teamAShortName} logo={dc.teamALogo} color={teamAColor} category={dc.category} tournamentId={effTournamentId} />
               ) : (
                 dc.teamALogo
                   ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamALogo)} alt="" />
@@ -507,7 +589,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
           <div className="wgt-score-mlogo-wrap" onClick={e => e.stopPropagation()}>
             {isLinked ? (
               isCommentator ? (
-                <TeamMatchHistoryButton teamName={dc.teamBName ?? 'Team B'} teamShortName={dc.teamBShortName} logo={dc.teamBLogo} color={teamBColor} />
+                <TeamMatchHistoryButton teamName={dc.teamBName ?? 'Team B'} teamShortName={dc.teamBShortName} logo={dc.teamBLogo} color={teamBColor} category={dc.category} tournamentId={effTournamentId} />
               ) : (
                 dc.teamBLogo
                   ? <img className="wgt-score-mlogo" src={resolveImageUrl(dc.teamBLogo)} alt="" />
@@ -619,6 +701,110 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
             );
           })()}
         </div>
+      )}
+
+      {/* ── Penalty Shootout / Place-Kick Competition ────────────── */}
+      {dc.enableShootout && dc.shootoutOpen && (() => {
+        const kicksPerRound: number = dc.shootoutKicksPerRound ?? 5;
+        const kicks: ShootoutRound[] = dc.shootoutKicks ?? [];
+        const status = computeShootoutStatus(kicks, kicksPerRound);
+        const rows = shootoutRoundsNeeded(kicks, kicksPerRound);
+        const setKick = (i: number, side: 'a' | 'b', made: boolean | undefined) => {
+          const next = kicks.slice();
+          while (next.length <= i) next.push({});
+          next[i] = { ...next[i], [side]: made };
+          updateWidgetConfig(widgetId, { shootoutKicks: next });
+        };
+        const winnerName = status.winner === 'A' ? (dc.teamAName ?? 'Team A') : status.winner === 'B' ? (dc.teamBName ?? 'Team B') : '';
+        return (
+          <div className="wgt-shootout">
+            <div className="wgt-shootout-grid">
+              {Array.from({ length: rows }).map((_, i) => {
+                const round = kicks[i] ?? {};
+                const cell = (side: 'a' | 'b', color: string) => {
+                  const v = round[side];
+                  if (v === undefined) {
+                    return !isLinked ? (
+                      <div className="wgt-shootout-cell wgt-shootout-cell--pick">
+                        <button className="wgt-shootout-mark wgt-shootout-mark--yes"
+                          onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setKick(i, side, true); }}
+                          onClick={e => e.stopPropagation()}>✓</button>
+                        <button className="wgt-shootout-mark wgt-shootout-mark--no"
+                          onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setKick(i, side, false); }}
+                          onClick={e => e.stopPropagation()}>✗</button>
+                      </div>
+                    ) : (
+                      <div className="wgt-shootout-dot wgt-shootout-dot--empty" style={{ borderColor: color }} />
+                    );
+                  }
+                  return (
+                    <button
+                      className={`wgt-shootout-dot wgt-shootout-dot--${v ? 'made' : 'missed'}`}
+                      disabled={isLinked}
+                      onPointerDown={e => { e.stopPropagation(); if (isLinked) return; e.currentTarget.setPointerCapture(e.pointerId); setKick(i, side, undefined); }}
+                      onClick={e => e.stopPropagation()}
+                    >{v ? '✓' : '✗'}</button>
+                  );
+                };
+                return (
+                  <div key={i} className="wgt-shootout-row">
+                    {cell('a', teamAColor)}
+                    <span className="wgt-shootout-round-no">{i + 1}</span>
+                    {cell('b', teamBColor)}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="wgt-shootout-tally">
+              <span style={{ color: teamAColor }}>{status.scoreA}</span>
+              <span className="wgt-shootout-tally-sep">–</span>
+              <span style={{ color: teamBColor }}>{status.scoreB}</span>
+            </div>
+            {status.decided && (
+              <div className="wgt-shootout-winner">🏆 {winnerName} win the shootout {status.scoreA}-{status.scoreB}</div>
+            )}
+            {!isLinked && kicks.length > 0 && (
+              <button className="wgt-shootout-reset" onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); const before = kicks; updateWidgetConfig(widgetId, { shootoutKicks: [] }); useUndoStore.getState().pushUndo('Reset shootout', () => updateWidgetConfig(widgetId, { shootoutKicks: before })); }} onClick={e => e.stopPropagation()}>Reset</button>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ── Head to head ──────────────────────────────────────────── */}
+      {config.showHeadToHead && (
+        <HeadToHeadPanel
+          stats={h2h}
+          aTeamStats={aTeamStats}
+          bTeamStats={bTeamStats}
+          teamAName={dc.teamAName ?? 'Team A'}
+          teamBName={dc.teamBName ?? 'Team B'}
+          teamAShortName={dc.teamAShortName}
+          teamBShortName={dc.teamBShortName}
+          teamALogo={dc.teamALogo}
+          teamBLogo={dc.teamBLogo}
+          teamAColor={teamAColor}
+          teamBColor={teamBColor}
+          category={dc.category}
+          tournamentId={effTournamentId}
+          pointTypeLabels={pointTypeLabels}
+          showRecord={config.h2hShowRecord ?? true}
+          showMeetings={config.h2hShowLastMeetings ?? true}
+          maxMeetings={config.h2hMaxMeetings ?? 5}
+          showBreakdown={config.h2hShowBreakdown ?? true}
+          showTeamStats={config.h2hShowTeamStats ?? true}
+          showForm={config.h2hShowForm ?? true}
+        />
+      )}
+
+      {duplicateResultId && (
+        <ConfirmModal
+          title="Overwrite existing result?"
+          message="A result for this fixture already exists. Save again to overwrite it with the current score?"
+          confirmLabel="Overwrite"
+          danger
+          onConfirm={() => { commitSaveResult(duplicateResultId); setDuplicateResultId(null); }}
+          onCancel={() => setDuplicateResultId(null)}
+        />
       )}
     </div>
   );

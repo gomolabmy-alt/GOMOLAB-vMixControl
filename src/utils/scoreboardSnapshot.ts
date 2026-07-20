@@ -1,6 +1,9 @@
+import { useMemo } from 'react';
 import type { SavedMatchResult } from '../stores/matchResultsStore';
 import { useTeamDbStore } from '../stores/teamDbStore';
 import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
+import { useCanvasStore } from '../stores/canvasStore';
+import { computeShootoutStatus } from '../lib/shootout';
 
 function formatTimeOfDay(ms: number): string {
   const d = new Date(ms);
@@ -49,6 +52,7 @@ export function buildResultFromConfig(cfg: Record<string, any>): Omit<SavedMatch
     tournamentId,
     competition: cfg.competition || undefined,
     round: cfg.subtitle || undefined,
+    category: cfg.category || undefined,
     teamAName: cfg.teamAName || 'Team A',
     teamAShortName: cfg.teamAShortName || undefined,
     teamALogo: cfg.teamALogo || undefined,
@@ -61,7 +65,58 @@ export function buildResultFromConfig(cfg: Record<string, any>): Omit<SavedMatch
     scoreB: cfg.scoreB ?? 0,
     matchType: cfg.matchType || undefined,
     walkoverLoser: cfg.walkoverLoser || undefined,
+    sourceScheduleId: cfg.linkedScheduleMatchId || undefined,
+    scoreLog: (cfg.scoreLog ?? []).length > 0
+      ? (cfg.scoreLog as any[]).map(e => ({
+          team: e.team, action: e.action, points: e.points,
+          scorer: e.scorer || undefined, jerseyNo: e.jerseyNo || undefined, timeStr: e.timeStr,
+        }))
+      : undefined,
+    shootout: (() => {
+      const kicks = cfg.shootoutKicks ?? [];
+      if (kicks.length === 0) return undefined;
+      const status = computeShootoutStatus(kicks, cfg.shootoutKicksPerRound ?? 5);
+      return status.decided ? { kicks, scoreA: status.scoreA, scoreB: status.scoreB, winner: status.winner! } : undefined;
+    })(),
+    cards: (() => {
+      const allWidgets = [...useCanvasStore.getState().pages, ...useCanvasStore.getState().commentatorPages].flatMap(p => p.widgets);
+      const cardsFor = (linkedId: string | undefined, side: 'A' | 'B') => {
+        const plw = linkedId ? allWidgets.find(w => w.id === linkedId && w.type === 'player-list') : undefined;
+        const playerCards: Record<string, ('yellow' | 'orange' | 'red')[]> = plw?.config?.playerCards ?? {};
+        return Object.values(playerCards).flat().map(type => ({ team: side, type }));
+      };
+      const cards = [...cardsFor(cfg.linkedPlayerListA, 'A'), ...cardsFor(cfg.linkedPlayerListB, 'B')];
+      return cards.length > 0 ? cards : undefined;
+    })(),
   };
+}
+
+/**
+ * Finds an already-saved result for the same fixture, so saving again can
+ * update it in place instead of creating a duplicate entry. Prefers the
+ * reliable `sourceScheduleId` link (set whenever the board had a fixture
+ * loaded via Load Match/Send to Scoreboard); falls back to matching
+ * tournament + round + the same two teams (either side) for a scoreboard
+ * filled in manually with no linked fixture.
+ */
+export function findDuplicateResult(results: SavedMatchResult[], cfg: Record<string, any>): SavedMatchResult | undefined {
+  if (cfg.linkedScheduleMatchId) {
+    return results.find(r => r.sourceScheduleId === cfg.linkedScheduleMatchId);
+  }
+  const tournamentId = cfg.linkedTournamentId || useTeamDbStore.getState().teams.find(
+    t => t.name.trim().toLowerCase() === (cfg.teamAName ?? '').trim().toLowerCase()
+  )?.tournamentId;
+  if (!tournamentId) return undefined;
+  const round = cfg.subtitle || undefined;
+  const a = (cfg.teamAName ?? '').trim().toLowerCase();
+  const b = (cfg.teamBName ?? '').trim().toLowerCase();
+  if (!a && !b) return undefined;
+  return results.find(r => {
+    if (r.tournamentId !== tournamentId || (r.round || undefined) !== round) return false;
+    const ra = r.teamAName.trim().toLowerCase();
+    const rb = r.teamBName.trim().toLowerCase();
+    return (ra === a && rb === b) || (ra === b && rb === a);
+  });
 }
 
 /**
@@ -73,7 +128,8 @@ export function buildResultFromConfig(cfg: Record<string, any>): Omit<SavedMatch
  */
 export function buildLoadMatchPatch(m: ScheduledMatch): Record<string, any> {
   return {
-    competition: m.competition ?? '', subtitle: m.round ?? '',
+    competition: m.competition ?? '', subtitle: m.round ?? '', category: m.category ?? '',
+    group: m.group ?? '', scheduledTime: m.time ?? '',
     teamAName: m.teamAName, teamAShortName: m.teamAShortName ?? '', teamAColor: m.teamAColor, teamALogo: m.teamALogo ?? '',
     teamBName: m.teamBName, teamBShortName: m.teamBShortName ?? '', teamBColor: m.teamBColor, teamBLogo: m.teamBLogo ?? '',
     // A bye/walkover never gets "played" on the clock — carry over whatever
@@ -82,6 +138,7 @@ export function buildLoadMatchPatch(m: ScheduledMatch): Record<string, any> {
     scoreA: m.matchType ? (m.scoreA ?? 0) : 0,
     scoreB: m.matchType ? (m.scoreB ?? 0) : 0,
     scoreLog: [], cardsA: [], cardsB: [],
+    shootoutKicks: [], shootoutOpen: false,
     lastSavedSignature: '',
     actualKickoffAt: undefined,
     linkedTournamentId: m.tournamentId ?? '',
@@ -116,4 +173,33 @@ export function guardScoreboardOverwrite(
     useMatchScheduleStore.getState().markCompleted(cfg.linkedScheduleMatchId);
   }
   return true;
+}
+
+/**
+ * The set of fixture ids currently loaded live on some scoreboard widget
+ * right now (not yet saved/completed) — scans every scoreboard on both the
+ * main canvas and the commentator canvas, resolving mirrored boards
+ * (`linkedScoreboardSourceId`) back to their source's config so a
+ * commentator-side mirror still counts. Used to highlight a fixture as
+ * "on air" in the Schedule tab / Upcoming Matches widget.
+ */
+export function useLiveFixtureIds(): Set<string> {
+  const pages = useCanvasStore(s => s.pages);
+  const commentatorPages = useCanvasStore(s => s.commentatorPages);
+  const matches = useMatchScheduleStore(s => s.matches);
+  return useMemo(() => {
+    const allWidgets = [...pages, ...commentatorPages].flatMap(p => p.widgets);
+    const completedIds = new Set(matches.filter(m => m.completedAt).map(m => m.id));
+    const ids = new Set<string>();
+    for (const w of allWidgets) {
+      if (w.type !== 'scoreboard') continue;
+      const cfg = w.config;
+      const dc = cfg.linkedScoreboardSourceId
+        ? allWidgets.find(x => x.id === cfg.linkedScoreboardSourceId && x.type === 'scoreboard')?.config ?? cfg
+        : cfg;
+      const fixtureId = dc.linkedScheduleMatchId;
+      if (fixtureId && !completedIds.has(fixtureId)) ids.add(fixtureId);
+    }
+    return ids;
+  }, [pages, commentatorPages, matches]);
 }

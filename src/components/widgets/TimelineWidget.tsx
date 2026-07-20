@@ -2,6 +2,7 @@ import React, { useState, useMemo, useContext } from 'react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTeamDbStore } from '../../stores/teamDbStore';
+import { useUndoStore } from '../../stores/undoStore';
 import type { TimelineEvent, TimelineEventType } from '../../types/canvas';
 
 interface Props { widgetId: string; config: Record<string, any>; }
@@ -539,8 +540,14 @@ export function TimelineWidget({ widgetId, config }: Props) {
             disabled={allEvents.length === 0}
             onClick={() => {
               if (!confirm('Clear all timeline events?')) return;
+              const beforeEvents = config.events;
+              const beforeScoreLog = scoreboardCfg?.scoreLog;
               updateWidgetConfig(widgetId, { events: [] });
               if (config.linkedScoreboardId) updateWidgetConfig(config.linkedScoreboardId, { scoreLog: [] });
+              useUndoStore.getState().pushUndo('Cleared timeline', () => {
+                updateWidgetConfig(widgetId, { events: beforeEvents });
+                if (config.linkedScoreboardId) updateWidgetConfig(config.linkedScoreboardId, { scoreLog: beforeScoreLog });
+              });
             }}
           >
             ↺ Clear

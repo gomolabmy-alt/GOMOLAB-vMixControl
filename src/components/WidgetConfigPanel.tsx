@@ -9,9 +9,7 @@ import type { CanvasWidget } from '../types/canvas';
 import { INPUT_TYPE_LABELS } from '../types/vmix';
 import type { VmixInput } from '../types/vmix';
 import { LogoUrlPicker } from './LogoUrlPicker';
-import { ConfirmButton } from './ConfirmButton';
 import { resolveImageUrl } from '../lib/imageUrl';
-import { useMatchResultsStore } from '../stores/matchResultsStore';
 
 // Label for a player-list widget in a picker dropdown — shows the linked
 // saved team's name (teamDbStore), falling back to a short widget id.
@@ -495,8 +493,13 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
   const pages = pagesOverride ? [...store.pages, ...pagesOverride] : store.pages;
   const { vmixState, globalVariables, getClient } = useVmixStore();
   const { tournaments } = useTournamentStore();
+  // A canvas is normally dedicated to one tournament — widgets fall back to
+  // that instead of each needing its own "which tournament" picker (though
+  // the picker below still lets a widget override it when it truly differs).
+  const widgetPage = pages.find(p => p.widgets.some(w => w.id === widget.id));
+  const pageTournamentId = widgetPage?.tournamentId;
+  const pageTournament = tournaments.find(t => t.id === pageTournamentId);
   const { teams: teamDbTeams } = useTeamDbStore();
-  const { results: savedMatchResults, clearResults: clearMatchResults } = useMatchResultsStore();
   const cfg = widget.config;
   const up = (patch: Record<string, any>) => updateWidgetConfig(widget.id, patch);
   const [panelExpandedId, setPanelExpandedId] = useState<string | null>(null);
@@ -1083,12 +1086,12 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
           <CollapsibleSection label="Tournament Database">
             <Field label="Link Tournament">
               <select className="field-input" value={cfg.linkedTournamentId ?? ''} onChange={e => up({ linkedTournamentId: e.target.value })}>
-                <option value="">— none (set automatically from Load Match) —</option>
+                <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— none (set automatically from Load Match) —'}</option>
                 {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             </Field>
             <p className="app-settings-hint" style={{ margin: '4px 0 0' }}>
-              Tags "💾 Save Result" with this tournament so it shows up in its Results tab. Loading a fixture from the Schedule tab sets this automatically — only set it here for matches entered manually.
+              Tags "💾 Save Result" with this tournament so it shows up in its Results tab. Loading a fixture from the Schedule tab sets this automatically, and it otherwise falls back to this canvas's bound tournament (see the 🖥 Canvas picker in the status bar) — only pick one here to override that.
             </p>
           </CollapsibleSection>
 
@@ -1120,9 +1123,58 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             <Field label="Competition">
               <input className="field-input" value={cfg.competition ?? ''} placeholder="e.g. Premier League" onChange={e => up({ competition: e.target.value })} />
             </Field>
-            <Field label="Round / Week">
-              <input className="field-input" value={cfg.subtitle ?? ''} placeholder="e.g. Round 5" onChange={e => up({ subtitle: e.target.value })} />
+            <Field label="Category">
+              <input className="field-input" value={cfg.category ?? ''} placeholder="e.g. Men, Women, U21" onChange={e => up({ category: e.target.value })} />
             </Field>
+            <Field label="Group">
+              <input className="field-input" value={cfg.group ?? ''} placeholder="e.g. Group A" onChange={e => up({ group: e.target.value })} />
+            </Field>
+            <Field label="Scheduled Time">
+              <input type="time" className="field-input" value={cfg.scheduledTime ?? ''} onChange={e => up({ scheduledTime: e.target.value })} />
+            </Field>
+          </CollapsibleSection>
+
+          <CollapsibleSection label="Head to Head">
+            <Field label="Show Head to Head">
+              <input type="checkbox" checked={cfg.showHeadToHead ?? false} onChange={e => up({ showHeadToHead: e.target.checked })} />
+            </Field>
+            {cfg.showHeadToHead && (
+              <>
+                <Field label="Show Record">
+                  <input type="checkbox" checked={cfg.h2hShowRecord ?? true} onChange={e => up({ h2hShowRecord: e.target.checked })} />
+                </Field>
+                <Field label="Show Last Meetings">
+                  <input type="checkbox" checked={cfg.h2hShowLastMeetings ?? true} onChange={e => up({ h2hShowLastMeetings: e.target.checked })} />
+                </Field>
+                {cfg.h2hShowLastMeetings !== false && (
+                  <Field label="Max meetings shown">
+                    <input type="number" className="field-input" min={1} max={20} value={cfg.h2hMaxMeetings ?? 5}
+                      onChange={e => up({ h2hMaxMeetings: Math.max(1, parseInt(e.target.value) || 5) })} />
+                  </Field>
+                )}
+                <Field label="Show Score Breakdown">
+                  <input type="checkbox" checked={cfg.h2hShowBreakdown ?? true} onChange={e => up({ h2hShowBreakdown: e.target.checked })} />
+                </Field>
+                <Field label="Show Team Stats (this tournament)">
+                  <input type="checkbox" checked={cfg.h2hShowTeamStats ?? true} onChange={e => up({ h2hShowTeamStats: e.target.checked })} />
+                </Field>
+                <Field label="Show Previous & Upcoming">
+                  <input type="checkbox" checked={cfg.h2hShowForm ?? true} onChange={e => up({ h2hShowForm: e.target.checked })} />
+                </Field>
+              </>
+            )}
+          </CollapsibleSection>
+
+          <CollapsibleSection label="Penalty Shootout / Place-Kick Competition">
+            <Field label="Enable Shootout">
+              <input type="checkbox" checked={cfg.enableShootout ?? false} onChange={e => up({ enableShootout: e.target.checked })} />
+            </Field>
+            {cfg.enableShootout && (
+              <Field label="Kicks per round">
+                <input type="number" className="field-input" min={1} max={20} value={cfg.shootoutKicksPerRound ?? 5}
+                  onChange={e => up({ shootoutKicksPerRound: Math.max(1, parseInt(e.target.value) || 5) })} />
+              </Field>
+            )}
           </CollapsibleSection>
 
           <CollapsibleSection label="Sport Style">
@@ -1202,17 +1254,17 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
           {/* ── Multiple vMix Title Inputs ── */}
           {(() => {
-            type SbInput = { id: string; inputKey: string; inputTitle?: string; fieldScoreA: string; fieldScoreB: string; fieldTeamA: string; fieldTeamB: string; fieldShortA: string; fieldShortB: string; fieldTextA: string; fieldTextB: string; fieldLogoA: string; fieldLogoB: string; fieldCompetition: string; fieldRound: string };
+            type SbInput = { id: string; inputKey: string; inputTitle?: string; fieldScoreA: string; fieldScoreB: string; fieldTeamA: string; fieldTeamB: string; fieldShortA: string; fieldShortB: string; fieldTextA: string; fieldTextB: string; fieldLogoA: string; fieldLogoB: string; fieldCompetition: string; fieldCategory: string; fieldGroup: string; fieldScheduledTime: string };
             // Migrate legacy single-input config on first open
             const sbInputs: SbInput[] = cfg.vmixInputs?.length
               ? cfg.vmixInputs
               : cfg.vmixInputKey
-                ? [{ id: 'legacy', inputKey: cfg.vmixInputKey, inputTitle: cfg.vmixInputTitle, fieldScoreA: cfg.fieldScoreA ?? 'ScoreA.Text', fieldScoreB: cfg.fieldScoreB ?? 'ScoreB.Text', fieldTeamA: cfg.fieldTeamA ?? 'TeamA.Text', fieldTeamB: cfg.fieldTeamB ?? 'TeamB.Text', fieldShortA: cfg.fieldShortA ?? '', fieldShortB: cfg.fieldShortB ?? '', fieldTextA: cfg.fieldTextA ?? '', fieldTextB: cfg.fieldTextB ?? '', fieldLogoA: cfg.fieldLogoA ?? '', fieldLogoB: cfg.fieldLogoB ?? '', fieldCompetition: cfg.fieldCompetition ?? '', fieldRound: cfg.fieldRound ?? '' }]
+                ? [{ id: 'legacy', inputKey: cfg.vmixInputKey, inputTitle: cfg.vmixInputTitle, fieldScoreA: cfg.fieldScoreA ?? 'ScoreA.Text', fieldScoreB: cfg.fieldScoreB ?? 'ScoreB.Text', fieldTeamA: cfg.fieldTeamA ?? 'TeamA.Text', fieldTeamB: cfg.fieldTeamB ?? 'TeamB.Text', fieldShortA: cfg.fieldShortA ?? '', fieldShortB: cfg.fieldShortB ?? '', fieldTextA: cfg.fieldTextA ?? '', fieldTextB: cfg.fieldTextB ?? '', fieldLogoA: cfg.fieldLogoA ?? '', fieldLogoB: cfg.fieldLogoB ?? '', fieldCompetition: cfg.fieldCompetition ?? '', fieldCategory: cfg.fieldCategory ?? '', fieldGroup: cfg.fieldGroup ?? '', fieldScheduledTime: cfg.fieldScheduledTime ?? '' }]
                 : [];
             const setSbInputs = (next: SbInput[]) => up({ vmixInputs: next });
             const updateSb = (idx: number, patch: Partial<SbInput>) =>
               setSbInputs(sbInputs.map((s, i) => i === idx ? { ...s, ...patch } : s));
-            const addSbInput = () => setSbInputs([...sbInputs, { id: crypto.randomUUID(), inputKey: '', fieldScoreA: 'ScoreA.Text', fieldScoreB: 'ScoreB.Text', fieldTeamA: 'TeamA.Text', fieldTeamB: 'TeamB.Text', fieldShortA: '', fieldShortB: '', fieldTextA: '', fieldTextB: '', fieldLogoA: '', fieldLogoB: '', fieldCompetition: '', fieldRound: '' }]);
+            const addSbInput = () => setSbInputs([...sbInputs, { id: crypto.randomUUID(), inputKey: '', fieldScoreA: 'ScoreA.Text', fieldScoreB: 'ScoreB.Text', fieldTeamA: 'TeamA.Text', fieldTeamB: 'TeamB.Text', fieldShortA: '', fieldShortB: '', fieldTextA: '', fieldTextB: '', fieldLogoA: '', fieldLogoB: '', fieldCompetition: '', fieldCategory: '', fieldGroup: '', fieldScheduledTime: '' }]);
 
             return (
               <>
@@ -1246,7 +1298,9 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                             <Field label="Short Name A Field">{renderFieldPicker(inp.inputKey, inp.fieldShortA ?? '', v => updateSb(idx, { fieldShortA: v }), 'ShortA.Text', undefined, allInputs)}</Field>
                             <Field label="Short Name B Field">{renderFieldPicker(inp.inputKey, inp.fieldShortB ?? '', v => updateSb(idx, { fieldShortB: v }), 'ShortB.Text', undefined, allInputs)}</Field>
                             <Field label="Competition Field">{renderFieldPicker(inp.inputKey, inp.fieldCompetition ?? '', v => updateSb(idx, { fieldCompetition: v }), 'Competition.Text', undefined, allInputs)}</Field>
-                            <Field label="Round/Week Field">{renderFieldPicker(inp.inputKey, inp.fieldRound ?? '', v => updateSb(idx, { fieldRound: v }), 'Round.Text', undefined, allInputs)}</Field>
+                            <Field label="Category Field">{renderFieldPicker(inp.inputKey, inp.fieldCategory ?? '', v => updateSb(idx, { fieldCategory: v }), 'Category.Text', undefined, allInputs)}</Field>
+                            <Field label="Group Field">{renderFieldPicker(inp.inputKey, inp.fieldGroup ?? '', v => updateSb(idx, { fieldGroup: v }), 'Group.Text', undefined, allInputs)}</Field>
+                            <Field label="Scheduled Time Field">{renderFieldPicker(inp.inputKey, inp.fieldScheduledTime ?? '', v => updateSb(idx, { fieldScheduledTime: v }), 'Time.Text', undefined, allInputs)}</Field>
                             <Field label="Logo A Field">{renderFieldPicker(inp.inputKey, inp.fieldLogoA ?? '', v => {
                               updateSb(idx, { fieldLogoA: v });
                               if (v && cfg.teamALogo) {
@@ -1556,7 +1610,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
       case 'timer': {
         const allTimerWidgets = pages.flatMap(p => p.widgets).filter(w => w.type === 'timer' && w.id !== widget.id);
-        const linkedTimerTournament = tournaments.find(t => t.id === cfg.linkedTournamentId);
+        const linkedTimerTournament = tournaments.find(t => t.id === (cfg.linkedTournamentId || pageTournamentId));
         const timerTournSettings = linkedTimerTournament
           ? (linkedTimerTournament.settings ?? { periods: 2, periodDurationMs: 2700000, halfTimeDurationMs: 900000, maxOnField: 11 })
           : null;
@@ -1583,7 +1637,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
           <CollapsibleSection label="Tournament Database">
             <Field label="Link Tournament">
               <select className="field-input" value={cfg.linkedTournamentId ?? ''} onChange={e => up({ linkedTournamentId: e.target.value })}>
-                <option value="">— none (manual) —</option>
+                <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— none (manual) —'}</option>
                 {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             </Field>
@@ -2417,15 +2471,11 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               <option value="compact">Compact</option>
             </select>
           </Field>
-          <Field label={`Saved results (${savedMatchResults.length})`}>
-            <ConfirmButton
-              className="btn btn--ghost btn--small"
-              disabled={savedMatchResults.length === 0}
-              label="Clear All"
-              confirmLabel="Delete all"
-              message="Delete all saved match results? This cannot be undone."
-              onConfirm={clearMatchResults}
-            />
+          <Field label="Tournament">
+            <select className="field-input" value={cfg.filterTournamentId ?? ''} onChange={e => up({ filterTournamentId: e.target.value })}>
+              <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— all tournaments —'}</option>
+              {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
           </Field>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
             Results are added from a scoreboard widget's "💾 Save Result" button.
@@ -2433,7 +2483,12 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         </>
       );
 
-      case 'match-schedule': return (
+      case 'match-schedule': {
+        const filterTournament = tournaments.find(t => t.id === (cfg.filterTournamentId || pageTournamentId));
+        const filterVenues: string[] = filterTournament?.venues ?? [];
+        const filterCategories: string[] = filterTournament?.categories ?? [];
+        const filterGroups: string[] = (filterTournament?.groups ?? []).map((g: any) => typeof g === 'string' ? g : g.name);
+        return (
         <>
           <Field label="Title">
             <input className="field-input" value={cfg.title ?? ''} placeholder="Upcoming Matches"
@@ -2447,11 +2502,100 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               ))}
             </select>
           </Field>
+          <Field label="Tournament">
+            <select className="field-input" value={cfg.filterTournamentId ?? ''}
+              onChange={e => up({ filterTournamentId: e.target.value, filterVenue: '', filterCategory: '', filterGroup: '' })}>
+              <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— Follow title bar 🏟 picker —'}</option>
+              {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+          {filterTournament && (
+            <>
+              <Field label="Venue">
+                <select className="field-input" value={cfg.filterVenue ?? ''} onChange={e => up({ filterVenue: e.target.value })} disabled={filterVenues.length === 0}>
+                  <option value="">All Venues</option>
+                  {filterVenues.map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </Field>
+              <Field label="Category">
+                <select className="field-input" value={cfg.filterCategory ?? ''} onChange={e => up({ filterCategory: e.target.value })} disabled={filterCategories.length === 0}>
+                  <option value="">All Categories</option>
+                  {filterCategories.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </Field>
+              <Field label="Group">
+                <select className="field-input" value={cfg.filterGroup ?? ''} onChange={e => up({ filterGroup: e.target.value })} disabled={filterGroups.length === 0}>
+                  <option value="">All Groups</option>
+                  {filterGroups.map(g => <option key={g} value={g}>{g}</option>)}
+                </select>
+              </Field>
+            </>
+          )}
           <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
             Manage fixtures in 🏆 DB → Schedule. Sent matches grey out here automatically.
+            {!filterTournament && ' Leave Tournament blank to follow the title bar’s 🏟 tournament/venue picker instead.'}
           </div>
         </>
       );
+      }
+
+      case 'standings': {
+        const filterTournament = tournaments.find(t => t.id === (cfg.filterTournamentId || pageTournamentId));
+        const filterCategories: string[] = filterTournament?.categories ?? [];
+        return (
+        <>
+          <Field label="Title">
+            <input className="field-input" value={cfg.title ?? ''} placeholder="Standings"
+              onChange={e => up({ title: e.target.value })} />
+          </Field>
+          <Field label="Tournament">
+            <select className="field-input" value={cfg.filterTournamentId ?? ''}
+              onChange={e => up({ filterTournamentId: e.target.value, filterCategory: '' })}>
+              <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— pick tournament —'}</option>
+              {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+          {filterCategories.length > 0 && (
+            <Field label="Category">
+              <select className="field-input" value={cfg.filterCategory ?? ''} onChange={e => up({ filterCategory: e.target.value })}>
+                <option value="">All Categories</option>
+                {filterCategories.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </Field>
+          )}
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+            Read-only — manage groups/teams in 🏆 DB → Standings.
+          </div>
+        </>
+      );
+      }
+
+      case 'bracket': {
+        const filterTournament = tournaments.find(t => t.id === (cfg.filterTournamentId || pageTournamentId));
+        const filterCategories: string[] = filterTournament?.categories ?? [];
+        return (
+        <>
+          <Field label="Tournament">
+            <select className="field-input" value={cfg.filterTournamentId ?? ''}
+              onChange={e => up({ filterTournamentId: e.target.value, filterCategory: '' })}>
+              <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— pick tournament —'}</option>
+              {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+          {filterCategories.length > 0 && (
+            <Field label="Category">
+              <select className="field-input" value={cfg.filterCategory ?? ''} onChange={e => up({ filterCategory: e.target.value })}>
+                <option value="">— pick category —</option>
+                {filterCategories.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </Field>
+          )}
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+            Read-only — edit bracket arrangement in 🏆 DB → Bracket. A category must be picked once the tournament has any.
+          </div>
+        </>
+      );
+      }
 
       case 'input-tally': return (
         <>
@@ -2654,14 +2798,15 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         const timerWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'timer'));
         const timelineWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'timeline'));
         const hasPlaytime = Object.keys(cfg.accumulated ?? {}).length > 0 || (cfg.onField ?? []).length > 0;
-        const scopedTeams = cfg.linkedTournamentId
-          ? teamDbTeams.filter(t => t.tournamentId === cfg.linkedTournamentId)
+        const effLinkedTournamentId = cfg.linkedTournamentId || pageTournamentId;
+        const scopedTeams = effLinkedTournamentId
+          ? teamDbTeams.filter(t => t.tournamentId === effLinkedTournamentId)
           : teamDbTeams;
         return (
           <>
             <Field label="Tournament">
               <select className="field-input" value={cfg.linkedTournamentId ?? ''} onChange={e => up({ linkedTournamentId: e.target.value })}>
-                <option value="">— select tournament (for periods/settings) —</option>
+                <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— select tournament (for periods/settings) —'}</option>
                 {tournaments.map(t => (
                   <option key={t.id} value={t.id}>{t.name}</option>
                 ))}
@@ -2837,8 +2982,9 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         const allPlayerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
         const timerWidgets2 = pages.flatMap(p => p.widgets.filter(w => w.type === 'timer'));
         const timelineWidgets2 = pages.flatMap(p => p.widgets.filter(w => w.type === 'timeline'));
-        const scopedTeams2 = cfg.linkedTournamentId
-          ? teamDbTeams.filter(t => t.tournamentId === cfg.linkedTournamentId)
+        const effLinkedTournamentId2 = cfg.linkedTournamentId || pageTournamentId;
+        const scopedTeams2 = effLinkedTournamentId2
+          ? teamDbTeams.filter(t => t.tournamentId === effLinkedTournamentId2)
           : teamDbTeams;
         return (
           <>
@@ -2855,7 +3001,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               <>
                 <Field label="Tournament">
                   <select className="field-input" value={cfg.linkedTournamentId ?? ''} onChange={e => up({ linkedTournamentId: e.target.value })}>
-                    <option value="">— select tournament (for periods/settings) —</option>
+                    <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— select tournament (for periods/settings) —'}</option>
                     {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </Field>
@@ -3336,8 +3482,9 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
       case 'rugby-lineup': {
         const allPlayerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
-        const scopedTeams3 = cfg.linkedTournamentId
-          ? teamDbTeams.filter(t => t.tournamentId === cfg.linkedTournamentId)
+        const effLinkedTournamentId3 = cfg.linkedTournamentId || pageTournamentId;
+        const scopedTeams3 = effLinkedTournamentId3
+          ? teamDbTeams.filter(t => t.tournamentId === effLinkedTournamentId3)
           : teamDbTeams;
         const linkedTeam = teamDbTeams.find(t => t.id === cfg.linkedTeamId);
         const loadFromTournament = () => {
@@ -3373,7 +3520,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             <Field label="Tournament">
               <select className="field-input" value={cfg.linkedTournamentId ?? ''}
                 onChange={e => up({ linkedTournamentId: e.target.value })}>
-                <option value="">— select tournament —</option>
+                <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— select tournament —'}</option>
                 {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
             </Field>

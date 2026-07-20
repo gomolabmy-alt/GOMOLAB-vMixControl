@@ -7,6 +7,7 @@ import { useTeamDbStore } from './teamDbStore';
 import { useMatchScheduleStore } from './matchScheduleStore';
 import { useMatchResultsStore } from './matchResultsStore';
 import { useAppSettings } from './appSettingsStore';
+import { useUndoStore } from './undoStore';
 
 /** True on the desktop host (Tauri), false on any browser/remote client. */
 const isHostClient = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -37,7 +38,7 @@ interface TournamentStore {
   defaultTournamentId: string;
 
   addTournament: (data: { name: string; sport: SportType }) => string;
-  updateTournament: (id: string, patch: Partial<Pick<Tournament, 'name' | 'sport' | 'groups' | 'pots' | 'categories' | 'drawVmix' | 'drawTeamMode' | 'groupListVmix'>>) => void;
+  updateTournament: (id: string, patch: Partial<Pick<Tournament, 'name' | 'sport' | 'groups' | 'pots' | 'categories' | 'venues' | 'drawVmix' | 'drawTeamMode' | 'groupListVmix' | 'cloudSyncEnabled' | 'eventId' | 'eventName'>>) => void;
   deleteTournament: (id: string) => void;
 
   updateTournamentSettings: (id: string, patch: Partial<TournamentSettings>) => void;
@@ -48,7 +49,7 @@ interface TournamentStore {
 
 export const useTournamentStore = create<TournamentStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       tournaments: [],
       activeTournamentId: '',
       defaultTournamentId: '',
@@ -90,14 +91,26 @@ export const useTournamentStore = create<TournamentStore>()(
         syncClient.send({ type: 'ACTION', store: 'tournament', fn: 'updateTournamentSettings', args: [id, patch] });
       },
 
-      deleteTournament: (id) => set(s => {
-        const remaining = s.tournaments.filter(t => t.id !== id);
-        return {
-          tournaments: remaining,
-          activeTournamentId: s.activeTournamentId === id ? (remaining[0]?.id ?? '') : s.activeTournamentId,
-          defaultTournamentId: s.defaultTournamentId === id ? '' : s.defaultTournamentId,
-        };
-      }),
+      deleteTournament: (id) => {
+        const prior = get();
+        const tournament = prior.tournaments.find(t => t.id === id);
+        const priorActiveId = prior.activeTournamentId;
+        const priorDefaultId = prior.defaultTournamentId;
+        set(s => {
+          const remaining = s.tournaments.filter(t => t.id !== id);
+          return {
+            tournaments: remaining,
+            activeTournamentId: s.activeTournamentId === id ? (remaining[0]?.id ?? '') : s.activeTournamentId,
+            defaultTournamentId: s.defaultTournamentId === id ? '' : s.defaultTournamentId,
+          };
+        });
+        if (tournament) useUndoStore.getState().pushUndo(`Deleted tournament "${tournament.name}"`, () =>
+          useTournamentStore.setState(s => ({
+            tournaments: [...s.tournaments, tournament],
+            activeTournamentId: priorActiveId,
+            defaultTournamentId: priorDefaultId,
+          })));
+      },
 
       setActiveTournament: (id) => set({ activeTournamentId: id }),
       setDefaultTournament: (id) => set(s => ({ defaultTournamentId: s.defaultTournamentId === id ? '' : id })),

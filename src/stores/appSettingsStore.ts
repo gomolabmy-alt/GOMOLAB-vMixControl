@@ -40,6 +40,15 @@ interface AppSettingsState {
   // otherwise an IANA time zone name (e.g. "Europe/London").
   clockTimeZone: string;
   setClockTimeZone: (v: string) => void;
+  // This physical install's venue scope — local-only, NOT synced, so each
+  // venue running its own copy of the app can filter the (shared, synced)
+  // match schedule down to just its own fixtures for the canvas's "Upcoming
+  // Matches" widget and "Load Match" picker. Empty tournament id = show
+  // every tournament; empty venue = show every venue within it.
+  canvasTournamentId: string;
+  canvasVenue: string;
+  setCanvasTournamentId: (v: string) => void;
+  setCanvasVenue: (v: string) => void;
 }
 
 export const useAppSettings = create<AppSettingsState>()(
@@ -74,6 +83,11 @@ export const useAppSettings = create<AppSettingsState>()(
 
       clockTimeZone: '',
       setClockTimeZone: (v) => set({ clockTimeZone: v }),
+
+      canvasTournamentId: '',
+      canvasVenue: '',
+      setCanvasTournamentId: (v) => set({ canvasTournamentId: v, canvasVenue: '' }),
+      setCanvasVenue: (v) => set({ canvasVenue: v }),
     }),
     { name: 'gomolab-app-settings' },
   ),
