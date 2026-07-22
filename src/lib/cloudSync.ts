@@ -620,7 +620,13 @@ async function pullAll() {
     }
 
     for (const rm of body.matches ?? []) {
-      if (liveIds.has(rm.id)) continue; // actively live on this device — don't clobber
+      // "Live on this device" only protects an in-progress fixture from
+      // being clobbered — it must never block the ONE update that actually
+      // matters once another venue finishes it: completedAt. Without this
+      // exception, a fixture this device also has loaded (even just
+      // idly, on a mirrored/linked board) would stay stuck showing as live
+      // here forever, since completedAt never had a chance to arrive.
+      if (liveIds.has(rm.id) && !(rm.data as any)?.completedAt) continue;
       const incoming: ScheduledMatch = { ...rm.data, id: rm.id, tournamentId: rm.tournamentId, venueLabel: rm.venueLabel };
       useMatchScheduleStore.setState(s => ({ matches: upsertById(s.matches, incoming).sort(sortMatches) }));
       lastPushedMatch.set(rm.id, recordKey(rm.venueLabel, rm.data));
