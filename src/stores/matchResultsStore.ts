@@ -70,17 +70,26 @@ export interface SavedMatchResult {
 
 interface MatchResultsStore {
   results: SavedMatchResult[];
+  /** Result ids deleted locally since the last successful cloud push — read
+   *  and cleared by cloudSync.ts so a deletion actually removes the record
+   *  from the cloud too, instead of leaving a stale copy behind that a push
+   *  only ever upserts and never removes on its own. */
+  pendingDeletedIds: string[];
   addResult: (result: Omit<SavedMatchResult, 'id' | 'savedAt'>) => string;
   updateResult: (id: string, patch: Partial<Omit<SavedMatchResult, 'id' | 'savedAt'>>) => void;
   deleteResult: (id: string) => void;
   clearResults: () => void;
   restoreResults: (results: unknown[]) => void;
+  /** Consumes (removes) the given ids from pendingDeletedIds — called by
+   *  cloudSync.ts once they've actually been pushed to the cloud. */
+  clearPendingDeletedIds: (ids: string[]) => void;
 }
 
 export const useMatchResultsStore = create<MatchResultsStore>()(
   persist(
     (set, get) => ({
       results: [],
+      pendingDeletedIds: [],
 
       addResult: (result) => {
         const id = crypto.randomUUID();
@@ -94,19 +103,28 @@ export const useMatchResultsStore = create<MatchResultsStore>()(
 
       deleteResult: (id) => {
         const result = get().results.find(r => r.id === id);
-        set(s => ({ results: s.results.filter(r => r.id !== id) }));
+        set(s => ({ results: s.results.filter(r => r.id !== id), pendingDeletedIds: [...s.pendingDeletedIds, id] }));
         if (result) useUndoStore.getState().pushUndo(`Deleted result "${result.teamAName} vs ${result.teamBName}"`, () =>
-          useMatchResultsStore.setState(s => ({ results: [result, ...s.results] })));
+          useMatchResultsStore.setState(s => ({
+            results: [result, ...s.results],
+            pendingDeletedIds: s.pendingDeletedIds.filter(x => x !== id),
+          })));
       },
 
       clearResults: () => {
         const removed = get().results.slice();
-        set({ results: [] });
+        const removedIds = removed.map(r => r.id);
+        set(s => ({ results: [], pendingDeletedIds: [...s.pendingDeletedIds, ...removedIds] }));
         if (removed.length > 0) useUndoStore.getState().pushUndo(`Cleared ${removed.length} result${removed.length === 1 ? '' : 's'}`, () =>
-          useMatchResultsStore.setState(s => ({ results: [...removed, ...s.results] })));
+          useMatchResultsStore.setState(s => ({
+            results: [...removed, ...s.results],
+            pendingDeletedIds: s.pendingDeletedIds.filter(x => !removedIds.includes(x)),
+          })));
       },
 
       restoreResults: (results) => set({ results: results as SavedMatchResult[] }),
+
+      clearPendingDeletedIds: (ids) => set(s => ({ pendingDeletedIds: s.pendingDeletedIds.filter(id => !ids.includes(id)) })),
     }),
     {
       name: 'gomolab-match-results-v1',
@@ -118,7 +136,7 @@ export const useMatchResultsStore = create<MatchResultsStore>()(
       // Remote/browser clients always load the host's live data via
       // FULL_STATE — never persist locally, or a reload could show stale
       // data before (or instead of) the synced copy.
-      partialize: (s) => (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) ? {} : { results: s.results },
+      partialize: (s) => (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) ? {} : { results: s.results, pendingDeletedIds: s.pendingDeletedIds },
     }
   )
 );

@@ -19,9 +19,37 @@ export interface GeneratedFixture {
    *  stage, unlike `round` which is per-match ("Quarterfinal 2"). Only set
    *  for knockout fixtures; round-robin fixtures leave this undefined. */
   stage?: string;
+  /** Tiered-knockout bracket this fixture belongs to ("Cup"/"Plate"/"Bowl"/
+   *  "Shield"/"Tier 5"…) — set only when generated via buildTieredKnockout
+   *  (rugby-sevens style Cup/Plate/Bowl/Shield split). A SHARED Quarterfinal
+   *  between two paired tiers (see buildTieredKnockout) carries a combined
+   *  label like "Cup/Plate" instead of a single tier name — its winner
+   *  continues in the upper tier's semifinal, its loser drops to the lower
+   *  tier's. Undefined for every other format, including the single combined
+   *  bracket of 'groups-knockout'. */
+  tier?: string;
   a: ScheduleTeamRef;
   /** null = a bye — "a" advances/wins automatically, no match is played. */
   b: ScheduleTeamRef | null;
+}
+
+/** Standard rugby-sevens tier names, top to bottom by pool finishing rank —
+ *  rank 1 (pool winners) play the Cup, rank 2 the Plate, etc. Beyond 4 tiers
+ *  there's no standard naming, so it falls back to "Tier 5", "Tier 6", ... */
+export const TIER_NAMES = ['Cup', 'Plate', 'Bowl', 'Shield'];
+
+export function tierName(rank: number): string {
+  return TIER_NAMES[rank - 1] ?? `Tier ${rank}`;
+}
+
+/** Inverts tierName — used to sort tier chips/columns in fixed Cup→Plate→
+ *  Bowl→Shield→Tier5… order instead of alphabetically (which would put
+ *  "Bowl" before "Cup"). Unrecognized names sort last. */
+export function tierRank(tier: string): number {
+  const idx = TIER_NAMES.indexOf(tier);
+  if (idx >= 0) return idx + 1;
+  const m = tier.match(/^Tier (\d+)$/);
+  return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
 }
 
 /** Shifts every fixture's roundIndex by `offset` — used to place a knockout
@@ -85,31 +113,59 @@ function roundRobinRounds<T>(teamsIn: T[]): Array<Array<{ a: T; b: T | null }>> 
   return rounds;
 }
 
-export function generateRoundRobin(teams: ScheduleTeamRef[], groupLabel?: string): GeneratedFixture[] {
+// `round` is deliberately bare ("Round 1") — no group/pool name baked in.
+// Which pool a fixture belongs to is already carried on its own `group`
+// field (see TournamentManager.tsx's generateForCategory), so merging it
+// into `round` too just meant every consumer of `round` alone (e.g. the
+// public scoring page) had to duplicate that field back out again.
+export function generateRoundRobin(teams: ScheduleTeamRef[]): GeneratedFixture[] {
   const rounds = roundRobinRounds(teams);
   const out: GeneratedFixture[] = [];
   rounds.forEach((pairs, i) => {
-    const label = groupLabel ? `${groupLabel} · Round ${i + 1}` : `Round ${i + 1}`;
+    const label = `Round ${i + 1}`;
     for (const p of pairs) out.push({ round: label, roundIndex: i, a: p.a, b: p.b });
   });
   return out;
 }
 
-export function generateDoubleRoundRobin(teams: ScheduleTeamRef[], groupLabel?: string): GeneratedFixture[] {
+export function generateDoubleRoundRobin(teams: ScheduleTeamRef[]): GeneratedFixture[] {
   const rounds = roundRobinRounds(teams);
   const n = rounds.length;
   const out: GeneratedFixture[] = [];
   rounds.forEach((pairs, i) => {
-    const label = groupLabel ? `${groupLabel} · Round ${i + 1}` : `Round ${i + 1}`;
+    const label = `Round ${i + 1}`;
     for (const p of pairs) out.push({ round: label, roundIndex: i, a: p.a, b: p.b });
   });
   rounds.forEach((pairs, i) => {
-    const label = groupLabel ? `${groupLabel} · Round ${n + i + 1} (Return)` : `Round ${n + i + 1} (Return)`;
+    const label = `Round ${n + i + 1} (Return)`;
     for (const p of pairs) {
       if (p.b === null) out.push({ round: label, roundIndex: n + i, a: p.a, b: null });
       else out.push({ round: label, roundIndex: n + i, a: p.b, b: p.a });
     }
   });
+  return out;
+}
+
+/** Round-robin's home/away balancer doesn't know or care about a group's
+ *  own ranking — it just evens out home slots over the whole season. This
+ *  ensures the group's top-ranked team (whatever team is at index 0 before
+ *  any shuffle) specifically gets home advantage for their own earliest
+ *  fixture, swapping a/b on just that one match if the balancer happened to
+ *  put them away. A no-op for that team's bye rounds (no opponent either way). */
+export function ensureTopTeamHomeEarly(fixtures: GeneratedFixture[], topTeamName: string): GeneratedFixture[] {
+  let earliestIdx = -1;
+  let earliestRoundIndex = Infinity;
+  fixtures.forEach((f, i) => {
+    if (f.roundIndex < earliestRoundIndex && (f.a.name === topTeamName || f.b?.name === topTeamName)) {
+      earliestRoundIndex = f.roundIndex;
+      earliestIdx = i;
+    }
+  });
+  if (earliestIdx === -1) return fixtures;
+  const f = fixtures[earliestIdx];
+  if (f.a.name === topTeamName || !f.b) return fixtures; // already home, or a bye
+  const out = fixtures.slice();
+  out[earliestIdx] = { ...f, a: f.b, b: f.a };
   return out;
 }
 
@@ -219,6 +275,112 @@ export function buildGroupKnockoutSlots(groupNames: string[], advanceCount: numb
     for (const g of groupNames) list.push(placeholder(`${ordinal(rank)} ${g}`));
   }
   return list;
+}
+
+/** Interleaved entrant list combining two adjacent pool-finishing ranks into
+ *  one shared bracket (e.g. rank 1 + rank 2 for a combined Cup/Plate
+ *  Quarterfinal) — same clash-avoidance ordering as buildGroupKnockoutSlots'
+ *  even-group case (a pool's own two representatives never meet in the very
+ *  first round), generalized to any pair of ranks instead of hardcoded to
+ *  1st/2nd. */
+function buildPairedRankSlots(groupNames: string[], rankA: number, rankB: number): ScheduleTeamRef[] {
+  if (groupNames.length % 2 === 0 && groupNames.length >= 2) {
+    const half = groupNames.length / 2;
+    const firstHalf: ScheduleTeamRef[] = [];
+    const secondHalf: ScheduleTeamRef[] = [];
+    for (let i = 0; i < half; i++) {
+      const gA = groupNames[i];
+      const gB = groupNames[groupNames.length - 1 - i];
+      firstHalf.push(placeholder(`${ordinal(rankA)} ${gA}`), placeholder(`${ordinal(rankB)} ${gB}`));
+      secondHalf.push(placeholder(`${ordinal(rankA)} ${gB}`), placeholder(`${ordinal(rankB)} ${gA}`));
+    }
+    return [...firstHalf, ...secondHalf];
+  }
+  const list: ScheduleTeamRef[] = [];
+  for (const g of groupNames) list.push(placeholder(`${ordinal(rankA)} ${g}`));
+  for (const g of groupNames) list.push(placeholder(`${ordinal(rankB)} ${g}`));
+  return list;
+}
+
+/** Builds one shared Quarterfinal round between two adjacent tiers (e.g.
+ *  Cup/Plate) — the WINNER of each match continues into the upper tier's
+ *  own bracket (Cup), the LOSER drops into the lower tier's (Plate), instead
+ *  of each tier running a fully independent bracket from round 1. This is
+ *  the standard rugby-sevens "reshuffle" format. Returns the QF fixtures
+ *  themselves (roundIndex 0, tagged with the combined tier label
+ *  "UpperTier/LowerTier") plus each tier's own semifinal-entrant slot list
+ *  ("Winner of .../Loser of ..." placeholders), ready to feed into
+ *  generateKnockoutFromSlots for the rest of that tier's bracket. */
+function buildPairedTierQuarterfinal(groupNames: string[], upperTier: string, lowerTier: string, rankA: number, rankB: number) {
+  const pairLabel = `${upperTier}/${lowerTier}`;
+  const slots: (ScheduleTeamRef | null)[] = buildPairedRankSlots(groupNames, rankA, rankB);
+  const size = nextPow2(slots.length);
+  while (slots.length < size) slots.push(null);
+
+  const qfFixtures: GeneratedFixture[] = [];
+  const upperSemiSlots: ScheduleTeamRef[] = [];
+  const lowerSemiSlots: ScheduleTeamRef[] = [];
+  const matchCount = slots.length / 2;
+  for (let i = 0; i < slots.length; i += 2) {
+    const matchNum = i / 2 + 1;
+    const label = matchCount > 1 ? `Quarterfinal ${matchNum}` : 'Quarterfinal';
+    const a = slots[i];
+    const b = slots[i + 1];
+    if (a && b) {
+      qfFixtures.push({ round: label, roundIndex: 0, stage: 'Quarterfinal', tier: pairLabel, a, b });
+      upperSemiSlots.push(placeholder(`Winner of ${pairLabel} ${label}`));
+      lowerSemiSlots.push(placeholder(`Loser of ${pairLabel} ${label}`));
+    } else {
+      // A bye in the shared QF — whichever side is real advances straight to
+      // the UPPER tier's semifinal (a walkover "win"); there's no loser, so
+      // the lower tier's slot is left as an unresolvable placeholder (same
+      // as any other bracket bye — it just never fills in).
+      const real = a ?? b;
+      if (real) qfFixtures.push({ round: label, roundIndex: 0, stage: 'Quarterfinal', tier: pairLabel, a: real, b: null });
+      upperSemiSlots.push(real ?? placeholder(`Winner of ${pairLabel} ${label}`));
+      lowerSemiSlots.push(placeholder(`Loser of ${pairLabel} ${label}`));
+    }
+  }
+  return { qfFixtures, upperSemiSlots, lowerSemiSlots };
+}
+
+/** Builds a full Cup/Plate/Bowl/Shield tiered knockout: adjacent tiers pair
+ *  up (Cup+Plate, Bowl+Shield, Tier5+Tier6, …) sharing one Quarterfinal round
+ *  whose winner continues in the upper tier and loser drops to the lower
+ *  tier (see buildPairedTierQuarterfinal); a leftover odd tier at the bottom
+ *  (e.g. 3 tiers total) runs as its own fully independent bracket instead,
+ *  same as before this reshuffle format existed. Every stage from the shared
+ *  Quarterfinal down to each tier's own Final uses relative roundIndex
+ *  0, 1, 2… — caller offsets the whole result to wherever it belongs on the
+ *  calendar (see GenerateScheduleModal), same convention as every other
+ *  schedule-generation function here.
+ *
+ *  Built lowest tier first, Cup last: fixtures sharing the same calendar
+ *  round (e.g. every tier's Final, all played the same day) keep their
+ *  generated order as the Schedule tab's display/running order (via each
+ *  fixture's auto-assigned sortIndex — see handleGenerate), so Cup landing
+ *  last in this array is what makes the Cup Final the last, marquee match
+ *  of the day instead of just another one in the middle of the list. */
+export function buildTieredKnockout(groupNames: string[], tierCount: number, thirdPlace = false): GeneratedFixture[] {
+  const fixtures: GeneratedFixture[] = [];
+  const pairStartRanks: number[] = [];
+  for (let rank = 1; rank <= tierCount; rank += (rank + 1 <= tierCount ? 2 : 1)) pairStartRanks.push(rank);
+
+  for (const rank of pairStartRanks.reverse()) {
+    if (rank + 1 <= tierCount) {
+      const upperTier = tierName(rank);
+      const lowerTier = tierName(rank + 1);
+      const { qfFixtures, upperSemiSlots, lowerSemiSlots } = buildPairedTierQuarterfinal(groupNames, upperTier, lowerTier, rank, rank + 1);
+      fixtures.push(...qfFixtures);
+      fixtures.push(...offsetRounds(generateKnockoutFromSlots(lowerSemiSlots, thirdPlace).map(f => ({ ...f, tier: lowerTier })), 1));
+      fixtures.push(...offsetRounds(generateKnockoutFromSlots(upperSemiSlots, thirdPlace).map(f => ({ ...f, tier: upperTier })), 1));
+    } else {
+      const tier = tierName(rank);
+      const slots = groupNames.map(g => placeholder(`${ordinal(rank)} ${g}`));
+      fixtures.push(...generateKnockoutFromSlots(slots, thirdPlace).map(f => ({ ...f, tier })));
+    }
+  }
+  return fixtures;
 }
 
 /** Runs a bracket from already-ordered slots (used for Groups→Knockout, where

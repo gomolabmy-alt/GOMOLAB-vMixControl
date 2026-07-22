@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { useVmixStore } from '../stores/vmixStore';
 import { useCanvasStore } from '../stores/canvasStore';
 import { useAppSettings } from '../stores/appSettingsStore';
+import { useCloudSyncStatus } from '../stores/cloudSyncStatusStore';
 import { ProjectMenu } from './ProjectMenu';
 import { CanvasTournamentPicker } from './CanvasTournamentPicker';
 import { TournamentManager } from './TournamentManager';
@@ -26,6 +27,8 @@ export function StatusBar() {
 
   const { resetMatchData, editMode, setEditMode } = useCanvasStore();
   const { theme, setTheme } = useAppSettings();
+  const { pushing, pulling, lastError } = useCloudSyncStatus();
+  const isSyncingCloud = pushing || pulling;
   const isReadOnly = syncClient.isReadOnly;
   const [showTournamentDb, setShowTournamentDb] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -65,6 +68,11 @@ export function StatusBar() {
 
   return (
     <header className="status-bar" style={{ position: 'relative' }}>
+      {isSyncingCloud && (
+        <div className="sync-progress-bar" title={pushing ? 'Pushing changes to the cloud…' : 'Pulling updates from the cloud…'}>
+          <div className="sync-progress-bar__fill" />
+        </div>
+      )}
       <div className="status-bar-left">
         {isBrowserClient ? (
           // Browser client: non-interactive chip showing remote vMix connections with host IP
@@ -164,6 +172,15 @@ export function StatusBar() {
       </div>
 
       <div className="status-bar-right">
+        {isSyncingCloud && (
+          <span className="sync-status-chip" title={pushing ? 'Pushing changes to the cloud…' : 'Pulling updates from the cloud…'}>
+            <span className="sync-status-spinner" />
+            {pushing ? 'Saving…' : 'Syncing…'}
+          </span>
+        )}
+        {!isSyncingCloud && lastError && (
+          <span className="sync-status-chip sync-status-chip--error" title={lastError}>⚠ Sync failed</span>
+        )}
         <button
           className="status-btn status-btn--db"
           onClick={() => setShowTournamentDb(true)}

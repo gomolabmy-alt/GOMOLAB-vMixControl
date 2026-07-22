@@ -75,6 +75,16 @@ export interface Tournament {
    *  tournament's schedule be filtered down to a single venue per physical
    *  install (see appSettingsStore's canvasTournamentId/canvasVenue). */
   venues?: string[];
+  /** Per-venue short code (e.g. "Court 1" → "B") used to build each
+   *  fixture's auto match number — keyed by venue name, matching `venues`.
+   *  Only meaningful when matchNumberPrefix is set. */
+  venuePrefixes?: Record<string, string>;
+  /** Base prefix for auto-generated fixture match numbers (e.g. "M" gives
+   *  "MB1", "MC2"...) — the number is one running sequence across the whole
+   *  schedule in running order regardless of venue; the letter reflects
+   *  each fixture's own venue (see src/utils/matchNumber.ts). Empty/
+   *  undefined turns the whole match-number feature off. */
+  matchNumberPrefix?: string;
   /** How the next team is picked from the current pot — 'random' (default)
    *  picks blindly; 'manual' lets the operator click a specific team chip in
    *  the current pot to draw it (e.g. a physical ball was already pulled by
@@ -111,6 +121,19 @@ export interface Tournament {
   /** The linked event's name, captured at link time purely for display (so
    *  the toolbar can show which event without re-fetching the event list). */
   eventName?: string;
+  /** Cross-venue sharing key (see the event page's "Cross-Venue Key" button
+   *  on the website) — only set when `eventId` points to an event owned by
+   *  a DIFFERENT vendor than this device's own. Re-sent with every push so
+   *  the link keeps working (or stops, if the key's since been revoked/
+   *  regenerated) without needing to re-enter it. Undefined for an
+   *  own-vendor event link, which needs no key at all. */
+  eventShareKey?: string;
+  /** True for a tournament that arrived via cloud pull from a DIFFERENT
+   *  vendor (a cross-venue event link someone else set up) — read-only:
+   *  never included in a push regardless of cloudSyncEnabled, since this
+   *  device doesn't own it and the server would reject the write anyway.
+   *  Undefined/false for anything actually owned by this device's vendor. */
+  foreignVendor?: boolean;
 }
 
 export interface GroupListVmixTarget {

@@ -152,6 +152,12 @@ export function buildLoadMatchPatch(m: ScheduledMatch): Record<string, any> {
  * Guards against losing the current scoreboard match when a new one is about
  * to replace it:
  * - No real content on the board yet → nothing to protect, proceeds silently.
+ * - A bye/walkover that hasn't been confirmed via the Walkover Confirm
+ *   popup yet → never auto-saved here, no matter how long it's sat on the
+ *   board or how long past its scheduled date — it only ever becomes a
+ *   Result through that explicit confirm (see ScoreboardWidget's
+ *   commitWalkoverResult). Being silently overwritten by the next fixture
+ *   must not complete it behind the operator's back.
  * - Content present but not yet saved → auto-saves it as a result, then proceeds.
  * - Content already saved (signature matches) → nothing new to capture, so it
  *   just proceeds too (native confirm() used to gate this, but it's proved
@@ -166,6 +172,12 @@ export function guardScoreboardOverwrite(
   if (!hasScoreboardContent(cfg)) return true;
   const currentSig = computeMatchSignature(cfg);
   if (currentSig === cfg.lastSavedSignature) return true;
+  if (cfg.matchType) {
+    const fixture = cfg.linkedScheduleMatchId
+      ? useMatchScheduleStore.getState().matches.find(m => m.id === cfg.linkedScheduleMatchId)
+      : undefined;
+    if (!fixture?.completedAt) return true; // unconfirmed bye/walkover — let it go, don't auto-complete it
+  }
   addResult(buildResultFromConfig(cfg));
   // The outgoing match is being replaced — if it came from the Schedule tab,
   // mark that fixture completed now that its result has been captured.

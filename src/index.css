@@ -744,6 +744,43 @@ button { user-select: none; -webkit-user-select: none; }
 .status-bar-center { display: flex; align-items: center; gap: 16px; min-width: 0; overflow: hidden; -webkit-app-region: drag; user-select: none; }
 .status-bar-right { display: flex; align-items: center; gap: 6px; }
 
+/* Cloud sync in progress — thin indeterminate bar along the bottom edge of
+   the status bar, plus a small text chip on the right, while a push/pull to
+   event.gomonetwork.com is in flight. */
+.sync-progress-bar {
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 2px;
+  overflow: hidden;
+  pointer-events: none;
+  background: transparent;
+}
+.sync-progress-bar__fill {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 35%;
+  background: var(--accent);
+  border-radius: 2px;
+  animation: sync-progress-slide 1.1s ease-in-out infinite;
+}
+@keyframes sync-progress-slide {
+  0%   { left: -35%; }
+  100% { left: 100%; }
+}
+
+.sync-status-chip {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 600; color: var(--text-muted);
+  padding: 3px 8px; border-radius: 20px; background: var(--bg-2); border: 1px solid var(--border);
+}
+.sync-status-chip--error { color: #e74c3c; border-color: rgba(231, 76, 60, .4); }
+.sync-status-spinner {
+  width: 9px; height: 9px; border-radius: 50%;
+  border: 1.5px solid var(--border); border-top-color: var(--accent);
+  animation: sync-status-spin .7s linear infinite;
+}
+@keyframes sync-status-spin { to { transform: rotate(360deg); } }
+
 .status-dot {
   width: 8px;
   height: 8px;
@@ -3501,6 +3538,28 @@ button { user-select: none; -webkit-user-select: none; }
 }
 .wgt-score-dec:hover  { filter: brightness(1.15); }
 .wgt-score-dec:active { transform: scale(0.92); filter: brightness(0.85); }
+.wgt-score-undo {
+  border-radius: 999px;
+  border: none;
+  background: rgba(100, 100, 160, 0.18);
+  color: #a8a8d8;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: filter 0.12s, transform 0.1s;
+  user-select: none;
+  -webkit-user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  height: 26px;
+  white-space: nowrap;
+  margin-left: auto;
+}
+.wgt-score-undo:hover  { filter: brightness(1.3); color: #c0c0ee; }
+.wgt-score-undo:active { transform: scale(0.92); filter: brightness(0.85); }
 
 /* Full-width buttons row below the scoreboard — confirmation overlays this */
 .wgt-score-btns-outer {
@@ -3602,6 +3661,46 @@ button { user-select: none; -webkit-user-select: none; }
 }
 .wgt-score-dec-confirm-no:hover  { background: var(--surface2); }
 .wgt-score-dec-confirm-no:active { transform: scale(0.97); }
+
+/* Bye/walkover confirm bar — replaces the live score buttons when a
+   bye/walkover fixture is on the board, since there's no game to score. */
+.wgt-score-walkover-bar {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(230,126,34,0.12);
+  border: 1px solid rgba(230,126,34,0.35);
+}
+.wgt-score-walkover-bar--done {
+  background: rgba(46,204,113,0.10);
+  border-color: rgba(46,204,113,0.35);
+}
+.wgt-score-walkover-bar-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.wgt-score-walkover-bar-btn {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: none;
+  background: #e67e22;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.wgt-score-walkover-bar-btn:hover { opacity: 0.88; }
+.wgt-score-walkover-bar--done .wgt-score-walkover-bar-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
 .wgt-score-divider {
   display: flex;
   flex-direction: column;
@@ -3762,6 +3861,20 @@ input.wgt-score-meta-input::placeholder { color: var(--text-muted); font-weight:
 .wgt-score-save-btn:hover { background: #3ee082; }
 .wgt-score-save-btn:active { transform: scale(0.95); }
 .wgt-score-save-btn--flash { background: #27ae60; color: #fff; }
+.wgt-score-reset-teams-btn {
+  flex-shrink: 0;
+  background: var(--bg-3);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s, color 0.15s, border-color 0.15s;
+}
+.wgt-score-reset-teams-btn:hover { background: var(--red); color: #fff; border-color: var(--red); }
+.wgt-score-reset-teams-btn:active { transform: scale(0.95); }
 .wgt-score-shootout-btn {
   flex-shrink: 0;
   background: var(--bg-3);
@@ -8825,6 +8938,16 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.tm-tourn-foreign-badge {
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
+  color: #5b9bd5;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .tm-tourn-item-category {
   display: block;
   font-size: 9.5px;
@@ -9266,6 +9389,10 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
    text that becomes editable on double-click. */
 .tm-sched-group { margin-bottom: 20px; }
 .tm-sched-group-title { font-size: 17px; font-weight: 700; color: var(--text-primary); margin-bottom: 10px; }
+.tm-sched-stage-title {
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+  color: var(--accent); margin: 14px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
+}
 .tm-sched-rows { display: flex; flex-direction: column; gap: 10px; }
 
 .tm-sched-row {
@@ -9457,6 +9584,13 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
 .tm-sched-send-btn--cancel { background: var(--red); }
 .tm-sched-send-btn--swap-here { background: #9b59b6; }
 .tm-sched-sent-tag { font-size: 11px; font-weight: 700; color: #2ecc71; white-space: nowrap; }
+.tm-sched-sent-tag--live { display: inline-flex; align-items: center; gap: 6px; }
+.tm-sched-stop-btn {
+  border: none; border-radius: 6px; padding: 3px 8px; font-size: 10px; font-weight: 700;
+  cursor: pointer; background: var(--red); color: #fff; transition: filter 0.15s; white-space: nowrap;
+}
+.tm-sched-stop-btn:hover { filter: brightness(1.15); }
+.tm-sched-stop-btn:active { transform: scale(0.95); }
 
 .tm-sched-row--completed { opacity: 0.55; }
 .tm-sched-row--completed:hover { opacity: 0.85; }
@@ -9515,6 +9649,18 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
   font-size: 18px;
   font-weight: 800;
   color: var(--text-primary);
+}
+.tm-sched-matchnum-badge {
+  flex-shrink: 0;
+  align-self: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-1));
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 2px 7px;
 }
 .tm-sched-completed-badge {
   position: absolute; top: 6px; left: 66px; z-index: 2;
@@ -11920,9 +12066,33 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
 }
 .signin-gate-btn:hover { filter: brightness(1.12); }
 .signin-gate-btn:active { transform: scale(0.97); }
+.signin-gate-btn:disabled { opacity: 0.5; cursor: default; filter: none; transform: none; }
 .signin-gate-btn--secondary {
   background: rgba(255,255,255,0.12);
 }
+.signin-gate-pin-input {
+  width: 160px;
+  text-align: center;
+  letter-spacing: 0.3em;
+  font-size: 18px;
+  font-weight: 700;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+}
+.signin-gate-pin-input:focus { outline: none; border-color: var(--accent, #3498db); }
+.signin-gate-bypass-link {
+  border: none;
+  background: none;
+  color: rgba(255,255,255,0.4);
+  font-size: 11px;
+  text-decoration: underline;
+  cursor: pointer;
+  margin-top: 4px;
+}
+.signin-gate-bypass-link:hover { color: rgba(255,255,255,0.7); }
 .signin-gate-msg {
   font-size: 13px;
   color: rgba(255,255,255,0.6);

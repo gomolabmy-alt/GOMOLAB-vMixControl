@@ -32,6 +32,7 @@ export function App() {
   const isDesktopHost = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   const [splashDone, setSplashDone] = useState(!isDesktopHost);
   const authStatus = useAuthStore(s => s.status);
+  const offlineBypass = useAuthStore(s => s.offlineBypass);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -49,10 +50,23 @@ export function App() {
   // Multi-venue cloud sync — only the desktop host itself runs this (LAN
   // remote/commentator clients mirror the host's state instead, and never
   // hold a sign-in token of their own). Push/pull both silently no-op until
-  // signed in, so this is safe to start before that happens.
+  // signed in, so this is safe to start before that happens — and stays a
+  // no-op for the lifetime of an offline-bypass session too, since bypass
+  // never involves a token at all.
   useEffect(() => {
     if (!isDesktopHost) return;
     startCloudSync();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Re-verify once at launch for an already-signed-in device — the only
+  // other verify() call is right after completing sign-in itself, so a
+  // long-lived 30-day token would otherwise never pick up an offline bypass
+  // PIN an admin grants later. Silently no-ops offline (verify() already
+  // tolerates network failure without forcing a sign-out).
+  useEffect(() => {
+    if (!isDesktopHost) return;
+    if (authStatus === 'signed-in') useAuthStore.getState().verify();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -63,7 +77,7 @@ export function App() {
   // Remote/commentator browser clients connecting to an already-running,
   // already-signed-in host are never gated here — isDesktopHost is only ever
   // true for the actual packaged app.
-  if (isDesktopHost && splashDone && authStatus !== 'signed-in') {
+  if (isDesktopHost && splashDone && authStatus !== 'signed-in' && !offlineBypass) {
     return (
       <div className="app-layout">
         <SignInGate />

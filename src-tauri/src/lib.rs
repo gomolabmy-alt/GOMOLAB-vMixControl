@@ -112,6 +112,7 @@ pub fn run() {
             commands::toggle_commentator,
             commands::set_sleep_block,
             commands::open_image_dialog,
+            commands::save_text_file_dialog,
             commands::save_image,
             commands::rename_image,
             commands::import_image,

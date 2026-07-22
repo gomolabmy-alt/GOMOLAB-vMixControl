@@ -5,6 +5,7 @@ import { WIDGET_DEFAULTS } from '../types/canvas';
 import { useVmixStore } from './vmixStore';
 import { useUndoStore } from './undoStore';
 import { syncClient } from '../lib/syncClient';
+import { transparentLogoUrl } from '../lib/imageUrl';
 import TimerWorkerClass from '../workers/timerWorker?worker&inline';
 
 // Web Worker — used only in browser mode (not Tauri).
@@ -300,8 +301,10 @@ interface CanvasStore {
   // Scoreboard widget actions
   scoreWidgetAction: (widgetId: string, team: 'A' | 'B', delta: number, label?: string, scorer?: string, scorerJerseyNo?: string) => Promise<void>;
   resetWidgetScore: (widgetId: string) => Promise<void>;
+  resetWidgetTeams: (widgetId: string) => Promise<void>;
   clearWidgetScoreLog: (widgetId: string) => void;
   patchScoreLogEntry: (widgetId: string, entryId: string, patch: { scorer?: string; jerseyNo?: string }) => void;
+  undoLastScoreEntry: (widgetId: string, team: 'A' | 'B') => Promise<void>;
   returnPlayerFromSinBin: (playerListWidgetId: string, playerId: string) => void;
 
   // Timeline widget
@@ -1908,10 +1911,89 @@ export const useCanvasStore = create<CanvasStore>()(
           }
         },
 
+        // Clears both teams' name/short name/logo — for starting a fresh
+        // manual matchup from blank rather than editing over whatever was
+        // there before. Logo is set to a transparent placeholder rather than
+        // '' so the vMix push below actually clears the on-air image instead
+        // of leaving the previous team's logo showing (an empty string is
+        // falsy, so a plain clear wouldn't trigger the image field push).
+        resetWidgetTeams: async (widgetId) => {
+          const config = findWidgetConfig(widgetId);
+          if (!config) return;
+          const before = {
+            teamAName: config.teamAName, teamAShortName: config.teamAShortName, teamALogo: config.teamALogo,
+            teamBName: config.teamBName, teamBShortName: config.teamBShortName, teamBLogo: config.teamBLogo,
+          };
+          const blankLogo = transparentLogoUrl();
+          updateWidgetConfig(widgetId, {
+            teamAName: '', teamAShortName: '', teamALogo: blankLogo,
+            teamBName: '', teamBShortName: '', teamBLogo: blankLogo,
+          });
+          useUndoStore.getState().pushUndo('Reset teams', () => updateWidgetConfig(widgetId, before));
+          {
+            const { client } = useVmixStore.getState();
+            const targets = config.vmixInputs?.length
+              ? config.vmixInputs
+              : config.vmixInputKey
+                ? [{
+                    inputKey: config.vmixInputKey,
+                    fieldTeamA: config.fieldTeamA, fieldTeamB: config.fieldTeamB,
+                    fieldShortA: config.fieldShortA, fieldShortB: config.fieldShortB,
+                    fieldLogoA: config.fieldLogoA, fieldLogoB: config.fieldLogoB,
+                  }]
+                : [];
+            await Promise.all(targets.flatMap((t: {
+              inputKey: string; fieldTeamA?: string; fieldTeamB?: string;
+              fieldShortA?: string; fieldShortB?: string; fieldLogoA?: string; fieldLogoB?: string;
+            }) => [
+              t.inputKey && t.fieldTeamA && client && client.setTextField(t.inputKey, t.fieldTeamA, ''),
+              t.inputKey && t.fieldTeamB && client && client.setTextField(t.inputKey, t.fieldTeamB, ''),
+              t.inputKey && t.fieldShortA && client && client.setTextField(t.inputKey, t.fieldShortA, ''),
+              t.inputKey && t.fieldShortB && client && client.setTextField(t.inputKey, t.fieldShortB, ''),
+              t.inputKey && t.fieldLogoA && client && client.setImageField(t.inputKey, t.fieldLogoA, blankLogo),
+              t.inputKey && t.fieldLogoB && client && client.setImageField(t.inputKey, t.fieldLogoB, blankLogo),
+            ].filter(Boolean)));
+          }
+        },
+
         clearWidgetScoreLog: (widgetId) => {
           const before = findWidgetConfig(widgetId)?.scoreLog;
           updateWidgetConfig(widgetId, { scoreLog: [] });
           useUndoStore.getState().pushUndo('Cleared score log', () => updateWidgetConfig(widgetId, { scoreLog: before }));
+        },
+
+        // Reverts the single most recent scoring action for one team — e.g.
+        // undoing a "Try" (5pts) removes exactly that log entry and that
+        // team's score drops by exactly 5, not a fixed decrement amount. The
+        // log is stored most-recent-first (see scoreWidgetAction), so the
+        // team's most recent entry is simply the first match in the array.
+        undoLastScoreEntry: async (widgetId, team) => {
+          const config = findWidgetConfig(widgetId);
+          if (!config) return;
+          const log: any[] = config.scoreLog ?? [];
+          const idx = log.findIndex((e: any) => e.team === team);
+          if (idx === -1) return;
+          const entry = log[idx];
+          const field = team === 'A' ? 'scoreA' : 'scoreB';
+          const current = team === 'A' ? (config.scoreA ?? 0) : (config.scoreB ?? 0);
+          const next = Math.max(0, current - entry.points);
+          const nextLog = [...log.slice(0, idx), ...log.slice(idx + 1)];
+          const before = { [field]: current, scoreLog: log };
+
+          updateWidgetConfig(widgetId, { [field]: next, scoreLog: nextLog });
+          useUndoStore.getState().pushUndo(`Undo ${entry.action}`, () => updateWidgetConfig(widgetId, before));
+          {
+            const { client } = useVmixStore.getState();
+            const targets = config.vmixInputs?.length
+              ? config.vmixInputs
+              : config.vmixInputKey
+                ? [{ inputKey: config.vmixInputKey, fieldScoreA: config.fieldScoreA, fieldScoreB: config.fieldScoreB }]
+                : [];
+            for (const t of targets) {
+              const f = team === 'A' ? t.fieldScoreA : t.fieldScoreB;
+              if (t.inputKey && f && client) await client.setTextField(t.inputKey, f, String(next));
+            }
+          }
         },
 
         returnPlayerFromSinBin: (playerListWidgetId, playerId) => {

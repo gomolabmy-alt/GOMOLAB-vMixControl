@@ -63,7 +63,7 @@ function TitleBarVenueScope() {
 }
 
 function TitleBarAuthChip() {
-  const { user, signOut } = useAuthStore();
+  const { user, signOut, offlineBypass, exitBypass } = useAuthStore();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -76,12 +76,29 @@ function TitleBarAuthChip() {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  if (!user) return null;
+  if (!user && !offlineBypass) return null;
+
+  if (offlineBypass) {
+    return (
+      <div className="titlebar-venue" ref={ref}>
+        <button className="titlebar-venue-btn" onClick={() => setOpen(o => !o)} title="Using GOMOLAB vMix Control offline via PIN bypass — not signed in, cloud sync is off">
+          🔒 <span className="titlebar-venue-label">Offline Mode</span>
+        </button>
+        {open && (
+          <div className="titlebar-venue-dropdown">
+            <button className="titlebar-venue-select" style={{ cursor: 'pointer' }} onClick={() => { exitBypass(); setOpen(false); }}>
+              Exit Offline Mode
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="titlebar-venue" ref={ref}>
-      <button className="titlebar-venue-btn" onClick={() => setOpen(o => !o)} title={user.email}>
-        👤 <span className="titlebar-venue-label">{user.name}</span>
+      <button className="titlebar-venue-btn" onClick={() => setOpen(o => !o)} title={user!.email}>
+        👤 <span className="titlebar-venue-label">{user!.name}</span>
       </button>
       {open && (
         <div className="titlebar-venue-dropdown">

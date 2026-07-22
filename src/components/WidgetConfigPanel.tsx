@@ -4,6 +4,8 @@ import { useCanvasStore } from '../stores/canvasStore';
 import { useVmixStore } from '../stores/vmixStore';
 import { useTournamentStore } from '../stores/tournamentStore';
 import { useTeamDbStore } from '../stores/teamDbStore';
+import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
+import { extractKnockoutStage } from './TournamentManager';
 import { WIDGET_TYPE_ICONS, WIDGET_TYPE_LABELS } from '../types/canvas';
 import type { CanvasWidget } from '../types/canvas';
 import { INPUT_TYPE_LABELS } from '../types/vmix';
@@ -493,6 +495,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
   const pages = pagesOverride ? [...store.pages, ...pagesOverride] : store.pages;
   const { vmixState, globalVariables, getClient } = useVmixStore();
   const { tournaments } = useTournamentStore();
+  const { matches: allMatches } = useMatchScheduleStore();
   // A canvas is normally dedicated to one tournament — widgets fall back to
   // that instead of each needing its own "which tournament" picker (though
   // the picker below still lets a widget override it when it truly differs).
@@ -2571,27 +2574,53 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
       }
 
       case 'bracket': {
-        const filterTournament = tournaments.find(t => t.id === (cfg.filterTournamentId || pageTournamentId));
+        const filterTournamentId = cfg.filterTournamentId || pageTournamentId;
+        const filterTournament = tournaments.find(t => t.id === filterTournamentId);
         const filterCategories: string[] = filterTournament?.categories ?? [];
+        // Tier ("Cup"/"Plate"/"Bowl"/"Shield"…) has no static list on
+        // Tournament the way categories do — derived live from whichever
+        // knockout fixtures actually exist for this tournament+category,
+        // same as BracketPanel/BracketWidget do to decide what to show.
+        const effCat = (m: ScheduledMatch): string | undefined =>
+          m.category ?? (m.round?.includes(' · ') ? m.round.split(' · ')[0] : undefined);
+        // A shared Quarterfinal's combined label ("Cup/Plate") is excluded
+        // here — not a selectable tier itself, its matches just get picked
+        // up whenever either paired tier is selected (see BracketWidget).
+        const filterTiers: string[] = Array.from(new Set(
+          allMatches
+            .filter(m => m.tournamentId === filterTournamentId
+              && (filterCategories.length === 0 || effCat(m) === (cfg.filterCategory ?? ''))
+              && !!extractKnockoutStage(m))
+            .map(m => m.tier)
+            .filter((t): t is string => !!t && !t.includes('/'))
+        ));
         return (
         <>
           <Field label="Tournament">
             <select className="field-input" value={cfg.filterTournamentId ?? ''}
-              onChange={e => up({ filterTournamentId: e.target.value, filterCategory: '' })}>
+              onChange={e => up({ filterTournamentId: e.target.value, filterCategory: '', filterTier: '' })}>
               <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— pick tournament —'}</option>
               {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
           </Field>
           {filterCategories.length > 0 && (
             <Field label="Category">
-              <select className="field-input" value={cfg.filterCategory ?? ''} onChange={e => up({ filterCategory: e.target.value })}>
+              <select className="field-input" value={cfg.filterCategory ?? ''} onChange={e => up({ filterCategory: e.target.value, filterTier: '' })}>
                 <option value="">— pick category —</option>
                 {filterCategories.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
             </Field>
           )}
+          {filterTiers.length > 0 && (
+            <Field label="Tier">
+              <select className="field-input" value={cfg.filterTier ?? ''} onChange={e => up({ filterTier: e.target.value })}>
+                <option value="">— pick tier —</option>
+                {filterTiers.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </Field>
+          )}
           <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
-            Read-only — edit bracket arrangement in 🏆 DB → Bracket. A category must be picked once the tournament has any.
+            Read-only — edit bracket arrangement in 🏆 DB → Bracket. A category must be picked once the tournament has any; same for tier on a Cup/Plate/Bowl/Shield tournament.
           </div>
         </>
       );

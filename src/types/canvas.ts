@@ -402,6 +402,7 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
     config: {
       filterTournamentId: '',
       filterCategory: '',
+      filterTier: '',
     },
   },
 };

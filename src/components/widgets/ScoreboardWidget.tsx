@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useContext, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTeamDbStore } from '../../stores/teamDbStore';
@@ -11,6 +12,8 @@ import { TeamPicker } from '../TeamPicker';
 import { TeamMatchHistoryButton } from '../TeamMatchHistoryButton';
 import { MatchSchedulePicker } from '../MatchSchedulePicker';
 import { useMatchScheduleStore, type ScheduledMatch } from '../../stores/matchScheduleStore';
+import { useTournamentStore } from '../../stores/tournamentStore';
+import { SPORT_DEFAULTS } from '../../types/tournament';
 import { computeMatchSignature, buildResultFromConfig, buildLoadMatchPatch, guardScoreboardOverwrite, findDuplicateResult } from '../../utils/scoreboardSnapshot';
 import { ConfirmModal } from '../ConfirmModal';
 import { computeHeadToHead } from '../../lib/headToHead';
@@ -63,9 +66,13 @@ interface ScoreButtonsProps {
   onDec: (team: 'A' | 'B', amount: number) => void;
   buttonSize?: number;
   teamColor?: string;
+  /** Most recent scoreLog entry for this team, if any — drives the Undo
+   *  button's label/tooltip and whether it renders at all. */
+  lastEntry?: { action: string; points: number };
+  onUndo?: () => void;
 }
 
-function ScoreButtons({ team, increments, onScore, onDec, buttonSize = 1, teamColor }: ScoreButtonsProps) {
+function ScoreButtons({ team, increments, onScore, onDec, buttonSize = 1, teamColor, lastEntry, onUndo }: ScoreButtonsProps) {
   const sz = Math.round(34 * buttonSize);
   const dsz = Math.round(22 * buttonSize);
   return (
@@ -100,8 +107,92 @@ function ScoreButtons({ team, increments, onScore, onDec, buttonSize = 1, teamCo
             onClick={(e) => e.stopPropagation()}
           >–{n}</button>
         ))}
+        {lastEntry && onUndo && (
+          <button
+            className="wgt-score-undo"
+            title={`Undo: ${lastEntry.action} (${lastEntry.points >= 0 ? '+' : ''}${lastEntry.points})`}
+            onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); onUndo(); }}
+            onClick={(e) => e.stopPropagation()}
+          >↺ Undo</button>
+        )}
       </div>
     </div>
+  );
+}
+
+// Replaces the normal live-scoring buttons for a bye/walkover fixture once
+// it's been sent to this board — there's no game to increment a score on, so
+// instead this prompts the operator to confirm the winner (opening
+// WalkoverConfirmModal) before anything is written to Results. Once
+// confirmed, the same bar shows what was saved and lets it be reopened to
+// correct the score.
+function WalkoverBar({ matchType, winnerName, done, scoreA, scoreB, onOpen }: {
+  matchType: string;
+  winnerName: string;
+  done: boolean;
+  scoreA?: number;
+  scoreB?: number;
+  onOpen: () => void;
+}) {
+  return (
+    <div className={`wgt-score-walkover-bar${done ? ' wgt-score-walkover-bar--done' : ''}`}>
+      <span className="wgt-score-walkover-bar-label">
+        {done
+          ? `✓ ${matchType === 'bye' ? 'Bye' : 'Walkover'} confirmed — ${winnerName} wins ${scoreA ?? 0}-${scoreB ?? 0}`
+          : matchType === 'bye' ? `🏳 Bye — ${winnerName} advances` : `⚠ Walkover — ${winnerName} wins`}
+      </span>
+      <button
+        className="wgt-score-walkover-bar-btn"
+        onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); onOpen(); }}
+        onClick={e => e.stopPropagation()}
+      >{done ? 'Edit' : 'Confirm Result'}</button>
+    </div>
+  );
+}
+
+function WalkoverConfirmModal({ matchType, teamAName, teamBName, teamAColor, teamBColor, walkoverLoser, initialScoreA, initialScoreB, onConfirm, onCancel }: {
+  matchType: string;
+  teamAName: string;
+  teamBName: string;
+  teamAColor: string;
+  teamBColor: string;
+  walkoverLoser?: 'A' | 'B';
+  initialScoreA: number;
+  initialScoreB: number;
+  onConfirm: (scoreA: number, scoreB: number) => void;
+  onCancel: () => void;
+}) {
+  const [scoreA, setScoreA] = useState(initialScoreA);
+  const [scoreB, setScoreB] = useState(initialScoreB);
+  const winnerName = matchType === 'bye' ? teamAName : (walkoverLoser === 'A' ? teamBName : teamAName);
+
+  return createPortal(
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <h3 className="modal-title">{matchType === 'bye' ? 'Confirm Bye' : 'Confirm Walkover'}</h3>
+        <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4 }}>
+          <strong>{winnerName}</strong> {matchType === 'bye' ? 'advances automatically' : 'wins by walkover'}. Confirm the final score to save it as a result.
+        </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '14px 0' }}>
+          <div style={{ flex: 1, textAlign: 'center' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: teamAColor, marginBottom: 4 }}>{teamAName}</div>
+            <input type="number" className="field-input" style={{ textAlign: 'center' }} value={scoreA}
+              onChange={e => setScoreA(Number(e.target.value) || 0)} onClick={e => e.stopPropagation()} />
+          </div>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 700, flexShrink: 0 }}>–</span>
+          <div style={{ flex: 1, textAlign: 'center' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: teamBColor, marginBottom: 4 }}>{teamBName}</div>
+            <input type="number" className="field-input" style={{ textAlign: 'center' }} value={scoreB}
+              onChange={e => setScoreB(Number(e.target.value) || 0)} onClick={e => e.stopPropagation()} />
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button className="btn btn--ghost btn--small" onClick={onCancel}>Cancel</button>
+          <button className="btn btn--primary btn--small" onClick={() => onConfirm(scoreA, scoreB)}>Confirm Result</button>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
@@ -111,12 +202,13 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   // CanvasActionContext is only provided on the commentator canvas — its
   // presence doubles as the commentator-mode flag (see canvasContext.ts).
   const isCommentator = !!ctx;
-  const { pages, scoreWidgetAction, resetWidgetScore, resetWidgetTimer } = store;
+  const { pages, scoreWidgetAction, resetWidgetScore, resetWidgetTeams, resetWidgetTimer, undoLastScoreEntry } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { teams: teamDbTeams } = useTeamDbStore();
   const { client, vmixSyncVersion } = useVmixStore();
   const { results: savedResults, addResult, updateResult } = useMatchResultsStore();
-  const { markSent, markCompleted, matches: scheduledMatches } = useMatchScheduleStore();
+  const { markSent, markCompleted, updateMatch, matches: scheduledMatches } = useMatchScheduleStore();
+  const { tournaments } = useTournamentStore();
 
   // When linked, mirror the source scoreboard's display state
   const allWidgets = useMemo(() => pages.flatMap(p => p.widgets), [pages]);
@@ -329,6 +421,43 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
     commitSaveResult();
   };
 
+  // A bye/walkover fixture never gets "played" on this board, so it skips
+  // the normal Save Result step entirely — instead, once it's sent here, the
+  // operator confirms the winner/score through WalkoverConfirmModal and this
+  // writes the Result directly (mirroring commitSaveResult, but with the
+  // operator-chosen score rather than whatever's on the board).
+  const linkedFixture = dc.linkedScheduleMatchId
+    ? scheduledMatches.find(m => m.id === dc.linkedScheduleMatchId)
+    : undefined;
+  const pendingWalkover = !isLinked && !!dc.matchType && !!linkedFixture && !linkedFixture.completedAt;
+  const confirmedWalkover = !isLinked && !!dc.matchType && !!linkedFixture && !!linkedFixture.completedAt;
+  const [showWalkoverModal, setShowWalkoverModal] = useState(false);
+  const commitWalkoverResult = (scoreA: number, scoreB: number) => {
+    if (!dc.linkedScheduleMatchId) return;
+    const cfg = { ...dc, scoreA, scoreB, linkedTournamentId: effTournamentId };
+    const existing = findDuplicateResult(savedResults, cfg);
+    const patch = buildResultFromConfig(cfg);
+    if (existing) updateResult(existing.id, patch);
+    else addResult(patch);
+    updateWidgetConfig(widgetId, { scoreA, scoreB, lastSavedSignature: computeMatchSignature(cfg) });
+    updateMatch(dc.linkedScheduleMatchId, { scoreA, scoreB });
+    markCompleted(dc.linkedScheduleMatchId);
+    setShowWalkoverModal(false);
+  };
+  const walkoverWinnerName = dc.matchType === 'bye'
+    ? (dc.teamAName || 'Team A')
+    : (dc.walkoverLoser === 'A' ? (dc.teamBName || 'Team B') : (dc.teamAName || 'Team A'));
+  // The fixture itself never carries a score until confirmed (see
+  // TournamentManager's bye/walkover auto-detect effect), so the popup's
+  // starting suggestion is computed fresh here from the tournament's own
+  // walkoverWinScore setting instead of reading dc.scoreA/scoreB.
+  const walkoverTournament = tournaments.find(t => t.id === effTournamentId);
+  const walkoverWinScore = walkoverTournament
+    ? (walkoverTournament.settings?.walkoverWinScore ?? SPORT_DEFAULTS[walkoverTournament.sport].walkoverWinScore)
+    : 0;
+  const suggestedWalkoverScoreA = dc.walkoverLoser === 'A' ? 0 : walkoverWinScore;
+  const suggestedWalkoverScoreB = dc.walkoverLoser === 'A' ? walkoverWinScore : 0;
+
   // Applies a scheduled fixture's team details + competition/round to this
   // scoreboard in one click — the reverse of saveResult (schedule → board,
   // rather than board → results). Score is left untouched (starts fresh).
@@ -367,6 +496,11 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
     scoreWidgetAction(widgetId, pending.team, pending.value, pending.label, playerName, jerseyNo);
     setPending(null);
   };
+
+  // scoreLog is stored most-recent-first, so each team's own Undo button
+  // just needs the first entry that belongs to it.
+  const lastEntryA = (config.scoreLog ?? []).find((e: any) => e.team === 'A');
+  const lastEntryB = (config.scoreLog ?? []).find((e: any) => e.team === 'B');
 
   const pendingTeamColor = pending?.team === 'A' ? teamAColor : teamBColor;
   const pendingTeamName  = pending?.team === 'A'
@@ -504,6 +638,12 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
               onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); saveResult(); }}
               onClick={e => e.stopPropagation()}
             >{savedFlash ? '✓ Saved' : '💾 Save Result'}</button>
+            <button
+              className="wgt-score-reset-teams-btn"
+              title="Clear both teams' name and logo, back to a blank matchup"
+              onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); resetWidgetTeams(widgetId); }}
+              onClick={e => e.stopPropagation()}
+            >↺ Reset Teams</button>
           </div>
         )}
       </div>
@@ -651,9 +791,22 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
       </div>
 
       {/* ── Score buttons ────────────────────────────────────────── */}
-      {!isLinked && (
+      {!isLinked && (pendingWalkover || confirmedWalkover) && (
         <div className="wgt-score-btns-outer">
-          <ScoreButtons team="A" increments={increments} onScore={handleScore} onDec={handleDec} buttonSize={config.buttonSize ?? 1} teamColor={teamAColor} />
+          <WalkoverBar
+            matchType={dc.matchType}
+            winnerName={walkoverWinnerName}
+            done={confirmedWalkover}
+            scoreA={dc.scoreA}
+            scoreB={dc.scoreB}
+            onOpen={() => setShowWalkoverModal(true)}
+          />
+        </div>
+      )}
+      {!isLinked && !pendingWalkover && !confirmedWalkover && (
+        <div className="wgt-score-btns-outer">
+          <ScoreButtons team="A" increments={increments} onScore={handleScore} onDec={handleDec} buttonSize={config.buttonSize ?? 1} teamColor={teamAColor}
+            lastEntry={lastEntryA} onUndo={() => undoLastScoreEntry(widgetId, 'A')} />
           <div className="wgt-score-mcenter wgt-score-mcenter--btns">
             {pointCounts.length > 0 && (
               <div className="wgt-score-stats-pill">
@@ -678,7 +831,8 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
               onClick={(e) => e.stopPropagation()}
             >RST</button>
           </div>
-          <ScoreButtons team="B" increments={increments} onScore={handleScore} onDec={handleDec} buttonSize={config.buttonSize ?? 1} teamColor={teamBColor} />
+          <ScoreButtons team="B" increments={increments} onScore={handleScore} onDec={handleDec} buttonSize={config.buttonSize ?? 1} teamColor={teamBColor}
+            lastEntry={lastEntryB} onUndo={() => undoLastScoreEntry(widgetId, 'B')} />
 
           {pendingDec && (() => {
             const isA = pendingDec.team === 'A';
@@ -804,6 +958,21 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
           danger
           onConfirm={() => { commitSaveResult(duplicateResultId); setDuplicateResultId(null); }}
           onCancel={() => setDuplicateResultId(null)}
+        />
+      )}
+
+      {showWalkoverModal && (
+        <WalkoverConfirmModal
+          matchType={dc.matchType}
+          teamAName={dc.teamAName || 'Team A'}
+          teamBName={dc.teamBName || 'Team B'}
+          teamAColor={teamAColor}
+          teamBColor={teamBColor}
+          walkoverLoser={dc.walkoverLoser}
+          initialScoreA={suggestedWalkoverScoreA}
+          initialScoreB={suggestedWalkoverScoreB}
+          onConfirm={commitWalkoverResult}
+          onCancel={() => setShowWalkoverModal(false)}
         />
       )}
     </div>

@@ -608,6 +608,33 @@ pub async fn open_image_dialog() -> Result<Option<String>, String> {
     Ok(file.map(|f| f.path().to_string_lossy().to_string()))
 }
 
+// Native "Save As" dialog for the Tournament Database's export buttons
+// (Export Project/Tournament JSON, Fixtures/Results CSV) — lets the operator
+// choose their own filename/location instead of always silently landing in
+// the browser-style default downloads folder under an auto-generated name.
+// Returns false (not an error) when the operator cancels the dialog.
+#[tauri::command]
+pub async fn save_text_file_dialog(default_name: String, content: String) -> Result<bool, String> {
+    let ext = Path::new(&default_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("txt")
+        .to_string();
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("Export")
+        .set_file_name(&default_name)
+        .add_filter(&ext.to_uppercase(), &[ext.as_str()])
+        .save_file()
+        .await;
+    match file {
+        Some(handle) => {
+            std::fs::write(handle.path(), content).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 // Picks a filename that keeps the original stem where possible, only adding
 // a "_2", "_3", … suffix if a file with that exact name already exists —
 // so the library shows recognizable names instead of a timestamp prefix.

@@ -11,6 +11,16 @@ export interface AuthUser {
 const SIGNIN_URL = 'https://event.gomonetwork.com/desktop';
 const VERIFY_URL = 'https://event.gomonetwork.com/api/auth/desktop/verify';
 
+// Trimmed hex-encoded sha256 hash for constant-shape comparison — plain
+// string equality on hex digests is fine here (no meaningful timing side
+// channel: this only ever runs locally, comparing against a value that
+// already left the server as a hash, never a secret this process holds).
+async function sha256Hex(text: string): Promise<string> {
+  const bytes = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 interface AuthState {
   token: string | null;
   user: AuthUser | null;
@@ -21,10 +31,29 @@ interface AuthState {
   verifying: boolean;
   error: string | null;
 
+  /** sha256 hash of an admin-set offline bypass PIN for this device, synced
+   *  down from the last successful verify() while genuinely signed in — see
+   *  DesktopSession.bypassPinHash on the website. Null means no admin has
+   *  ever granted this device a bypass, so the bypass option never shows at
+   *  all (see SignInGate.tsx). Persisted so it's still usable with zero
+   *  connectivity, unlike everything else auth-related here. */
+  bypassPinHash: string | null;
+  /** True once the current app session got past the sign-in gate via PIN
+   *  instead of a real sign-in — deliberately NOT persisted (unlike token),
+   *  so the PIN has to be re-entered on every fresh launch rather than
+   *  silently staying "unlocked" forever on a shared device. */
+  offlineBypass: boolean;
+  bypassError: string | null;
+
   beginSignIn: () => Promise<void>;
   completeSignIn: (token: string, state: string) => boolean;
   verify: () => Promise<void>;
   signOut: () => void;
+  /** Checks a PIN the user typed against the cached bypassPinHash, purely
+   *  locally — no network involved, so this works fully offline. Returns
+   *  whether it succeeded (also reflected in offlineBypass/bypassError). */
+  tryBypass: (pin: string) => Promise<boolean>;
+  exitBypass: () => void;
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -36,6 +65,9 @@ export const useAuthStore = create<AuthState>()(
       pendingState: null,
       verifying: false,
       error: null,
+      bypassPinHash: null,
+      offlineBypass: false,
+      bypassError: null,
 
       beginSignIn: async () => {
         const state = crypto.randomUUID();
@@ -87,7 +119,7 @@ export const useAuthStore = create<AuthState>()(
           }
           if (!res.ok) { set({ verifying: false }); return; }
           const data = await res.json();
-          set({ user: data.user, status: 'signed-in', verifying: false });
+          set({ user: data.user, status: 'signed-in', verifying: false, bypassPinHash: data.bypassPinHash ?? null });
         } catch {
           // Network/offline failure — the 30-day token expiry is the only
           // hard backstop; don't force a sign-out just because the site is
@@ -97,7 +129,30 @@ export const useAuthStore = create<AuthState>()(
       },
 
       signOut: () => set({ token: null, user: null, status: 'signed-out', pendingState: null, error: null }),
+
+      tryBypass: async (pin) => {
+        const { bypassPinHash } = get();
+        if (!bypassPinHash) {
+          set({ bypassError: 'Offline access hasn’t been granted for this device.' });
+          return false;
+        }
+        const hash = await sha256Hex(pin.trim());
+        if (hash !== bypassPinHash) {
+          set({ bypassError: 'Incorrect PIN.' });
+          return false;
+        }
+        set({ offlineBypass: true, bypassError: null });
+        return true;
+      },
+
+      exitBypass: () => set({ offlineBypass: false, bypassError: null }),
     }),
-    { name: 'gomolab-auth' },
+    {
+      name: 'gomolab-auth',
+      // offlineBypass is intentionally excluded — it must reset to false on
+      // every fresh launch so the PIN has to be re-entered each time (see
+      // the doc comment on the field above), unlike everything else here.
+      partialize: (s) => ({ token: s.token, user: s.user, status: s.status, bypassPinHash: s.bypassPinHash }),
+    },
   ),
 );

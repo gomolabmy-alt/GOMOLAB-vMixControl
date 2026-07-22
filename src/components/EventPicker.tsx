@@ -21,7 +21,11 @@ export interface RemoteVendor {
 }
 
 interface Props {
-  onPick: (event: RemoteEvent) => void;
+  /** `shareKey` is only passed when the event was found via a cross-venue
+   *  sharing key rather than the caller's own vendor's event list — the
+   *  caller should store it on the tournament (Tournament.eventShareKey) and
+   *  resend it with every future push, or the link won't stick. */
+  onPick: (event: RemoteEvent, shareKey?: string) => void;
   /** Pre-fills the "Create New Event" form from data the controller already
    *  has for the current tournament, so the operator only has to fill in
    *  whatever's genuinely missing (there's no "location" concept locally,
@@ -49,7 +53,7 @@ function todayStr() {
 export function EventPicker({ onPick, defaultName, defaultDateRange }: Props) {
   const token = useAuthStore(s => s.token);
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<'list' | 'create'>('list');
+  const [mode, setMode] = useState<'list' | 'create' | 'key'>('list');
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const [events, setEvents] = useState<RemoteEvent[]>([]);
   const [loading, setLoading] = useState(false);
@@ -58,6 +62,13 @@ export function EventPicker({ onPick, defaultName, defaultDateRange }: Props) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [vendors, setVendors] = useState<RemoteVendor[]>([]);
   const [form, setForm] = useState({ name: '', startDate: todayStr(), endDate: todayStr(), location: '', vendorId: '' });
+  // Cross-venue "Enter Sharing Key" flow — separate from the own-vendor
+  // list/create modes above, since redeeming a key looks up an event by
+  // code rather than by browsing this account's own events.
+  const [keyInput, setKeyInput] = useState('');
+  const [keyLoading, setKeyLoading] = useState(false);
+  const [keyError, setKeyError] = useState<string | null>(null);
+  const [keyFound, setKeyFound] = useState<RemoteEvent | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLButtonElement>(null);
 
@@ -96,9 +107,35 @@ export function EventPicker({ onPick, defaultName, defaultDateRange }: Props) {
         setPos({ left: r.left, top: r.bottom + 6 });
       }
       setMode('list');
+      setKeyInput(''); setKeyError(null); setKeyFound(null);
       loadEvents();
     }
     setOpen(v => !v);
+  };
+
+  const startKeyEntry = () => {
+    setKeyInput(''); setKeyError(null); setKeyFound(null);
+    setMode('key');
+  };
+
+  const redeemKey = async () => {
+    if (!token || !keyInput.trim()) return;
+    setKeyLoading(true);
+    setKeyError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/desktop/events/redeem-key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ key: keyInput.trim() }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error || 'Invalid or revoked key');
+      setKeyFound(body.event);
+    } catch (err) {
+      setKeyError(err instanceof Error ? err.message : 'Invalid or revoked key');
+    } finally {
+      setKeyLoading(false);
+    }
   };
 
   const loadVendors = async () => {
@@ -177,7 +214,49 @@ export function EventPicker({ onPick, defaultName, defaultDateRange }: Props) {
                 </button>
               ))}
               <button className="event-picker-create-btn" onClick={startCreate}>☁ Push This Tournament as a New Event</button>
+              <button className="event-picker-create-btn" onClick={startKeyEntry}>🔑 Enter Sharing Key (another organisation's event)</button>
             </>
+          ) : mode === 'key' ? (
+            <div className="event-picker-form">
+              <div className="event-picker-title">Enter Sharing Key</div>
+              <p className="event-picker-form-hint">
+                Get this code from the other organisation — it's shown on their event's page. Linking with it merges
+                live results between both venues without joining their organisation.
+              </p>
+              {!keyFound ? (
+                <>
+                  <label className="event-picker-field">
+                    <span>Sharing key *</span>
+                    <input className="field-input" value={keyInput} placeholder="e.g. 7K3P9QRT" autoFocus
+                      style={{ textTransform: 'uppercase', letterSpacing: '0.15em', fontWeight: 700 }}
+                      onChange={e => setKeyInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') redeemKey(); }} />
+                  </label>
+                  {keyError && <div className="event-picker-empty">{keyError}</div>}
+                  <div className="event-picker-form-actions">
+                    <button className="tm-btn" onClick={() => setMode('list')} disabled={keyLoading}>← Back</button>
+                    <button className="tm-btn tm-btn--cloud-active" onClick={redeemKey} disabled={!keyInput.trim() || keyLoading}>
+                      {keyLoading ? 'Checking…' : 'Find Event'}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="event-picker-row" style={{ cursor: 'default' }}>
+                    <span className="event-picker-row-name">{keyFound.name}</span>
+                    <span className="event-picker-row-meta">
+                      {fmtDate(keyFound.startDate)}{keyFound.location ? ` · ${keyFound.location}` : ''}
+                    </span>
+                  </div>
+                  <div className="event-picker-form-actions">
+                    <button className="tm-btn" onClick={() => { setKeyFound(null); setKeyInput(''); }}>← Back</button>
+                    <button className="tm-btn tm-btn--cloud-active" onClick={() => { onPick(keyFound, keyInput.trim()); setOpen(false); }}>
+                      Link This Event
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           ) : (
             <div className="event-picker-form">
               <div className="event-picker-title">Push This Tournament as a New Event</div>

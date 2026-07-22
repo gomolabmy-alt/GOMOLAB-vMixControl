@@ -4,6 +4,9 @@ import { useTournamentStore } from '../stores/tournamentStore';
 import { useMatchScheduleStore, sortMatches, type ScheduledMatch } from '../stores/matchScheduleStore';
 import { useMatchResultsStore, type SavedMatchResult } from '../stores/matchResultsStore';
 import { useCanvasStore } from '../stores/canvasStore';
+import { useCloudSyncStatus } from '../stores/cloudSyncStatusStore';
+import { resolveImageUrl } from './imageUrl';
+import { computeMatchNumbers } from '../utils/matchNumber';
 import type { Tournament } from '../types/tournament';
 
 // Multi-venue live scoring sync — each venue's desktop app pushes its
@@ -26,6 +29,23 @@ let pullInFlight = false;
 // ISO timestamp of the last successful pull — vendor-wide, not per
 // tournament, matching the /pull route's single `since` cursor.
 let pullWatermark = '';
+
+// What the cloud is already known to hold for each record — a snapshot of
+// the exact `{venueLabel, data}` this device last pushed (or last pulled,
+// since a pulled record is by definition already on the cloud too), keyed by
+// id. The automatic background push (pushAll) diffs against this before
+// sending anything, so a debounced push triggered by editing ONE fixture
+// doesn't re-upload every other unchanged fixture/result in the tournament
+// too. Reset on app restart (in-memory only) — the first push of a new
+// session naturally re-syncs everything once, which is the correct, safe
+// baseline rather than added persistence complexity for a one-time cost.
+const lastPushedTournament = new Map<string, string>();
+const lastPushedMatch = new Map<string, string>();
+const lastPushedResult = new Map<string, string>();
+
+function recordKey(venueLabel: string | undefined, data: unknown): string {
+  return JSON.stringify({ venueLabel, data });
+}
 
 function authHeaders(): Record<string, string> | null {
   const token = useAuthStore.getState().token;
@@ -55,6 +75,44 @@ function getLiveFixtureIds(): Set<string> {
   return ids;
 }
 
+// Trimmed to mirror SavedMatchResult.scoreLog's shape (see matchResultsStore)
+// so the website can render a live breakdown with the same renderer it'd use
+// for a finished match's saved log — drops the widget-local `id`/`timeMs`/
+// `teamName`/running-score-snapshot fields, which only matter to the board
+// itself (per-entry undo, etc.), not to a remote viewer.
+export interface LiveScoreLogEntry {
+  team: 'A' | 'B';
+  action: string;
+  points: number;
+  scorer?: string;
+  jerseyNo?: string;
+  timeStr?: string;
+}
+
+// Live, in-progress score + try/conversion/etc. breakdown for a fixture
+// currently loaded on a scoreboard widget — read straight off that widget's
+// own config (same traversal as getLiveFixtureIds above), never persisted to
+// matchScheduleStore. Folded into that fixture's pushed `data` below so the
+// public scoring page can show a live breakdown while the match is still in
+// progress, not just the final score once a Result is saved.
+function getLiveScoreForMatch(fixtureId: string): { scoreA: number; scoreB: number; scoreLog: LiveScoreLogEntry[] } | null {
+  const { pages, commentatorPages } = useCanvasStore.getState();
+  const allWidgets = [...pages, ...commentatorPages].flatMap(p => p.widgets);
+  for (const w of allWidgets) {
+    if (w.type !== 'scoreboard') continue;
+    const cfg: any = w.config;
+    const dc = cfg.linkedScoreboardSourceId
+      ? allWidgets.find(x => x.id === cfg.linkedScoreboardSourceId && x.type === 'scoreboard')?.config ?? cfg
+      : cfg;
+    if (dc.linkedScheduleMatchId !== fixtureId) continue;
+    const scoreLog: LiveScoreLogEntry[] = (dc.scoreLog ?? []).map((e: any) => ({
+      team: e.team, action: e.action, points: e.points, scorer: e.scorer, jerseyNo: e.jerseyNo, timeStr: e.timeStr,
+    }));
+    return { scoreA: dc.scoreA ?? 0, scoreB: dc.scoreB ?? 0, scoreLog };
+  }
+  return null;
+}
+
 function upsertById<T extends { id: string }>(current: T[], incoming: T): T[] {
   const idx = current.findIndex(x => x.id === incoming.id);
   if (idx === -1) return [...current, incoming];
@@ -63,19 +121,99 @@ function upsertById<T extends { id: string }>(current: T[], incoming: T): T[] {
   return next;
 }
 
-// Pushes every cloud-enabled tournament's full current fixture/result set —
-// not a computed delta. The data is small enough (tens of KB per
-// tournament) that this is trivially cheap, and it sidesteps needing
-// per-record change-tracking across every store mutation site; the server
-// upserts by id either way, so re-sending unchanged records is harmless.
-async function pushAll() {
-  if (pushInFlight) return;
-  const headers = authHeaders();
-  if (!headers) return;
+// Team logos are served by the embedded HTTP server on the operator's own
+// machine (http://localhost:PORT/images/...) — reachable from other
+// widgets/mirrors on the same LAN, but never from the public website. Pushed
+// matches/results instead carry a content-addressed reference URL
+// (/api/public/scoring/logo/<sha256 of the bytes>) pointing at a
+// ScoringTeamLogo row, with the raw bytes sent at most ONCE per push no
+// matter how many fixtures share that team's crest — sending a full base64
+// copy inline on every single fixture (the previous approach) is what
+// ballooned a single tournament's push payload past several megabytes and
+// caused the server to silently time out partway through, dropping results
+// with no error surfaced anywhere (see the push route's per-record loop).
+const LOGO_URL_PREFIX = `${API_BASE}/api/public/scoring/logo/`;
 
-  const tournaments = useTournamentStore.getState().tournaments.filter(t => t.cloudSyncEnabled);
-  if (tournaments.length === 0) return;
+interface PendingLogo { mimeType: string; base64: string }
 
+// Resolved reference, keyed by the ORIGINAL source string (a local
+// http://localhost:PORT/... URL, or an already-embedded data: URI left over
+// from before this scheme existed) — so repeated fixtures sharing the same
+// team's logo only ever hash/encode it once per app session, not once per
+// fixture.
+const logoRefCache = new Map<string, { url: string; hash: string; mimeType: string; base64: string }>();
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes as BufferSource);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Chunked — spreading a large Uint8Array straight into String.fromCharCode
+// blows the call stack once a crest is more than a couple hundred KB.
+function bytesToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+// Resolves a team's logo into a public reference URL, registering the raw
+// bytes into `pending` (deduped by hash, so a team appearing in dozens of
+// fixtures in this same push only contributes its bytes once) — accepts a
+// local http://localhost:PORT/... URL, an old embedded data: URI (from
+// before this scheme existed, or pulled from a venue still on an older
+// build), or an already-resolved reference (passed through untouched).
+async function resolveLogoRef(url: string | undefined, pending: Map<string, PendingLogo>): Promise<string | undefined> {
+  if (!url) return url;
+  if (url.startsWith(LOGO_URL_PREFIX)) return url; // already a shared reference — nothing to do
+
+  const cached = logoRefCache.get(url);
+  if (cached) {
+    pending.set(cached.hash, { mimeType: cached.mimeType, base64: cached.base64 });
+    return cached.url;
+  }
+
+  let bytes: Uint8Array;
+  let mimeType = 'image/png';
+  try {
+    if (url.startsWith('data:')) {
+      const comma = url.indexOf(',');
+      mimeType = url.slice(5, comma).split(';')[0] || mimeType;
+      bytes = Uint8Array.from(atob(url.slice(comma + 1)), c => c.charCodeAt(0));
+    } else {
+      const res = await fetch(resolveImageUrl(url));
+      if (!res.ok) return undefined;
+      mimeType = res.headers.get('content-type') || mimeType;
+      bytes = new Uint8Array(await res.arrayBuffer());
+    }
+  } catch {
+    return undefined; // offline/unreachable — falls back to no logo rather than a broken local URL
+  }
+
+  const hash = await sha256Hex(bytes);
+  const base64 = bytesToBase64(bytes);
+  const refUrl = `${LOGO_URL_PREFIX}${hash}`;
+  logoRefCache.set(url, { url: refUrl, hash, mimeType, base64 });
+  pending.set(hash, { mimeType, base64 });
+  return refUrl;
+}
+
+async function withLogoRefs<T extends { teamALogo?: string; teamBLogo?: string }>(obj: T, pending: Map<string, PendingLogo>): Promise<T> {
+  const [teamALogo, teamBLogo] = await Promise.all([resolveLogoRef(obj.teamALogo, pending), resolveLogoRef(obj.teamBLogo, pending)]);
+  return { ...obj, teamALogo: teamALogo ?? obj.teamALogo, teamBLogo: teamBLogo ?? obj.teamBLogo };
+}
+
+// Shared by pushAll (every cloud-enabled tournament, debounced) and
+// pushTournamentNow (one tournament, on demand) so both send the exact same
+// payload shape and both stamp this device's venue onto un-labeled rows.
+// `incremental` — true for the automatic background push, which only sends
+// tournaments/matches/results that actually differ from the last confirmed-
+// pushed (or pulled) snapshot; false for a manual "Push Now", which always
+// sends everything for that tournament so it reliably reconciles regardless
+// of what this device's cache thinks the cloud already has.
+async function buildPushPayload(tournaments: Tournament[], incremental: boolean) {
   const venueLabel = useAppSettings.getState().canvasVenue || undefined;
   const tournamentIds = new Set(tournaments.map(t => t.id));
   const allMatches = useMatchScheduleStore.getState().matches.filter(m => m.tournamentId && tournamentIds.has(m.tournamentId));
@@ -93,30 +231,333 @@ async function pushAll() {
     }
   }
 
-  const payload = {
-    tournaments: tournaments.map(t => {
-      const { cloudSyncEnabled, ...data } = t;
-      // eventId is also sent as its own top-level field (in addition to
-      // living inside `data`) so the server can store it as a real,
-      // queryable column for the website's scoring overview page to join on.
-      return { id: t.id, name: t.name, sport: t.sport, eventId: t.eventId, data };
-    }),
-    matches: allMatches.map(m => ({ id: m.id, tournamentId: m.tournamentId!, venueLabel: m.venueLabel ?? venueLabel, data: m })),
-    results: allResults.map(r => ({ id: r.id, tournamentId: r.tournamentId!, venueLabel: r.venueLabel ?? venueLabel, data: r })),
+  // Auto match number (e.g. "MB1") — computed per tournament (each has its
+  // own prefix/venue letters) from that tournament's FULL local match list,
+  // so the running sequence reflects the whole schedule, not just whatever
+  // subset happens to be in this particular push. Carried onto a result via
+  // its sourceScheduleId so a completed fixture keeps showing the same
+  // number it had while still upcoming.
+  const matchNumbers = new Map<string, string>();
+  for (const t of tournaments) {
+    const tMatches = allMatches.filter(m => m.tournamentId === t.id);
+    for (const [id, code] of computeMatchNumbers(tMatches, t.matchNumberPrefix, t.venuePrefixes)) {
+      matchNumbers.set(id, code);
+    }
+  }
+
+  const pendingLogos = new Map<string, PendingLogo>();
+  const [matchesData, resultsData] = await Promise.all([
+    Promise.all(allMatches.map(async m => {
+      const base = { ...(await withLogoRefs(m, pendingLogos)), matchNumber: matchNumbers.get(m.id) };
+      if (m.completedAt) return base;
+      const live = getLiveScoreForMatch(m.id);
+      return live ? { ...base, liveScoreA: live.scoreA, liveScoreB: live.scoreB, liveScoreLog: live.scoreLog } : base;
+    })),
+    Promise.all(allResults.map(async r => ({
+      ...(await withLogoRefs(r, pendingLogos)),
+      matchNumber: r.sourceScheduleId ? matchNumbers.get(r.sourceScheduleId) : undefined,
+    }))),
+  ]);
+
+  // A local record still carrying a raw localhost URL, or an old embedded
+  // data: URI (from before this hash-based scheme existed, or pulled from a
+  // venue still on an older build), now resolves to a short reference URL
+  // above — write that back locally too, so local storage actually shrinks
+  // back down over successive pushes instead of only ever growing every time
+  // a pull re-embeds a full image.
+  allMatches.forEach((m, i) => {
+    const { teamALogo, teamBLogo } = matchesData[i];
+    if (teamALogo !== m.teamALogo || teamBLogo !== m.teamBLogo) {
+      useMatchScheduleStore.getState().updateMatch(m.id, { teamALogo, teamBLogo });
+    }
+  });
+  allResults.forEach((r, i) => {
+    const { teamALogo, teamBLogo } = resultsData[i];
+    if (teamALogo !== r.teamALogo || teamBLogo !== r.teamBLogo) {
+      useMatchResultsStore.getState().updateResult(r.id, { teamALogo, teamBLogo });
+    }
+  });
+
+  // Fixtures/results deleted locally since the last push — sent with every
+  // push (not scoped to `tournaments`, since once something's deleted there's
+  // no local record left to know which tournament it belonged to) so the
+  // cloud's copy actually gets removed too, instead of a push only ever
+  // being able to add/update and never take anything away. This is what
+  // keeps the public scoring page from showing something the controller no
+  // longer has at all.
+  const deletedMatchIds = [...useMatchScheduleStore.getState().pendingDeletedIds];
+  const deletedResultIds = [...useMatchResultsStore.getState().pendingDeletedIds];
+
+  // Reconcile against the cloud's current state for exactly these
+  // tournaments, on every push (not just a manual one) — anything the cloud
+  // has that the controller doesn't have locally at all any more gets
+  // removed too, not just what was explicitly deleted since last sync. This
+  // catches a tombstone lost to a crash, or data left over from before
+  // deletions were ever pushed — the whole point being the cloud should
+  // never show something the controller no longer has. If the cloud can't
+  // be reached, the push still proceeds with just the explicit tombstones.
+  const headers = authHeaders();
+  if (headers) {
+    const localMatchIds = new Set(allMatches.map(m => m.id));
+    const localResultIds = new Set(allResults.map(r => r.id));
+    for (const t of tournaments) {
+      try {
+        const cloudRes = await fetch(`${API_BASE}/api/desktop/scoring/pull?tournamentId=${encodeURIComponent(t.id)}&since=`, { headers });
+        if (!cloudRes.ok) continue;
+        const cloudBody: { matches?: { id: string }[]; results?: { id: string }[] } = await cloudRes.json();
+        for (const cm of cloudBody.matches ?? []) {
+          if (!localMatchIds.has(cm.id) && !deletedMatchIds.includes(cm.id)) deletedMatchIds.push(cm.id);
+        }
+        for (const cr of cloudBody.results ?? []) {
+          if (!localResultIds.has(cr.id) && !deletedResultIds.includes(cr.id)) deletedResultIds.push(cr.id);
+        }
+      } catch {
+        // Offline/unreachable for this tournament — skip reconcile, the
+        // explicit tombstones above still apply.
+      }
+    }
+  }
+
+  const tournamentRows = tournaments.map(t => {
+    const { cloudSyncEnabled, ...data } = t;
+    // eventId is also sent as its own top-level field (in addition to living
+    // inside `data`) so the server can store it as a real, queryable column
+    // for the website's scoring overview page to join on. eventShareKey
+    // rides along the same way — only actually needed (and only ever
+    // checked server-side) when eventId points to a different vendor's
+    // event, see the push route's own validation.
+    return { id: t.id, name: t.name, sport: t.sport, eventId: t.eventId, eventShareKey: t.eventShareKey, data };
+  });
+  const matchRows = allMatches.map((m, i) => ({ id: m.id, tournamentId: m.tournamentId!, venueLabel: m.venueLabel ?? venueLabel, data: matchesData[i] }));
+  const resultRows = allResults.map((r, i) => ({ id: r.id, tournamentId: r.tournamentId!, venueLabel: r.venueLabel ?? venueLabel, data: resultsData[i] }));
+
+  return {
+    tournaments: incremental ? tournamentRows.filter(t => recordKey(undefined, t.data) !== lastPushedTournament.get(t.id)) : tournamentRows,
+    matches: incremental ? matchRows.filter(m => recordKey(m.venueLabel, m.data) !== lastPushedMatch.get(m.id)) : matchRows,
+    results: incremental ? resultRows.filter(r => recordKey(r.venueLabel, r.data) !== lastPushedResult.get(r.id)) : resultRows,
+    logos: Array.from(pendingLogos, ([hash, v]) => ({ hash, mimeType: v.mimeType, base64: v.base64 })),
+    deletedMatchIds,
+    deletedResultIds,
   };
+}
+
+// Records what a successful push actually sent as "now confirmed on the
+// cloud" — both for the automatic push's own next diff, and so a manual
+// full push doesn't cause the very next automatic push to redundantly
+// re-send the same records again.
+function recordPushed(payload: {
+  tournaments: { id: string; data: unknown }[];
+  matches: { id: string; venueLabel?: string; data: unknown }[];
+  results: { id: string; venueLabel?: string; data: unknown }[];
+}) {
+  for (const t of payload.tournaments) lastPushedTournament.set(t.id, recordKey(undefined, t.data));
+  for (const m of payload.matches) lastPushedMatch.set(m.id, recordKey(m.venueLabel, m.data));
+  for (const r of payload.results) lastPushedResult.set(r.id, recordKey(r.venueLabel, r.data));
+}
+
+function clearPushedDeletions(payload: { deletedMatchIds: string[]; deletedResultIds: string[] }) {
+  if (payload.deletedMatchIds.length) {
+    useMatchScheduleStore.getState().clearPendingDeletedIds(payload.deletedMatchIds);
+    for (const id of payload.deletedMatchIds) lastPushedMatch.delete(id);
+  }
+  if (payload.deletedResultIds.length) {
+    useMatchResultsStore.getState().clearPendingDeletedIds(payload.deletedResultIds);
+    for (const id of payload.deletedResultIds) lastPushedResult.delete(id);
+  }
+}
+
+// Automatic background push — diffs against what's already confirmed on the
+// cloud (see lastPushedTournament/Match/Result) so a debounced push
+// triggered by editing ONE fixture doesn't re-upload every other unchanged
+// record in the tournament too. Skips the request entirely when the diff
+// (plus tombstones/logos) comes back empty, e.g. a store change unrelated to
+// any pushed field still triggered this cycle.
+async function pushAll() {
+  if (pushInFlight) return;
+  const headers = authHeaders();
+  if (!headers) return;
+
+  // foreignVendor is excluded explicitly (not just implied by
+  // cloudSyncEnabled being false at creation, see pullAll) — this device
+  // never owns that tournament, so it must never be pushed even if
+  // cloudSyncEnabled somehow ends up true on it.
+  const tournaments = useTournamentStore.getState().tournaments.filter(t => t.cloudSyncEnabled && !t.foreignVendor);
+  if (tournaments.length === 0) return;
 
   pushInFlight = true;
+  useCloudSyncStatus.getState().setPushing(true);
   try {
-    await fetch(`${API_BASE}/api/desktop/scoring/push`, {
+    const payload = await buildPushPayload(tournaments, true);
+    if (
+      payload.tournaments.length === 0 && payload.matches.length === 0 && payload.results.length === 0 &&
+      payload.logos.length === 0 && payload.deletedMatchIds.length === 0 && payload.deletedResultIds.length === 0
+    ) {
+      return;
+    }
+    const res = await fetch(`${API_BASE}/api/desktop/scoring/push`, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
     });
+    if (res.ok) {
+      clearPushedDeletions(payload);
+      recordPushed(payload);
+      useCloudSyncStatus.getState().setLastError(null);
+    } else {
+      useCloudSyncStatus.getState().setLastError(`Push failed (${res.status})`);
+    }
   } catch {
     // Offline/network failure — no watermark to roll back, the next
     // debounced push or the next 30s pull tick just retries naturally.
   } finally {
     pushInFlight = false;
+    useCloudSyncStatus.getState().setPushing(false);
+  }
+}
+
+/** Immediately pushes ONE tournament's full current data — bypasses the
+ *  normal 2.5s debounce AND the cloudSyncEnabled gate (it's an explicit
+ *  one-off "push right now" action, e.g. right after a batch of edits, or
+ *  to confirm data actually reached the cloud, rather than trusting the
+ *  next automatic tick). Returns success/failure so the caller can show
+ *  feedback — unlike pushAll, which runs silently in the background. */
+export async function pushTournamentNow(tournamentId: string): Promise<{ ok: boolean; error?: string }> {
+  const headers = authHeaders();
+  if (!headers) return { ok: false, error: 'Not signed in' };
+  const tournament = useTournamentStore.getState().tournaments.find(t => t.id === tournamentId);
+  if (!tournament) return { ok: false, error: 'Tournament not found' };
+  if (tournament.foreignVendor) return { ok: false, error: 'This tournament belongs to another organisation — you can\'t push changes to it.' };
+
+  useCloudSyncStatus.getState().setPushing(true);
+  try {
+    // buildPushPayload already reconciles against the cloud's current state
+    // for this tournament (see there) — anything the cloud has that the
+    // controller doesn't have locally gets included in deletedMatchIds/
+    // deletedResultIds automatically. Not incremental — a manual push always
+    // sends everything for this tournament, so it reliably reconciles
+    // regardless of what this device's diff cache thinks the cloud has.
+    const payload = await buildPushPayload([tournament], false);
+
+    const res = await fetch(`${API_BASE}/api/desktop/scoring/push`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const error = body?.error || `Push failed (${res.status})`;
+      useCloudSyncStatus.getState().setLastError(error);
+      return { ok: false, error };
+    }
+    clearPushedDeletions(payload);
+    recordPushed(payload);
+    useCloudSyncStatus.getState().setLastError(null);
+    return { ok: true };
+  } catch {
+    const error = 'Network error — check your connection';
+    useCloudSyncStatus.getState().setLastError(error);
+    return { ok: false, error };
+  } finally {
+    useCloudSyncStatus.getState().setPushing(false);
+  }
+}
+
+export interface PushDiffItem {
+  kind: 'match' | 'result';
+  status: 'new' | 'updated' | 'removed';
+  label: string;
+  detail?: string;
+}
+
+// Only these fields matter for deciding whether a fixture/result "changed"
+// from what's already on the cloud — comparing full objects would flag
+// harmless noise (key ordering, undefined-vs-missing fields) as a change.
+function matchFingerprint(d: any) {
+  return {
+    teamAName: d.teamAName ?? '', teamBName: d.teamBName ?? '',
+    scoreA: d.scoreA ?? 0, scoreB: d.scoreB ?? 0,
+    round: d.round ?? '', date: d.date ?? '', time: d.time ?? '',
+    completedAt: !!d.completedAt, matchType: d.matchType ?? '',
+  };
+}
+function resultFingerprint(d: any) {
+  return {
+    teamAName: d.teamAName ?? '', teamBName: d.teamBName ?? '',
+    scoreA: d.scoreA ?? 0, scoreB: d.scoreB ?? 0,
+    round: d.round ?? '', date: d.date ?? '',
+  };
+}
+function shallowEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  return Object.keys(a).every(k => a[k] === b[k]);
+}
+
+/** Compares this device's local fixtures/results for a tournament against
+ *  what's currently on the cloud, so "Push Now" can show exactly what's
+ *  about to be overwritten before it happens — a push always fully replaces
+ *  the cloud's copy of each record with the local one, so anything genuinely
+ *  different there is about to be lost. Returns an empty array if nothing
+ *  meaningful differs, or null if the cloud couldn't be reached (caller
+ *  should just push directly rather than block on an unreachable check). */
+export async function computePushDiff(tournamentId: string): Promise<PushDiffItem[] | null> {
+  const headers = authHeaders();
+  if (!headers) return null;
+  try {
+    const res = await fetch(`${API_BASE}/api/desktop/scoring/pull?tournamentId=${encodeURIComponent(tournamentId)}&since=`, { headers });
+    if (!res.ok) return null;
+    const body: { matches?: { id: string; data: any }[]; results?: { id: string; data: any }[] } = await res.json();
+    const cloudMatches = new Map((body.matches ?? []).map(m => [m.id, m.data]));
+    const cloudResults = new Map((body.results ?? []).map(r => [r.id, r.data]));
+
+    const localMatches = useMatchScheduleStore.getState().matches.filter(m => m.tournamentId === tournamentId);
+    const localResults = useMatchResultsStore.getState().results.filter(r => r.tournamentId === tournamentId);
+
+    const items: PushDiffItem[] = [];
+    for (const m of localMatches) {
+      const label = `${m.teamAName || 'TBD'} vs ${m.teamBName || 'BYE'}${m.round ? ` — ${m.round}` : ''}`;
+      const cloud = cloudMatches.get(m.id);
+      if (!cloud) {
+        items.push({ kind: 'match', status: 'new', label });
+        continue;
+      }
+      const localFp = matchFingerprint(m);
+      const cloudFp = matchFingerprint(cloud);
+      if (!shallowEqual(localFp, cloudFp)) {
+        const detail = (cloudFp.scoreA !== localFp.scoreA || cloudFp.scoreB !== localFp.scoreB)
+          ? `Score: ${cloudFp.scoreA}-${cloudFp.scoreB} → ${localFp.scoreA}-${localFp.scoreB}`
+          : undefined;
+        items.push({ kind: 'match', status: 'updated', label, detail });
+      }
+    }
+    for (const r of localResults) {
+      const label = `${r.teamAName} vs ${r.teamBName}${r.round ? ` — ${r.round}` : ''}`;
+      const cloud = cloudResults.get(r.id);
+      if (!cloud) {
+        items.push({ kind: 'result', status: 'new', label, detail: `${r.scoreA}-${r.scoreB}` });
+        continue;
+      }
+      const localFp = resultFingerprint(r);
+      const cloudFp = resultFingerprint(cloud);
+      if (!shallowEqual(localFp, cloudFp)) {
+        items.push({ kind: 'result', status: 'updated', label, detail: `${cloudFp.scoreA}-${cloudFp.scoreB} → ${localFp.scoreA}-${localFp.scoreB}` });
+      }
+    }
+
+    // Cloud has these but the controller doesn't have them at all any more
+    // (deleted locally, or left over from before push started cleaning up
+    // after itself) — a push removes them too, not just add/update.
+    const localMatchIds = new Set(localMatches.map(m => m.id));
+    const localResultIds = new Set(localResults.map(r => r.id));
+    for (const [id, cloud] of cloudMatches) {
+      if (localMatchIds.has(id)) continue;
+      items.push({ kind: 'match', status: 'removed', label: `${cloud.teamAName || 'TBD'} vs ${cloud.teamBName || 'BYE'}${cloud.round ? ` — ${cloud.round}` : ''}` });
+    }
+    for (const [id, cloud] of cloudResults) {
+      if (localResultIds.has(id)) continue;
+      items.push({ kind: 'result', status: 'removed', label: `${cloud.teamAName} vs ${cloud.teamBName}${cloud.round ? ` — ${cloud.round}` : ''}`, detail: `${cloud.scoreA}-${cloud.scoreB}` });
+    }
+    return items;
+  } catch {
+    return null;
   }
 }
 
@@ -135,12 +576,17 @@ async function pullAll() {
   if (!headers) return;
 
   pullInFlight = true;
+  useCloudSyncStatus.getState().setPulling(true);
   try {
     const res = await fetch(`${API_BASE}/api/desktop/scoring/pull?since=${encodeURIComponent(pullWatermark)}`, { headers });
     if (!res.ok) return;
     const body: {
       serverTime?: string;
-      tournaments?: { id: string; name: string; sport: string; data: any }[];
+      /** `foreign: true` = pulled in from a DIFFERENT vendor's tournament
+       *  sharing an eventId with one of this device's own (see
+       *  scoring/pull's own cross-venue merge) — read-only on this device,
+       *  see Tournament.foreignVendor. */
+      tournaments?: { id: string; name: string; sport: string; data: any; foreign?: boolean }[];
       matches?: { id: string; tournamentId: string; venueLabel?: string; data: any }[];
       results?: { id: string; tournamentId: string; venueLabel?: string; data: any }[];
     } = await res.json();
@@ -153,23 +599,37 @@ async function pullAll() {
         // Partial merge via updateTournament preserves cloudSyncEnabled —
         // a device's own opt-out is never silently overwritten by a pull.
         useTournamentStore.getState().updateTournament(rt.id, rt.data);
+      } else if (rt.foreign) {
+        // Never opted into sync locally regardless of the server's own
+        // record — this device doesn't own it, so it must never end up in
+        // pushAll's scope (which gates purely on cloudSyncEnabled). The
+        // server-side push route would reject the write anyway, but keeping
+        // it out of scope here means it's never even attempted.
+        const created: Tournament = { ...rt.data, id: rt.id, name: rt.name, sport: rt.sport, cloudSyncEnabled: false, foreignVendor: true };
+        useTournamentStore.setState(s => ({ tournaments: [...s.tournaments, created] }));
       } else {
         // A tournament that only just appeared via pull was, by definition,
         // already opted into sync by whichever venue created it.
         const created: Tournament = { ...rt.data, id: rt.id, name: rt.name, sport: rt.sport, cloudSyncEnabled: true };
         useTournamentStore.setState(s => ({ tournaments: [...s.tournaments, created] }));
       }
+      // A pulled record is by definition already on the cloud — recording it
+      // here too means an unrelated later push doesn't redundantly re-upload
+      // data this device only just received from another venue.
+      lastPushedTournament.set(rt.id, recordKey(undefined, rt.data));
     }
 
     for (const rm of body.matches ?? []) {
       if (liveIds.has(rm.id)) continue; // actively live on this device — don't clobber
       const incoming: ScheduledMatch = { ...rm.data, id: rm.id, tournamentId: rm.tournamentId, venueLabel: rm.venueLabel };
       useMatchScheduleStore.setState(s => ({ matches: upsertById(s.matches, incoming).sort(sortMatches) }));
+      lastPushedMatch.set(rm.id, recordKey(rm.venueLabel, rm.data));
     }
 
     for (const rr of body.results ?? []) {
       const incoming: SavedMatchResult = { ...rr.data, id: rr.id, tournamentId: rr.tournamentId, venueLabel: rr.venueLabel };
       useMatchResultsStore.setState(s => ({ results: upsertById(s.results, incoming) }));
+      lastPushedResult.set(rr.id, recordKey(rr.venueLabel, rr.data));
     }
 
     if (body.serverTime) pullWatermark = body.serverTime;
@@ -177,6 +637,7 @@ async function pullAll() {
     // Offline/network failure — watermark unchanged, next 30s tick retries.
   } finally {
     pullInFlight = false;
+    useCloudSyncStatus.getState().setPulling(false);
   }
 }
 
@@ -195,6 +656,11 @@ export function startCloudSync() {
   unsubscribers.push(useTournamentStore.subscribe(triggerPush));
   unsubscribers.push(useMatchScheduleStore.subscribe(triggerPush));
   unsubscribers.push(useMatchResultsStore.subscribe(triggerPush));
+  // Also on canvasStore — a scoreboard's live score/scoreLog lives only in
+  // widget config, not in matchScheduleStore, so without this a live match's
+  // running score/breakdown would never actually reach buildPushPayload
+  // until something else (e.g. Save Result) touched one of the stores above.
+  unsubscribers.push(useCanvasStore.subscribe(triggerPush));
 
   pullTimer = setInterval(() => { pullAll(); }, PULL_INTERVAL_MS);
   // Kick off an initial pull immediately rather than waiting a full 30s.

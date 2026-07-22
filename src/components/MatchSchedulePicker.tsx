@@ -99,20 +99,31 @@ export function MatchSchedulePicker({ onPick, tournamentId }: Props) {
                 <div style={{ fontSize: 9, color: 'var(--text-muted)', width: 44, flexShrink: 0, lineHeight: 1.2 }}>
                   {m.sentAt ? '✓ sent' : (<>{m.date}{m.time ? <><br />{m.time}</> : null}</>)}
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4, flex: 1, minWidth: 0 }}>
-                  {m.teamALogo
-                    ? <img src={resolveImageUrl(m.teamALogo)} alt="" style={{ width: 18, height: 18, objectFit: 'contain', borderRadius: 3, background: '#111', flexShrink: 0 }} />
-                    : <div style={{ width: 18, height: 18, borderRadius: 3, background: m.teamAColor, flexShrink: 0 }} />}
-                  <span style={{ fontSize: 11, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {m.teamAShortName || m.teamAName}
-                  </span>
-                  <span style={{ fontSize: 9, color: 'var(--text-muted)', flexShrink: 0 }}>vs</span>
-                  <span style={{ fontSize: 11, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {m.teamBShortName || m.teamBName}
-                  </span>
-                  {m.teamBLogo
-                    ? <img src={resolveImageUrl(m.teamBLogo)} alt="" style={{ width: 18, height: 18, objectFit: 'contain', borderRadius: 3, background: '#111', flexShrink: 0 }} />
-                    : <div style={{ width: 18, height: 18, borderRadius: 3, background: m.teamBColor, flexShrink: 0 }} />}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 1, flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+                    {m.teamALogo
+                      ? <img src={resolveImageUrl(m.teamALogo)} alt="" style={{ width: 18, height: 18, objectFit: 'contain', borderRadius: 3, background: '#111', flexShrink: 0 }} />
+                      : <div style={{ width: 18, height: 18, borderRadius: 3, background: m.teamAColor, flexShrink: 0 }} />}
+                    <span style={{ fontSize: 11, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {m.teamAShortName || m.teamAName}
+                    </span>
+                    <span style={{ fontSize: 9, color: 'var(--text-muted)', flexShrink: 0 }}>vs</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {m.teamBShortName || m.teamBName}
+                    </span>
+                    {m.teamBLogo
+                      ? <img src={resolveImageUrl(m.teamBLogo)} alt="" style={{ width: 18, height: 18, objectFit: 'contain', borderRadius: 3, background: '#111', flexShrink: 0 }} />
+                      : <div style={{ width: 18, height: 18, borderRadius: 3, background: m.teamBColor, flexShrink: 0 }} />}
+                  </div>
+                  {/* Round/stage — for a Cup/Plate/Bowl/Shield tournament this
+                      is where the tier shows (e.g. "Cup · Quarterfinal 1"),
+                      otherwise there was no way to tell which fixture is
+                      which beyond the two team names. */}
+                  {m.round && (
+                    <span style={{ fontSize: 9, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {m.round}
+                    </span>
+                  )}
                 </div>
                 <button
                   title="Delete scheduled match"
