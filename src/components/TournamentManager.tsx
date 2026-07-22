@@ -2592,8 +2592,15 @@ export interface StandingRow {
 }
 
 export function computeStandings(teams: SavedTeam[], results: SavedMatchResult[], settings: TournamentSettings): StandingRow[] {
+  // Seeded in Draw order (groupPosition, same convention the Schedule
+  // generator's own groupMembers() uses) rather than whatever order the
+  // Team Database happens to list them in — the final sort below is stable,
+  // so before a ball's kicked (every row still tied at 0 pts/diff/PF) this
+  // is what the table actually shows; once real results come in, points
+  // take over and decide the order for real, same as always.
+  const seeded = [...teams].sort((a, b) => (a.groupPosition ?? Infinity) - (b.groupPosition ?? Infinity) || a.name.localeCompare(b.name));
   const rows = new Map<string, StandingRow>();
-  for (const t of teams) {
+  for (const t of seeded) {
     rows.set(t.id, { teamId: t.id, name: t.name, shortName: t.shortName, logo: t.logo, color: t.color, played: 0, won: 0, drawn: 0, lost: 0, pf: 0, pa: 0, pts: 0 });
   }
   const findRow = (name: string, shortName?: string) => {
