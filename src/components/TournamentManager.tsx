@@ -15,6 +15,7 @@ import { LogoUrlPicker } from './LogoUrlPicker';
 import { InputPickerDropdown } from './WidgetConfigPanel';
 import { BracketView } from './BracketView';
 import { ConfirmModal } from './ConfirmModal';
+import { ExternalRosterLinkBar, PullPlayersButton } from './ExternalRosterPicker';
 import {
   generateRoundRobin, generateDoubleRoundRobin, generateKnockout, generateKnockoutFromSlots,
   buildGroupKnockoutSlots, buildTieredKnockout, tierRank, offsetRounds, shuffle, ensureTopTeamHomeEarly,
@@ -25,7 +26,7 @@ import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchSched
 import { useMatchResultsStore, type SavedMatchResult } from '../stores/matchResultsStore';
 import { resolveImageUrl, transparentLogoUrl } from '../lib/imageUrl';
 import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, findDuplicateResult } from '../utils/scoreboardSnapshot';
-import { pushTournamentNow, computePushDiff, type PushDiffItem } from '../lib/cloudSync';
+import { pushTournamentNow, computePushDiff, pushResultsOnly, pullResultsOnly, type PushDiffItem } from '../lib/cloudSync';
 import { computeMatchNumbers } from '../utils/matchNumber';
 
 // ── Import / Export helpers ───────────────────────────────────────────────────
@@ -282,6 +283,19 @@ function AddTournamentForm({ onDone }: { onDone: (id: string) => void }) {
   );
 }
 
+// Same field set as the external roster API (see externalRoster.ts) — kept
+// as one ordered list so the compact edit-row inputs and the read-mode
+// summary badge can't drift out of sync with each other.
+const PLAYER_STAT_FIELDS: { key: keyof Player & ('tries' | 'conversions' | 'penalties' | 'dropGoals' | 'yellowCards' | 'redCards' | 'appearances'); short: string; label: string }[] = [
+  { key: 'tries', short: 'T', label: 'Tries' },
+  { key: 'conversions', short: 'C', label: 'Conversions' },
+  { key: 'penalties', short: 'P', label: 'Penalties' },
+  { key: 'dropGoals', short: 'DG', label: 'Drop Goals' },
+  { key: 'yellowCards', short: 'YC', label: 'Yellow Cards' },
+  { key: 'redCards', short: 'RC', label: 'Red Cards' },
+  { key: 'appearances', short: 'APP', label: 'Appearances' },
+];
+
 // ── Player row ────────────────────────────────────────────────────────────────
 function PlayerRow({ player, sport, onUpdate, onDelete }: {
   player: Player; sport: SportType;
@@ -292,9 +306,12 @@ function PlayerRow({ player, sport, onUpdate, onDelete }: {
   const [jersey, setJersey] = useState(player.jerseyNo);
   const [name, setName] = useState(player.name);
   const [pos, setPos] = useState(player.position);
+  const [stats, setStats] = useState<Partial<Record<typeof PLAYER_STAT_FIELDS[number]['key'], number | undefined>>>(() =>
+    Object.fromEntries(PLAYER_STAT_FIELDS.map(f => [f.key, player[f.key]]))
+  );
 
   const save = () => {
-    onUpdate({ jerseyNo: jersey.trim(), name: name.trim() || player.name, position: pos.trim() });
+    onUpdate({ jerseyNo: jersey.trim(), name: name.trim() || player.name, position: pos.trim(), ...stats });
     setEditing(false);
   };
 
@@ -313,6 +330,14 @@ function PlayerRow({ player, sport, onUpdate, onDelete }: {
         <datalist id={`pos-${player.id}`}>
           {positions.map(p => <option key={p} value={p} />)}
         </datalist>
+        {PLAYER_STAT_FIELDS.map(f => (
+          <input
+            key={f.key} type="number" min={0} title={f.label}
+            className="tm-pl-cell tm-pl-cell--stat tm-input"
+            value={stats[f.key] ?? ''}
+            onChange={e => setStats(s => ({ ...s, [f.key]: e.target.value === '' ? undefined : Number(e.target.value) }))}
+          />
+        ))}
         <div className="tm-pl-cell tm-pl-cell--actions">
           <button className="tm-icon-btn tm-icon-btn--save" onClick={save} title="Save">✓</button>
           <button className="tm-icon-btn" onClick={() => setEditing(false)} title="Cancel">✕</button>
@@ -326,6 +351,9 @@ function PlayerRow({ player, sport, onUpdate, onDelete }: {
       <span className="tm-pl-cell tm-pl-cell--jersey">{player.jerseyNo || '—'}</span>
       <span className="tm-pl-cell tm-pl-cell--name">{player.name}</span>
       <span className="tm-pl-cell tm-pl-cell--pos">{player.position}</span>
+      {PLAYER_STAT_FIELDS.map(f => (
+        <span key={f.key} className="tm-pl-cell tm-pl-cell--stat">{player[f.key] ?? ''}</span>
+      ))}
       <div className="tm-pl-cell tm-pl-cell--actions">
         <button className="tm-icon-btn tm-icon-btn--edit" onClick={() => setEditing(true)} title="Edit">✎</button>
         <button className="tm-icon-btn tm-icon-btn--del" onClick={e => { e.stopPropagation(); onDelete(); }} title="Delete">×</button>
@@ -363,6 +391,7 @@ function AddPlayerRow({ sport, onAdd }: {
       <datalist id="pos-add-team">
         {positions.map(p => <option key={p} value={p} />)}
       </datalist>
+      {PLAYER_STAT_FIELDS.map(f => <span key={f.key} className="tm-pl-cell tm-pl-cell--stat" />)}
       <div className="tm-pl-cell tm-pl-cell--actions">
         <button className="tm-icon-btn tm-icon-btn--save" type="submit" disabled={!name.trim()} title="Add player">+</button>
       </div>
@@ -523,21 +552,27 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
 
   if (teams.length === 0) {
     return (
-      <div className="tm-win-content" style={{ padding: 16 }}>
-        <div className="tm-win-placeholder">
-          <span>No teams in this tournament yet — add one in the 👥 Teams tab first, then manage its roster here.</span>
+      <>
+        <ExternalRosterLinkBar tournament={tournament} />
+        <div className="tm-win-content" style={{ padding: 16 }}>
+          <div className="tm-win-placeholder">
+            <span>No teams in this tournament yet — add one in the 👥 Teams tab first, then manage its roster here.</span>
+          </div>
         </div>
-      </div>
+      </>
     );
   }
 
   if (visibleTeams.length === 0) {
     return (
-      <div className="tm-win-content" style={{ padding: 16 }}>
-        <div className="tm-win-placeholder">
-          <span>No teams in the "{activeCategory}" category — pick a different one from the top bar, or add teams to it in the 👥 Teams tab.</span>
+      <>
+        <ExternalRosterLinkBar tournament={tournament} />
+        <div className="tm-win-content" style={{ padding: 16 }}>
+          <div className="tm-win-placeholder">
+            <span>No teams in the "{activeCategory}" category — pick a different one from the top bar, or add teams to it in the 👥 Teams tab.</span>
+          </div>
         </div>
-      </div>
+      </>
     );
   }
 
@@ -573,6 +608,8 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
   };
 
   return (
+    <>
+    <ExternalRosterLinkBar tournament={tournament} />
     <div className="tm-win-body">
       {/* Left: team list */}
       <div className="tm-win-sidebar">
@@ -626,6 +663,13 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
               >
                 ↓ Export CSV
               </button>
+              <PullPlayersButton
+                tournament={tournament}
+                teamId={team.id}
+                teamName={team.name}
+                teamCategory={team.category}
+                onPulled={players => setImportPreview({ players })}
+              />
               <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt" style={{ display: 'none' }} onChange={handleFileChange} />
             </div>
 
@@ -655,16 +699,22 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
               </div>
             )}
 
-            {/* Column headers */}
-            <div className="tm-pl-header-row">
-              <span className="tm-pl-cell tm-pl-cell--jersey">#</span>
-              <span className="tm-pl-cell tm-pl-cell--name">Name</span>
-              <span className="tm-pl-cell tm-pl-cell--pos">Pos</span>
-              <span className="tm-pl-cell tm-pl-cell--actions" />
-            </div>
-
             {/* Players */}
             <div className="tm-pl-list">
+              {/* Column headers — inside the same scroll container as the rows
+                  (sticky, not a separate sibling) so a vertical scrollbar
+                  insets both identically; a header outside the scroller would
+                  stay full-width while the rows narrow by the scrollbar's
+                  width, throwing every column out of alignment. */}
+              <div className="tm-pl-header-row">
+                <span className="tm-pl-cell tm-pl-cell--jersey">#</span>
+                <span className="tm-pl-cell tm-pl-cell--name">Name</span>
+                <span className="tm-pl-cell tm-pl-cell--pos">Pos</span>
+                {PLAYER_STAT_FIELDS.map(f => (
+                  <span key={f.key} className="tm-pl-cell tm-pl-cell--stat" title={f.label}>{f.short}</span>
+                ))}
+                <span className="tm-pl-cell tm-pl-cell--actions" />
+              </div>
               {sorted.map(p => (
                 <PlayerRow
                   key={p.id}
@@ -685,6 +735,7 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
         )}
       </div>
     </div>
+    </>
   );
 }
 
@@ -2491,27 +2542,57 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
     [results]
   );
 
-  if (results.length === 0) {
-    return (
-      <div className="tm-win-content" style={{ padding: 16 }}>
-        <div className="tm-win-placeholder">
-          <span>No saved results yet for this tournament — use "💾 Save Result" on a linked scoreboard widget.</span>
-        </div>
-      </div>
-    );
-  }
+  // Manual "results only" sync — see pushResultsOnly/pullResultsOnly in
+  // cloudSync.ts. Deliberately separate from the tournament-wide Push Now/
+  // automatic sync: touches nothing but this tournament's saved results.
+  const [resultsSyncState, setResultsSyncState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  const [resultsSyncMsg, setResultsSyncMsg] = useState('');
+  const runResultsSync = async (kind: 'pull' | 'push') => {
+    setResultsSyncState('busy');
+    const result = kind === 'pull' ? await pullResultsOnly(tournament.id) : await pushResultsOnly(tournament.id);
+    if (result.ok) {
+      setResultsSyncState('done');
+      setResultsSyncMsg(kind === 'pull' ? `Pulled ${result.count ?? 0}` : `Pushed ${result.count ?? 0}`);
+    } else {
+      setResultsSyncState('error');
+      setResultsSyncMsg(result.error ?? 'Failed');
+    }
+    setTimeout(() => setResultsSyncState('idle'), 2500);
+  };
 
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 12 }}>
-        <button className={`tm-io-btn${editMode ? ' tm-io-btn--ok' : ''}`} onClick={() => setEditMode(v => !v)}>
-          {editMode ? '✓ Done Editing' : '✏️ Edit'}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        {resultsSyncState !== 'idle' && (
+          <span style={{ fontSize: 11, color: resultsSyncState === 'error' ? 'var(--red)' : 'var(--text-muted)' }}>
+            {resultsSyncState === 'busy' ? '…' : resultsSyncState === 'error' ? `⚠ ${resultsSyncMsg}` : `✓ ${resultsSyncMsg}`}
+          </span>
+        )}
+        <button className="tm-io-btn" disabled={resultsSyncState === 'busy'} title="Pull just this tournament's results from the cloud (doesn't touch fixtures/teams)"
+          onClick={() => runResultsSync('pull')}>
+          ⬇ Pull Results
         </button>
-        <button className="tm-io-btn" title="Export results as CSV (Excel compatible)"
-          onClick={() => exportResultsCSV(results, tournament.name)}>
-          ↓ Export CSV
+        <button className="tm-io-btn" disabled={resultsSyncState === 'busy'} title="Push just this tournament's results to the cloud (doesn't touch fixtures/teams)"
+          onClick={() => runResultsSync('push')}>
+          ⬆ Push Results
         </button>
+        {results.length > 0 && (
+          <>
+            <button className={`tm-io-btn${editMode ? ' tm-io-btn--ok' : ''}`} onClick={() => setEditMode(v => !v)}>
+              {editMode ? '✓ Done Editing' : '✏️ Edit'}
+            </button>
+            <button className="tm-io-btn" title="Export results as CSV (Excel compatible)"
+              onClick={() => exportResultsCSV(results, tournament.name)}>
+              ↓ Export CSV
+            </button>
+          </>
+        )}
       </div>
+      {results.length === 0 ? (
+        <div className="tm-win-placeholder">
+          <span>No saved results yet for this tournament — use "💾 Save Result" on a linked scoreboard widget.</span>
+        </div>
+      ) : (
       <div className="tm-sched-rows">
         {results.map(r => (
           <div key={r.id} className="tm-sched-row-wrap">
@@ -2577,6 +2658,7 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
           </div>
         ))}
       </div>
+      )}
     </div>
   );
 }
@@ -4285,6 +4367,35 @@ export function TournamentManager({ onClose }: Props) {
   }));
   const dragRef = useRef({ active: false, ox: 0, oy: 0, ix: 0, iy: 0 });
   const [isMaximized, setIsMaximized] = useState(false);
+  const winRef = useRef<HTMLDivElement>(null);
+  // .tm-window has `resize: both` (the corner drag-handle) — the browser
+  // implements that by writing width/height directly onto the DOM node's
+  // inline style, completely outside React's own style prop (which only
+  // ever sets left/top here). An inline style always beats a class rule, so
+  // once the panel has been manually resized even once, that leftover
+  // inline width/height would silently pin it at that size forever — even
+  // after adding tm-window--maximized, which sets width/height in CSS.
+  // Cached here so "Restore" can bring back that same manual size instead of
+  // snapping to the CSS default every time.
+  const preMaximizeSizeRef = useRef<{ width: string; height: string } | null>(null);
+
+  const toggleMaximize = () => {
+    const el = winRef.current;
+    if (!isMaximized) {
+      if (el) {
+        preMaximizeSizeRef.current = { width: el.style.width, height: el.style.height };
+        el.style.width = '';
+        el.style.height = '';
+      }
+      setIsMaximized(true);
+    } else {
+      setIsMaximized(false);
+      if (el && preMaximizeSizeRef.current) {
+        el.style.width = preMaximizeSizeRef.current.width;
+        el.style.height = preMaximizeSizeRef.current.height;
+      }
+    }
+  };
 
   const startDrag = (e: React.MouseEvent<HTMLDivElement>) => {
     if (isMaximized) return;
@@ -4771,18 +4882,19 @@ export function TournamentManager({ onClose }: Props) {
 
       {/* Floating window */}
       <div
+        ref={winRef}
         className={`tm-window${isMaximized ? ' tm-window--maximized' : ''}`}
         style={isMaximized ? undefined : { left: pos.x, top: pos.y }}
         onClick={e => e.stopPropagation()}
       >
         {/* Title bar */}
-        <div className="tm-titlebar" onMouseDown={startDrag} onDoubleClick={() => setIsMaximized(m => !m)}>
+        <div className="tm-titlebar" onMouseDown={startDrag} onDoubleClick={toggleMaximize}>
           <span className="tm-titlebar-icon">🏆</span>
           <span className="tm-titlebar-title">Tournament Database</span>
           <div className="tm-win-ctrls">
             <button
               className="tm-win-ctrl"
-              onClick={() => setIsMaximized(m => !m)}
+              onClick={toggleMaximize}
               title={isMaximized ? 'Restore' : 'Maximize'}
             >{isMaximized ? '🗗' : '⛶'}</button>
             <ConfirmButton

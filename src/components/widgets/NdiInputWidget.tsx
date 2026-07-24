@@ -153,7 +153,17 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
       const { invoke } = await import('@tauri-apps/api/core');
       const results = await invoke<string[]>('scan_ndi');
       setDiscovered(results);
-      if (results.length === 0) setScanError('No NDI sources found on network.');
+      if (results.length === 0) {
+        // scan_ndi degrades to an empty result both when the runtime is
+        // missing AND when it's genuinely just found nothing — without
+        // checking ndiAvailable first, a missing-runtime install (the far
+        // more common cause, especially on a fresh Windows machine) would
+        // read as "no sources found," pointing the operator at the wrong
+        // problem entirely (a network/source issue instead of an install one).
+        setScanError(ndiAvailable
+          ? 'No NDI sources found on network.'
+          : 'NDI runtime not found on this device — install NDI Tools or the NDI Runtime from ndi.video, then restart the app.');
+      }
     } catch (e) {
       setScanError('Scan failed: ' + String(e));
     } finally {
@@ -222,7 +232,7 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
               onLoad={e  => { (e.currentTarget as HTMLImageElement).style.display = 'block'; }}
             />
           ) : (
-            <div className="wgt-ndi-empty">Install NDI Tools on this Mac for live preview.</div>
+            <div className="wgt-ndi-empty">Install NDI Tools (or the NDI Runtime) on this device for live preview.</div>
           )}
           <button
             className="wgt-ndi-preview-close"

@@ -2,10 +2,11 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useTeamDbStore } from '../stores/teamDbStore';
 import { resolveImageUrl, transparentLogoUrl } from '../lib/imageUrl';
+import { ConfirmModal } from './ConfirmModal';
 
 const isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
-interface ImageInfo { name: string; url: string }
+interface ImageInfo { name: string; url: string; tournamentId?: string }
 
 // Double-click a library filename to rename it in place.
 function RenamableName({ name, onRename }: { name: string; onRename: (newName: string) => void }) {
@@ -71,6 +72,7 @@ interface Props {
 export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbContent, thumbSize, tournamentId, disabled }: Props) {
   const [showLibrary, setShowLibrary] = useState(false);
   const [browseAll, setBrowseAll] = useState(false);
+  const [libraryScope, setLibraryScope] = useState<'mine' | 'all'>('mine');
   const [libPos, setLibPos] = useState<{ left: number; bottom: number } | null>(null);
   const [images, setImages] = useState<ImageInfo[]>([]);
   const [loading, setLoading] = useState(false);
@@ -95,6 +97,19 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
   }, [dbTeams, tournamentId]);
   const showScoped = !!tournamentId && teamLogos.length > 0 && !browseAll;
 
+  // Full-library filter: untagged images (uploaded before this feature, or
+  // general/shared logos) always show in "mine" too — only images explicitly
+  // tagged to a *different* tournament get hidden. This keeps the rollout
+  // non-disruptive for existing libraries with no tags yet.
+  const visibleImages = useMemo(() => {
+    if (!tournamentId || libraryScope === 'all') return images;
+    return images.filter(img => !img.tournamentId || img.tournamentId === tournamentId);
+  }, [images, tournamentId, libraryScope]);
+  const clearScoped = !!tournamentId && libraryScope === 'mine' && visibleImages.length !== images.length;
+
+  const [confirmDeleteImg, setConfirmDeleteImg] = useState<ImageInfo | null>(null);
+  const [confirmClearLibrary, setConfirmClearLibrary] = useState(false);
+
   useEffect(() => {
     if (!showLibrary) return;
     loadImages();
@@ -103,6 +118,11 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
   useEffect(() => {
     if (!showLibrary) return;
     const handler = (e: MouseEvent) => {
+      // ConfirmModal portals to document.body on its own, outside popupRef's
+      // subtree — without this check, a mousedown on its Confirm/Cancel
+      // button would read as "outside click", closing the library (and
+      // unmounting the modal with it) before the button's own click fires.
+      if (confirmDeleteImg || confirmClearLibrary) return;
       if (popupRef.current && !popupRef.current.contains(e.target as Node) &&
           anchorRef.current && !anchorRef.current.contains(e.target as Node)) {
         setShowLibrary(false);
@@ -110,7 +130,7 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [showLibrary]);
+  }, [showLibrary, confirmDeleteImg, confirmClearLibrary]);
 
   // Opens via a portal into document.body, positioned above the anchor with
   // fixed coordinates: widgets and table rows commonly have overflow:hidden
@@ -122,6 +142,7 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
       const r = anchorRef.current.getBoundingClientRect();
       setLibPos({ left: r.left, bottom: window.innerHeight - r.top + 6 });
       setBrowseAll(false);
+      setLibraryScope('mine');
     }
     setShowLibrary(v => !v);
   };
@@ -151,7 +172,7 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
         const { invoke } = await import('@tauri-apps/api/core');
         const path = await invoke<string | null>('open_image_dialog');
         if (path) {
-          const result = await invoke<{ name: string; url: string }>('save_image', { srcPath: path });
+          const result = await invoke<{ name: string; url: string }>('save_image', { srcPath: path, tournamentId });
           onChange(result.url);
         }
       } catch { /* ignore */ }
@@ -176,11 +197,17 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
   }
 
   // Library management (Tauri only — the browser/remote preview path has no
-  // mutation routes for this yet, only list/upload).
-  async function handleDeleteImage(e: React.MouseEvent, img: ImageInfo) {
+  // mutation routes for this yet, only list/upload). Confirmation goes
+  // through ConfirmModal rather than native confirm(), which has already
+  // been found unreliable in the packaged Tauri webview elsewhere in this app.
+  function handleDeleteImage(e: React.MouseEvent, img: ImageInfo) {
     e.stopPropagation();
     if (!isTauriApp) return;
-    if (!confirm(`Delete "${img.name}" from the library? This can't be undone.`)) return;
+    setConfirmDeleteImg(img);
+  }
+
+  async function performDeleteImage(img: ImageInfo) {
+    setConfirmDeleteImg(null);
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('delete_image', { name: img.name });
@@ -189,15 +216,30 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
     } catch { /* ignore */ }
   }
 
-  async function handleClearLibrary(e: React.MouseEvent) {
+  function handleClearLibrary(e: React.MouseEvent) {
     e.stopPropagation();
-    if (!isTauriApp || images.length === 0) return;
-    if (!confirm(`Delete all ${images.length} image${images.length !== 1 ? 's' : ''} in the library? This can't be undone.`)) return;
+    if (!isTauriApp || visibleImages.length === 0) return;
+    setConfirmClearLibrary(true);
+  }
+
+  async function performClearLibrary() {
+    setConfirmClearLibrary(false);
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      for (const img of images) await invoke('delete_image', { name: img.name });
-      if (images.some(img => img.url === value)) onChange('');
+      for (const img of visibleImages) await invoke('delete_image', { name: img.name });
+      if (visibleImages.some(img => img.url === value)) onChange('');
       loadImages();
+    } catch { /* ignore */ }
+  }
+
+  // Picking an existing (possibly untagged, or tagged-elsewhere) image from
+  // the full library counts as "this logo is used by this tournament" —
+  // silently (re)tag it so it shows up under "This Tournament" from now on.
+  async function tagImageForTournament(imageName: string) {
+    if (!isTauriApp || !tournamentId) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('set_image_tournament', { name: imageName, tournamentId });
     } catch { /* ignore */ }
   }
 
@@ -213,6 +255,7 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
   }
 
   const library = libPos && (
+    <>
     <div
       ref={popupRef}
       className="logo-library"
@@ -239,10 +282,17 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
                   ← Team logos
                 </button>
               )}
+              {tournamentId && (
+                <button className="btn btn--ghost btn--small"
+                  title="Picking or uploading a logo here tags it to this tournament"
+                  onClick={() => setLibraryScope(s => s === 'mine' ? 'all' : 'mine')} style={{ fontSize: 10, padding: '1px 6px' }}>
+                  {libraryScope === 'mine' ? 'Show all →' : '← This tournament'}
+                </button>
+              )}
               <button className="btn btn--ghost btn--small" onClick={handleUploadClick} style={{ fontSize: 10, padding: '1px 6px' }}>↑ Upload</button>
               <button className="btn btn--ghost btn--small" onClick={loadImages} style={{ fontSize: 10, padding: '1px 5px' }}>↺</button>
-              {isTauriApp && images.length > 0 && (
-                <button className="btn btn--ghost btn--small" title="Delete every image in the library"
+              {isTauriApp && visibleImages.length > 0 && (
+                <button className="btn btn--ghost btn--small" title={tournamentId && libraryScope === 'mine' ? 'Delete every image shown here' : 'Delete every image in the library'}
                   onClick={handleClearLibrary} style={{ fontSize: 10, padding: '1px 6px', color: 'var(--red)' }}>
                   🗑 Clear
                 </button>
@@ -263,15 +313,27 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
         </div>
       ) : loading ? (
         <div className="logo-library-empty">Loading…</div>
-      ) : images.length === 0 ? (
-        <div className="logo-library-empty">No images yet — upload one</div>
+      ) : visibleImages.length === 0 ? (
+        <div className="logo-library-empty">
+          {tournamentId && libraryScope === 'mine' && images.length > 0
+            ? 'No logos tagged to this tournament yet — click "Show all", or upload one'
+            : 'No images yet — upload one'}
+        </div>
       ) : (
         <div className="logo-library-grid">
-          {images.map(img => (
+          {visibleImages.map(img => (
             <div key={img.name} className="logo-library-item" style={{ cursor: 'pointer' }}
-              onClick={() => { onChange(img.url); setShowLibrary(false); }}>
+              title={tournamentId && img.tournamentId === tournamentId ? `${img.name} — tagged to this tournament` : img.name}
+              onClick={() => {
+                onChange(img.url);
+                if (tournamentId && img.tournamentId !== tournamentId) tagImageForTournament(img.name);
+                setShowLibrary(false);
+              }}>
               {isTauriApp && (
                 <button className="logo-library-del" title="Delete this image" onClick={e => handleDeleteImage(e, img)}>×</button>
+              )}
+              {tournamentId && img.tournamentId === tournamentId && (
+                <span className="logo-library-tag" title="Tagged to this tournament">📌</span>
               )}
               <img src={resolveImageUrl(img.url)} alt={img.name} className="logo-library-thumb" />
               {isTauriApp ? (
@@ -284,6 +346,27 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
         </div>
       )}
     </div>
+    {confirmDeleteImg && (
+      <ConfirmModal
+        title="Delete image"
+        message={`Delete "${confirmDeleteImg.name}" from the library? This can't be undone.`}
+        confirmLabel="Delete"
+        danger
+        onConfirm={() => performDeleteImage(confirmDeleteImg)}
+        onCancel={() => setConfirmDeleteImg(null)}
+      />
+    )}
+    {confirmClearLibrary && (
+      <ConfirmModal
+        title="Clear library"
+        message={`Delete ${clearScoped ? "this tournament's" : 'all'} ${visibleImages.length} image${visibleImages.length !== 1 ? 's' : ''}${clearScoped ? ' shown here' : ' in the library'}? This can't be undone.`}
+        confirmLabel="Delete"
+        danger
+        onConfirm={performClearLibrary}
+        onCancel={() => setConfirmClearLibrary(false)}
+      />
+    )}
+    </>
   );
 
   if (compact) {

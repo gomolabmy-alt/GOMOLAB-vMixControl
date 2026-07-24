@@ -311,6 +311,14 @@ interface CanvasStore {
   addTimelineEvent: (widgetId: string, event: Omit<import('../types/canvas').TimelineEvent, 'id'>) => void;
   deleteTimelineEvent: (widgetId: string, eventId: string) => void;
 
+  /** Clears the live match state (score, score log, cards) of any scoreboard
+   *  widget currently loaded with one of these fixtures, plus the event log
+   *  of any Timeline widget linked to that scoreboard — called when a
+   *  fixture is reset back to not-yet-played in the Schedule/Fixture widget,
+   *  so a scoreboard/timeline left showing that match doesn't keep
+   *  displaying stats from the reset attempt. */
+  resetScoreboardStateForMatches: (matchIds: string[]) => void;
+
   // Scoreboard cards
   addScoreboardCard: (widgetId: string, team: 'A' | 'B', cardType: 'yellow' | 'red', player: string, timeStr: string) => void;
   removeScoreboardCard: (widgetId: string, team: 'A' | 'B', cardId: string) => void;
@@ -1960,6 +1968,35 @@ export const useCanvasStore = create<CanvasStore>()(
           const before = findWidgetConfig(widgetId)?.scoreLog;
           updateWidgetConfig(widgetId, { scoreLog: [] });
           useUndoStore.getState().pushUndo('Cleared score log', () => updateWidgetConfig(widgetId, { scoreLog: before }));
+        },
+
+        resetScoreboardStateForMatches: (matchIds) => {
+          if (matchIds.length === 0) return;
+          const idSet = new Set(matchIds);
+          const allWidgetsBefore = [...get().pages, ...get().commentatorPages].flatMap((p) => p.widgets);
+          // A mirrored scoreboard (linkedScoreboardSourceId set) has no
+          // independent match of its own — it just displays whatever its
+          // source widget holds — so only ever match against a real source.
+          const resetScoreboardIds = new Set(
+            allWidgetsBefore
+              .filter((w) => w.type === 'scoreboard' && !w.config.linkedScoreboardSourceId && idSet.has(w.config.linkedScheduleMatchId))
+              .map((w) => w.id)
+          );
+          if (resetScoreboardIds.size === 0) return;
+
+          const resetPage = (p: CanvasPage): CanvasPage => ({
+            ...p,
+            widgets: p.widgets.map((w) => {
+              if (w.type === 'scoreboard' && resetScoreboardIds.has(w.id)) {
+                return { ...w, config: { ...w.config, scoreA: 0, scoreB: 0, scoreLog: [], cardsA: [], cardsB: [], lastSavedSignature: '' } };
+              }
+              if (w.type === 'timeline' && resetScoreboardIds.has(w.config.linkedScoreboardId)) {
+                return { ...w, config: { ...w.config, events: [] } };
+              }
+              return w;
+            }),
+          });
+          set({ pages: get().pages.map(resetPage), commentatorPages: get().commentatorPages.map(resetPage) });
         },
 
         // Reverts the single most recent scoring action for one team — e.g.

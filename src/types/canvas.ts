@@ -28,7 +28,10 @@ export type WidgetType =
   | 'recent-matches'
   | 'match-schedule'
   | 'standings'
-  | 'bracket';
+  | 'bracket'
+  | 'team-form'
+  | 'player-h2h'
+  | 'player-stats';
 
 export type TimelineEventType = 'score' | 'yellow-card' | 'orange-card' | 'red-card' | 'substitution' | 'period' | 'custom';
 
@@ -405,6 +408,51 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       filterTier: '',
     },
   },
+  'team-form': {
+    w: 340, h: 360,
+    config: {
+      linkedScoreboardId: '',
+      // Each pushes ALL of that section's rows joined into one text field
+      // (" | "-separated), same convention as score-log's summary output —
+      // a vMix text field is one string, not a table, so every stage for
+      // that team/section lands in a single field rather than needing a
+      // separate numbered field per row.
+      vmixResultsAInputKey: '', vmixResultsAInputTitle: '', vmixResultsAField: '',
+      vmixUpcomingAInputKey: '', vmixUpcomingAInputTitle: '', vmixUpcomingAField: '',
+      vmixResultsBInputKey: '', vmixResultsBInputTitle: '', vmixResultsBField: '',
+      vmixUpcomingBInputKey: '', vmixUpcomingBInputTitle: '', vmixUpcomingBField: '',
+    },
+  },
+  'player-h2h': {
+    w: 360, h: 320,
+    config: {
+      linkedScoreboardId: '',
+      playerAId: '', playerBId: '',
+      // One shared vMix input (like Scoreboard's own single inputKey) with a
+      // separate named field per data point per side — these are fixed
+      // scalar values (not a variable-length list like Team Form's rows),
+      // so individually-addressable fields suit a broadcast title template
+      // better than one joined string would.
+      vmixInputKey: '', vmixInputTitle: '',
+      fieldNameA: '', fieldJerseyA: '', fieldPositionA: '',
+      fieldTriesA: '', fieldConversionsA: '', fieldPenaltiesA: '', fieldDropGoalsA: '', fieldYellowCardsA: '', fieldRedCardsA: '', fieldAppearancesA: '',
+      fieldNameB: '', fieldJerseyB: '', fieldPositionB: '',
+      fieldTriesB: '', fieldConversionsB: '', fieldPenaltiesB: '', fieldDropGoalsB: '', fieldYellowCardsB: '', fieldRedCardsB: '', fieldAppearancesB: '',
+    },
+  },
+  'player-stats': {
+    w: 260, h: 280,
+    config: {
+      linkedScoreboardId: '',
+      // Which side's roster the Player picker below offers — set this
+      // first in settings, then Player populates from that team.
+      teamSide: 'A',
+      playerId: '',
+      vmixInputKey: '', vmixInputTitle: '',
+      fieldName: '', fieldJersey: '', fieldPosition: '', fieldTeam: '',
+      fieldTries: '', fieldConversions: '', fieldPenalties: '', fieldDropGoals: '', fieldYellowCards: '', fieldRedCards: '', fieldAppearances: '',
+    },
+  },
 };
 
 export const WIDGET_TYPE_LABELS: Record<WidgetType, string> = {
@@ -427,6 +475,9 @@ export const WIDGET_TYPE_LABELS: Record<WidgetType, string> = {
   'match-schedule': 'Match Schedule',
   standings: 'Standings',
   bracket: 'Bracket',
+  'team-form': 'Team Form',
+  'player-h2h': 'Player H2H',
+  'player-stats': 'Player Stats',
 };
 
 export const WIDGET_TYPE_ICONS: Record<WidgetType, string> = {
@@ -449,4 +500,7 @@ export const WIDGET_TYPE_ICONS: Record<WidgetType, string> = {
   'match-schedule': '📅',
   standings: '📊',
   bracket: '🌳',
+  'team-form': '📈',
+  'player-h2h': '🤼',
+  'player-stats': '🧑‍💼',
 };

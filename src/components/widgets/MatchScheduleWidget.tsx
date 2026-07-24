@@ -51,7 +51,7 @@ export function MatchScheduleWidget({ widgetId, config }: Props) {
   // commentator shouldn't be able to wipe/reset the tournament's schedule.
   const isCommentator = !!useContext(CanvasActionContext);
   const { pages, updateWidgetConfig, resetWidgetTimer } = useCanvasStore();
-  const { matches: allMatches, markSent, unmarkSent, resetAllSent, clearMatches } = useMatchScheduleStore();
+  const { matches: allMatches, markSent, unmarkSent, resetAllSent } = useMatchScheduleStore();
   const { results: savedResults, addResult, deleteResult } = useMatchResultsStore();
   const [undoTarget, setUndoTarget] = useState<{ matchId: string; resultId: string } | null>(null);
 
@@ -131,22 +131,13 @@ export function MatchScheduleWidget({ widgetId, config }: Props) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span className="wgt-ms-count">{sentCount}/{matches.length} sent</span>
             {!isCommentator && (
-              <>
-                <ConfirmButton
-                  className="wgt-ms-tool-btn"
-                  label="↺ Reset"
-                  confirmLabel="Reset"
-                  message="Mark all fixtures as not sent?"
-                  onConfirm={() => resetAllSent(matches.map(m => m.id))}
-                />
-                <ConfirmButton
-                  className="wgt-ms-tool-btn wgt-ms-tool-btn--danger"
-                  label="🗑 Clear"
-                  confirmLabel="Delete all"
-                  message="Delete all scheduled fixtures?"
-                  onConfirm={() => clearMatches(matches.map(m => m.id))}
-                />
-              </>
+              <ConfirmButton
+                className="wgt-ms-tool-btn"
+                label="↺ Reset"
+                confirmLabel="Reset"
+                message="Mark all fixtures as not sent?"
+                onConfirm={() => resetAllSent(matches.map(m => m.id))}
+              />
             )}
           </div>
         )}

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { useUndoStore } from './undoStore';
+import { useCanvasStore } from './canvasStore';
 
 // Upcoming fixtures — separate from matchResultsStore (completed matches with
 // a final score). A scheduled match has no score; picking one from the
@@ -93,7 +94,12 @@ interface MatchScheduleStore {
   markCompleted: (id: string) => void;
   /** Resets sentAt/completedAt on every match, or only those in `ids` when given
    *  (e.g. the widget's currently venue-filtered view, so a scoped operator
-   *  can't reset fixtures belonging to a different venue they can't even see). */
+   *  can't reset fixtures belonging to a different venue they can't even see).
+   *  Also clears the score/score log/cards of any scoreboard still showing
+   *  one of these fixtures, and the event log of any Timeline widget linked
+   *  to it — see canvasStore's resetScoreboardStateForMatches — since a
+   *  fixture being reset back to not-yet-played shouldn't leave a scoreboard
+   *  or timeline still displaying stats from the reset attempt. */
   resetAllSent: (ids?: string[]) => void;
   /** Deletes every match, or only those in `ids` when given — same scoping reason. */
   clearMatches: (ids?: string[]) => void;
@@ -101,6 +107,21 @@ interface MatchScheduleStore {
   /** Consumes (removes) the given ids from pendingDeletedIds — called by
    *  cloudSync.ts once they've actually been pushed to the cloud. */
   clearPendingDeletedIds: (ids: string[]) => void;
+  /** Re-stamps every not-yet-completed fixture's Team A/B name/shortName/
+   *  color/logo after the source team record's identity changes — a
+   *  fixture only ever copies these fields at generation time, so without
+   *  this it would keep showing whatever was true back then forever (see
+   *  teamDbStore's updateTeam, and cloudSync's pull team-merge loop).
+   *  Matched by the team's own PREVIOUS name + tournament (+ category, when
+   *  both sides have one, so two different categories' same-named teams —
+   *  e.g. a club fielding both a Boys and a Girls side — are never crossed).
+   *  Completed fixtures are left alone; they're effectively historical. */
+  syncTeamIdentity: (
+    tournamentId: string | undefined,
+    oldName: string,
+    category: string | undefined,
+    identity: { name?: string; shortName?: string; color?: string; logo?: string },
+  ) => void;
 }
 
 export const useMatchScheduleStore = create<MatchScheduleStore>()(
@@ -138,18 +159,28 @@ export const useMatchScheduleStore = create<MatchScheduleStore>()(
 
       // Clears completedAt alongside sentAt (matching resetAllSent's existing
       // both-together behavior) — a fixture that's no longer "sent" shouldn't
-      // still read as "completed" either.
-      unmarkSent: (id) => set(s => ({
-        matches: s.matches.map(m => m.id === id ? { ...m, sentAt: undefined, completedAt: undefined } : m),
-      })),
+      // still read as "completed" either. Same scoreboard/timeline cascade as
+      // resetAllSent, for the same reason — this is the single-fixture form
+      // of the exact same "undo, this wasn't really played" action (Undo
+      // Sent / Stop Live).
+      unmarkSent: (id) => {
+        set(s => ({
+          matches: s.matches.map(m => m.id === id ? { ...m, sentAt: undefined, completedAt: undefined } : m),
+        }));
+        useCanvasStore.getState().resetScoreboardStateForMatches([id]);
+      },
 
       markCompleted: (id) => set(s => ({
         matches: s.matches.map(m => m.id === id ? { ...m, completedAt: Date.now() } : m),
       })),
 
-      resetAllSent: (ids) => set(s => ({
-        matches: s.matches.map(m => (!ids || ids.includes(m.id)) ? { ...m, sentAt: undefined, completedAt: undefined } : m),
-      })),
+      resetAllSent: (ids) => {
+        const affected = ids ?? get().matches.map(m => m.id);
+        set(s => ({
+          matches: s.matches.map(m => affected.includes(m.id) ? { ...m, sentAt: undefined, completedAt: undefined } : m),
+        }));
+        useCanvasStore.getState().resetScoreboardStateForMatches(affected);
+      },
 
       clearMatches: (ids) => {
         const removed = ids ? get().matches.filter(m => ids.includes(m.id)) : get().matches.slice();
@@ -168,6 +199,22 @@ export const useMatchScheduleStore = create<MatchScheduleStore>()(
       restoreMatches: (matches) => set({ matches: matches as ScheduledMatch[] }),
 
       clearPendingDeletedIds: (ids) => set(s => ({ pendingDeletedIds: s.pendingDeletedIds.filter(id => !ids.includes(id)) })),
+
+      syncTeamIdentity: (tournamentId, oldName, category, identity) => set(s => ({
+        matches: s.matches.map(m => {
+          if (m.tournamentId !== tournamentId || m.completedAt) return m;
+          if (category && m.category && m.category !== category) return m;
+          if (m.teamAName !== oldName && m.teamBName !== oldName) return m;
+          let next = m;
+          if (m.teamAName === oldName) next = { ...next,
+            teamAName: identity.name ?? next.teamAName, teamAShortName: identity.shortName,
+            teamAColor: identity.color ?? next.teamAColor, teamALogo: identity.logo };
+          if (m.teamBName === oldName) next = { ...next,
+            teamBName: identity.name ?? next.teamBName, teamBShortName: identity.shortName,
+            teamBColor: identity.color ?? next.teamBColor, teamBLogo: identity.logo };
+          return next;
+        }),
+      })),
     }),
     {
       name: 'gomolab-match-schedule-v1',

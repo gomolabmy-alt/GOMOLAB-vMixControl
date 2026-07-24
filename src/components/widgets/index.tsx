@@ -30,6 +30,9 @@ import { RecentMatchesWidget } from './RecentMatchesWidget';
 import { MatchScheduleWidget } from './MatchScheduleWidget';
 import { StandingsWidget } from './StandingsWidget';
 import { BracketWidget } from './BracketWidget';
+import { TeamFormWidget } from './TeamFormWidget';
+import { PlayerHeadToHeadWidget } from './PlayerHeadToHeadWidget';
+import { PlayerStatsWidget } from './PlayerStatsWidget';
 
 interface Props {
   widget: CanvasWidget;
@@ -72,6 +75,9 @@ export function WidgetRenderer({ widget }: Props) {
     case 'match-schedule':     content = <MatchScheduleWidget widgetId={id} {...sharedProps} />; break;
     case 'standings':          content = <StandingsWidget widgetId={id} {...sharedProps} />; break;
     case 'bracket':            content = <BracketWidget widgetId={id} {...sharedProps} />; break;
+    case 'team-form':          content = <TeamFormWidget widgetId={id} {...sharedProps} />; break;
+    case 'player-h2h':         content = <PlayerHeadToHeadWidget widgetId={id} {...sharedProps} />; break;
+    case 'player-stats':       content = <PlayerStatsWidget widgetId={id} {...sharedProps} />; break;
     default:            content = <div style={{ padding: 8, fontSize: 11 }}>Unknown widget</div>;
   }
 

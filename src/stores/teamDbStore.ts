@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Player, StaffMember } from '../types/tournament';
 import { useUndoStore } from './undoStore';
+import { useMatchScheduleStore } from './matchScheduleStore';
 
 // Reusable team profiles — the source of truth for team identity (name,
 // short name, color, logo), roster (players) and staff. A team optionally
@@ -39,10 +40,21 @@ export interface SavedTeam {
    *  categories gets a separate SavedTeam per category (see duplicateTeam)
    *  since each category's roster is independent. */
   category?: string;
+  /** Which team on the tournament's linked external roster API (see
+   *  Tournament.externalRoster, src/lib/externalRoster.ts) this one was last
+   *  pulled from — remembered the first time "Pull from API" is used, so
+   *  the periodic auto-sync knows which external team to keep re-pulling
+   *  without a human re-picking it every cycle. Unset = never linked, so
+   *  auto-sync leaves this team alone entirely. */
+  externalTeamSlug?: string;
 }
 
 interface TeamDbStore {
   teams: SavedTeam[];
+  /** Ids removed locally since the last successful cloud push, so the cloud
+   *  copy actually gets deleted too instead of a push only ever being able
+   *  to add/update (see matchScheduleStore's identical convention). */
+  pendingDeletedIds: string[];
   addTeam: (team: Omit<SavedTeam, 'id' | 'players'>) => string;
   updateTeam: (id: string, patch: Partial<Omit<SavedTeam, 'id' | 'players'>>) => void;
   deleteTeam: (id: string) => void;
@@ -58,12 +70,16 @@ interface TeamDbStore {
   replaceTeamPlayers: (teamId: string, players: Omit<Player, 'id'>[]) => void;
   updateStaffMember: (teamId: string, staffId: string, name: string) => void;
   restoreTeams: (teams: unknown[]) => void;
+  /** Consumes (removes) the given ids from pendingDeletedIds — called by
+   *  cloudSync.ts once they've actually been pushed to the cloud. */
+  clearPendingDeletedIds: (ids: string[]) => void;
 }
 
 export const useTeamDbStore = create<TeamDbStore>()(
   persist(
     (set, get) => ({
       teams: [],
+      pendingDeletedIds: [],
 
       addTeam: (team) => {
         const id = crypto.randomUUID();
@@ -71,15 +87,28 @@ export const useTeamDbStore = create<TeamDbStore>()(
         return id;
       },
 
-      updateTeam: (id, patch) => set(s => ({
-        teams: s.teams.map(t => t.id === id ? { ...t, ...patch } : t),
-      })),
+      updateTeam: (id, patch) => {
+        const before = get().teams.find(t => t.id === id);
+        set(s => ({ teams: s.teams.map(t => t.id === id ? { ...t, ...patch } : t) }));
+        // Cascade an identity change (name/shortName/color/logo) into this
+        // team's own existing fixtures — see matchScheduleStore's
+        // syncTeamIdentity for why a fixture wouldn't otherwise notice.
+        if (before && (patch.name !== undefined || patch.shortName !== undefined || patch.color !== undefined || patch.logo !== undefined)) {
+          const after = { ...before, ...patch };
+          useMatchScheduleStore.getState().syncTeamIdentity(before.tournamentId, before.name, before.category, {
+            name: after.name, shortName: after.shortName, color: after.color, logo: after.logo,
+          });
+        }
+      },
 
       deleteTeam: (id) => {
         const team = get().teams.find(t => t.id === id);
-        set(s => ({ teams: s.teams.filter(t => t.id !== id) }));
+        set(s => ({ teams: s.teams.filter(t => t.id !== id), pendingDeletedIds: [...s.pendingDeletedIds, id] }));
         if (team) useUndoStore.getState().pushUndo(`Deleted team "${team.name}"`, () =>
-          useTeamDbStore.setState(s => ({ teams: [...s.teams, team] })));
+          useTeamDbStore.setState(s => ({
+            teams: [...s.teams, team],
+            pendingDeletedIds: s.pendingDeletedIds.filter(x => x !== id),
+          })));
       },
 
       duplicateTeam: (id) => {
@@ -146,6 +175,8 @@ export const useTeamDbStore = create<TeamDbStore>()(
       })),
 
       restoreTeams: (teams) => set({ teams: teams as SavedTeam[] }),
+
+      clearPendingDeletedIds: (ids) => set(s => ({ pendingDeletedIds: s.pendingDeletedIds.filter(id => !ids.includes(id)) })),
     }),
     {
       name: 'gomolab-teamdb-v1',
@@ -157,7 +188,7 @@ export const useTeamDbStore = create<TeamDbStore>()(
       // Remote/browser clients always load the host's live data via
       // FULL_STATE — never persist locally, or a reload could show stale
       // data before (or instead of) the synced copy.
-      partialize: (s) => (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) ? {} : { teams: s.teams },
+      partialize: (s) => (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) ? {} : { teams: s.teams, pendingDeletedIds: s.pendingDeletedIds },
     }
   )
 );

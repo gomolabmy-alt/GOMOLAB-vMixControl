@@ -4,7 +4,8 @@ import {
   Star, AlertOctagon, CalendarDays, Shirt, ArrowLeftRight, CreditCard,
   Timer, SlidersHorizontal, Volume2, Layers, Tag, Radio,
   Repeat2, Video, LayoutGrid, AlignLeft, Shield, Square,
-  Clock, List, Image, ListOrdered, CalendarClock, BarChart3, Network,
+  Clock, List, Image, ListOrdered, CalendarClock, BarChart3, Network, TrendingUp,
+  Swords, IdCard,
 } from 'lucide-react';
 import type { WidgetType } from '../../types/canvas';
 
@@ -39,6 +40,9 @@ const ICON_MAP: Record<WidgetType, LucideIcon> = {
   'match-schedule':      CalendarClock,
   'standings':           BarChart3,
   'bracket':             Network,
+  'team-form':           TrendingUp,
+  'player-h2h':          Swords,
+  'player-stats':        IdCard,
 };
 
 interface Props {

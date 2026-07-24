@@ -378,6 +378,11 @@ pub struct SaveImageResult {
 pub struct ImageInfo {
     pub name: String,
     pub url: String,
+    /// Which tournament this was uploaded/tagged for, if any — see the
+    /// image-tags manifest helpers above. None = general/untagged, shown in
+    /// every tournament's library.
+    #[serde(rename = "tournamentId")]
+    pub tournament_id: Option<String>,
 }
 
 // ── Build info ───────────────────────────────────────────────────────────────
@@ -402,6 +407,39 @@ pub fn get_machine_id() -> Result<String, String> {
 #[tauri::command]
 pub async fn http_get(url: String) -> Result<String, String> {
     http_get_inner(&url).await
+}
+
+// ── External public API GET (roster imports, etc.) ──────────────────────────
+// A general-purpose HTTPS GET for third-party public JSON APIs (e.g. the
+// Players tab's "Link roster API" feature) — deliberately separate from
+// http_get above, which talks to vMix's plain-HTTP LAN API and, on non-macOS,
+// uses a hand-rolled raw-socket client with no TLS support at all. Always
+// shells out to curl, which handles HTTPS/TLS itself and is present on macOS
+// by default and bundled with Windows 10 1803+/Windows 11 at
+// System32\curl.exe, so this works uniformly on both platforms without
+// pulling in a new HTTP-client crate.
+#[tauri::command]
+pub async fn fetch_public_json(url: String) -> Result<String, String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("URL must start with http:// or https://".into());
+    }
+    let curl_bin = if cfg!(target_os = "macos") { "/usr/bin/curl" } else { "curl" };
+    let out = tokio::process::Command::new(curl_bin)
+        .args([
+            "--silent", "--show-error",
+            "--max-time", "15", "--connect-timeout", "8",
+            "--location",
+            &url,
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("curl spawn: {e}"))?;
+
+    if !out.status.success() {
+        let msg = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("curl({}): {}", out.status.code().unwrap_or(-1), msg));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("curl output encoding: {e}"))
 }
 
 // ── TCP connectivity test (debug only) ───────────────────────────────────────
@@ -635,6 +673,29 @@ pub async fn save_text_file_dialog(default_name: String, content: String) -> Res
     }
 }
 
+// ── Per-tournament tagging for the shared image library ─────────────────────
+// Images still live in one flat folder on disk (unchanged) — this is a
+// lightweight sidecar manifest (filename -> tournament id) so the picker UI
+// can filter "Browse full library" down to just one tournament's own
+// uploads, without any physical file reorganization or migration of
+// existing logos (whose URLs are already persisted all over local data).
+fn image_tags_path(images_dir: &Path) -> std::path::PathBuf {
+    images_dir.join(".image_tags.json")
+}
+
+fn read_image_tags(images_dir: &Path) -> HashMap<String, String> {
+    std::fs::read_to_string(image_tags_path(images_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn write_image_tags(images_dir: &Path, tags: &HashMap<String, String>) {
+    if let Ok(json) = serde_json::to_string_pretty(tags) {
+        let _ = std::fs::write(image_tags_path(images_dir), json);
+    }
+}
+
 // Picks a filename that keeps the original stem where possible, only adding
 // a "_2", "_3", … suffix if a file with that exact name already exists —
 // so the library shows recognizable names instead of a timestamp prefix.
@@ -654,7 +715,7 @@ fn unique_dest_name(dir: &Path, safe_stem: &str, ext: &str) -> String {
 }
 
 #[tauri::command]
-pub fn save_image(src_path: String, state: State<'_, AppState>) -> Result<SaveImageResult, String> {
+pub fn save_image(src_path: String, tournament_id: Option<String>, state: State<'_, AppState>) -> Result<SaveImageResult, String> {
     let src = Path::new(&src_path);
     let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png");
     let stem = src
@@ -674,6 +735,11 @@ pub fn save_image(src_path: String, state: State<'_, AppState>) -> Result<SaveIm
     let name = unique_dest_name(&state.server.images_dir, &safe_stem, ext);
     let dest = state.server.images_dir.join(&name);
     std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+    if let Some(tid) = tournament_id.filter(|s| !s.is_empty()) {
+        let mut tags = read_image_tags(&state.server.images_dir);
+        tags.insert(name.clone(), tid);
+        write_image_tags(&state.server.images_dir, &tags);
+    }
     // Use localhost so the URL remains valid regardless of which network interface
     // is active. setImageField rewrites to the LAN IP when sending to vMix.
     let url = format!("http://localhost:{}/images/{}", state.server.sync_port, name);
@@ -703,6 +769,15 @@ pub fn rename_image(old_name: String, new_name: String, state: State<'_, AppStat
     };
     let dest = dir.join(&name);
     std::fs::rename(&old_file, &dest).map_err(|e| e.to_string())?;
+    // Carry the tag over to the new filename — the manifest is keyed by
+    // name, so without this a rename would silently drop the tournament tag.
+    if name != old_name {
+        let mut tags = read_image_tags(dir);
+        if let Some(tag) = tags.remove(&old_name) {
+            tags.insert(name.clone(), tag);
+            write_image_tags(dir, &tags);
+        }
+    }
     let url = format!("http://localhost:{}/images/{}", state.server.sync_port, name);
     Ok(SaveImageResult { name, url })
 }
@@ -712,7 +787,7 @@ pub fn rename_image(old_name: String, new_name: String, state: State<'_, AppStat
 // the same project, or the image was never deleted), it's left untouched
 // rather than duplicated with a numeric suffix.
 #[tauri::command]
-pub fn import_image(name: String, data_base64: String, state: State<'_, AppState>) -> Result<SaveImageResult, String> {
+pub fn import_image(name: String, data_base64: String, tournament_id: Option<String>, state: State<'_, AppState>) -> Result<SaveImageResult, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&data_base64)
@@ -727,6 +802,11 @@ pub fn import_image(name: String, data_base64: String, state: State<'_, AppState
     if !dest.exists() {
         std::fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
     }
+    if let Some(tid) = tournament_id.filter(|s| !s.is_empty()) {
+        let mut tags = read_image_tags(dir);
+        tags.insert(safe_name.clone(), tid);
+        write_image_tags(dir, &tags);
+    }
     let url = format!("http://localhost:{}/images/{}", state.server.sync_port, safe_name);
     Ok(SaveImageResult { name: safe_name, url })
 }
@@ -734,6 +814,7 @@ pub fn import_image(name: String, data_base64: String, state: State<'_, AppState
 #[tauri::command]
 pub fn list_images(state: State<'_, AppState>) -> Vec<ImageInfo> {
     let dir = &state.server.images_dir;
+    let tags = read_image_tags(dir);
     std::fs::read_dir(dir)
         .ok()
         .into_iter()
@@ -749,22 +830,47 @@ pub fn list_images(state: State<'_, AppState>) -> Vec<ImageInfo> {
                 || lower.ends_with(".webp")
                 || lower.ends_with(".svg")
         })
-        .map(|name| ImageInfo {
-            url: format!("http://localhost:{}/images/{}", state.server.sync_port, name),
-            name,
+        .map(|name| {
+            let tournament_id = tags.get(&name).cloned();
+            ImageInfo {
+                url: format!("http://localhost:{}/images/{}", state.server.sync_port, name),
+                name,
+                tournament_id,
+            }
         })
         .collect()
 }
 
+// Assigns (or, with `tournament_id: None`, clears) which tournament an
+// already-uploaded image is tagged for — lets an existing/legacy untagged
+// image be organized into a tournament's library after the fact, not just
+// images uploaded fresh through it.
+#[tauri::command]
+pub fn set_image_tournament(name: String, tournament_id: Option<String>, state: State<'_, AppState>) -> Result<(), String> {
+    let dir = &state.server.images_dir;
+    let mut tags = read_image_tags(dir);
+    match tournament_id.filter(|s| !s.is_empty()) {
+        Some(tid) => { tags.insert(name, tid); }
+        None => { tags.remove(&name); }
+    }
+    write_image_tags(dir, &tags);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_image(name: String, state: State<'_, AppState>) -> Result<(), String> {
-    let file = state.server.images_dir.join(
+    let dir = &state.server.images_dir;
+    let file = dir.join(
         Path::new(&name)
             .file_name()
             .ok_or("invalid filename")?,
     );
     if file.exists() {
         std::fs::remove_file(file).map_err(|e| e.to_string())?;
+    }
+    let mut tags = read_image_tags(dir);
+    if tags.remove(&name).is_some() {
+        write_image_tags(dir, &tags);
     }
     Ok(())
 }

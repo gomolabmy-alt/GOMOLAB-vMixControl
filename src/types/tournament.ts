@@ -14,6 +14,18 @@ export interface Player {
   jerseyNo: string;
   name: string;
   position: string;
+  /** Cumulative match stats — same field set as the external roster API
+   *  (see src/lib/externalRoster.ts), which is where these are normally
+   *  populated from via the Players tab's "Pull from API"; can also be
+   *  edited by hand. All optional/undefined until set — most sports and
+   *  most players will simply never have these. */
+  tries?: number;
+  conversions?: number;
+  penalties?: number;
+  dropGoals?: number;
+  yellowCards?: number;
+  redCards?: number;
+  appearances?: number;
 }
 
 export interface StaffMember {
@@ -134,6 +146,26 @@ export interface Tournament {
    *  device doesn't own it and the server would reject the write anyway.
    *  Undefined/false for anything actually owned by this device's vendor. */
   foreignVendor?: boolean;
+  /** Links this tournament to a same-event tournament on an external public
+   *  roster API (currently: AthleticaOS's `/api/public/tournaments/{id}` and
+   *  `/api/public/teams/{slug}` endpoints — no auth, read-only) so the
+   *  Players tab can pull real player names into a team's roster instead of
+   *  typing them in by hand. Set once via "Link roster API"; unset to
+   *  disable the feature for this tournament. */
+  externalRoster?: ExternalRosterSource;
+}
+
+export interface ExternalRosterSource {
+  /** Origin the tournament/team endpoints live under, e.g.
+   *  "https://staging-api.athleticaos.com" — captured from whatever URL the
+   *  user pasted in, so this keeps working if they're on a different
+   *  environment (staging vs. production) than the example. */
+  baseUrl: string;
+  /** The external tournament's own id (not this app's Tournament.id). */
+  tournamentId: string;
+  /** Cached display label only — refreshed each time the link is (re)set,
+   *  never trusted for anything but showing "linked to X" in the UI. */
+  tournamentName?: string;
 }
 
 export interface GroupListVmixTarget {

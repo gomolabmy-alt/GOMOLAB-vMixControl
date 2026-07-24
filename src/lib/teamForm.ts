@@ -1,5 +1,6 @@
 import type { SavedMatchResult } from '../stores/matchResultsStore';
 import type { ScheduledMatch } from '../stores/matchScheduleStore';
+import type { SavedTeam } from '../stores/teamDbStore';
 
 const norm = (s?: string) => (s ?? '').trim().toLowerCase();
 
@@ -10,6 +11,19 @@ export function stageLabel(round?: string): string {
   if (!round) return '';
   const idx = round.indexOf(' · ');
   return idx >= 0 ? round.slice(idx + 3) : round;
+}
+
+/** A scoreboard only ever carries a team's NAME (teamAName/teamBName), never
+ *  its id — resolving the actual SavedTeam record (for its roster, used by
+ *  the Player H2H / Player Stats widgets) means matching by name, scoped by
+ *  category so two same-named teams in different categories (e.g. a club
+ *  fielding both a Boys and a Girls side) are never crossed. */
+export function findTeamRecord(
+  teams: SavedTeam[], name: string, category: string | undefined, tournamentId: string | undefined,
+): SavedTeam | undefined {
+  const candidates = teams.filter(t => norm(t.name) === norm(name) && (!tournamentId || t.tournamentId === tournamentId));
+  if (candidates.length <= 1) return candidates[0];
+  return candidates.find(t => norm(t.category) === norm(category)) ?? candidates[0];
 }
 
 function isThisTeam(

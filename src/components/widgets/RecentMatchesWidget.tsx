@@ -2,6 +2,7 @@ import { useMemo, useState, useRef, useEffect } from 'react';
 import { useMatchResultsStore, type SavedMatchResult } from '../../stores/matchResultsStore';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
+import { pushResultsOnly, pullResultsOnly } from '../../lib/cloudSync';
 
 interface Props {
   widgetId: string;
@@ -93,10 +94,39 @@ export function RecentMatchesWidget({ widgetId, config }: Props) {
     return out;
   }, [shown, groupByCompetition]);
 
+  // Manual "results only" sync — same scoped push/pull as the Tournament
+  // Database's Results tab, exposed here too so an operator watching this
+  // widget doesn't need to open that window just to confirm results are
+  // in sync. Needs a tournament scope to know what to sync.
+  const [resultsSyncState, setResultsSyncState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  const runResultsSync = async (kind: 'pull' | 'push') => {
+    if (!effectiveTournamentId || resultsSyncState === 'busy') return;
+    setResultsSyncState('busy');
+    const result = kind === 'pull' ? await pullResultsOnly(effectiveTournamentId) : await pushResultsOnly(effectiveTournamentId);
+    setResultsSyncState(result.ok ? 'done' : 'error');
+    setTimeout(() => setResultsSyncState('idle'), 2000);
+  };
+
   return (
     <div className={`wgt-rm${compact ? ' wgt-rm--compact' : ''}`}>
       <div className="wgt-rm-header">
         <span>{title}</span>
+        <div className="wgt-rm-sync-btns" onClick={e => e.stopPropagation()}>
+          {resultsSyncState === 'error' && <span className="wgt-rm-sync-status wgt-rm-sync-status--error">⚠</span>}
+          {resultsSyncState === 'done' && <span className="wgt-rm-sync-status">✓</span>}
+          <button
+            className="wgt-rm-tool-btn"
+            disabled={!effectiveTournamentId || resultsSyncState === 'busy'}
+            title={effectiveTournamentId ? "Pull just this tournament's results from the cloud" : 'No tournament scoped to this widget/canvas'}
+            onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); runResultsSync('pull'); }}
+          >{resultsSyncState === 'busy' ? '…' : '⬇ Pull'}</button>
+          <button
+            className="wgt-rm-tool-btn"
+            disabled={!effectiveTournamentId || resultsSyncState === 'busy'}
+            title={effectiveTournamentId ? "Push just this tournament's results to the cloud" : 'No tournament scoped to this widget/canvas'}
+            onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); runResultsSync('push'); }}
+          >{resultsSyncState === 'busy' ? '…' : '⬆ Push'}</button>
+        </div>
       </div>
       {shown.length === 0 ? (
         <div className="wgt-rm-empty">No saved results yet — use "💾 Save Result" on a scoreboard widget</div>

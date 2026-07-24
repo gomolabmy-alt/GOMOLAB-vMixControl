@@ -38,7 +38,7 @@ interface TournamentStore {
   defaultTournamentId: string;
 
   addTournament: (data: { name: string; sport: SportType }) => string;
-  updateTournament: (id: string, patch: Partial<Pick<Tournament, 'name' | 'sport' | 'groups' | 'pots' | 'categories' | 'venues' | 'venuePrefixes' | 'matchNumberPrefix' | 'drawVmix' | 'drawTeamMode' | 'groupListVmix' | 'cloudSyncEnabled' | 'eventId' | 'eventName' | 'eventShareKey'>>) => void;
+  updateTournament: (id: string, patch: Partial<Pick<Tournament, 'name' | 'sport' | 'groups' | 'pots' | 'categories' | 'venues' | 'venuePrefixes' | 'matchNumberPrefix' | 'drawVmix' | 'drawTeamMode' | 'groupListVmix' | 'cloudSyncEnabled' | 'eventId' | 'eventName' | 'eventShareKey' | 'externalRoster'>>) => void;
   deleteTournament: (id: string) => void;
 
   updateTournamentSettings: (id: string, patch: Partial<TournamentSettings>) => void;

@@ -44,6 +44,19 @@ function formatStrToMs(str: string, format: string): number {
 
 const PRESET_COLORS = ['#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c','#3498db','#9b59b6','#34495e','#ecf0f1','#ffffff'];
 const TRANS_KEYS = ['cut','fade','auto','t2','t3','t4','stinger1','stinger2','ftb'];
+// Shared by the 'player-h2h' and 'player-stats' config cases below — `cap`
+// is the config-field-name suffix (e.g. config.fieldTriesA), matching the
+// Player type's own field name capitalized, so it can't drift from what the
+// widgets themselves read.
+const PLAYER_STAT_FIELD_DEFS = [
+  { key: 'tries', cap: 'Tries', label: 'Tries' },
+  { key: 'conversions', cap: 'Conversions', label: 'Conversions' },
+  { key: 'penalties', cap: 'Penalties', label: 'Penalties' },
+  { key: 'dropGoals', cap: 'DropGoals', label: 'Drop Goals' },
+  { key: 'yellowCards', cap: 'YellowCards', label: 'Yellow Cards' },
+  { key: 'redCards', cap: 'RedCards', label: 'Red Cards' },
+  { key: 'appearances', cap: 'Appearances', label: 'Appearances' },
+] as const;
 const RUGBY_UNION_INCS = [
   { label: 'Try',  value: 5 },
   { label: 'Conv', value: 2 },
@@ -2624,6 +2637,169 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
           </div>
         </>
       );
+      }
+
+      case 'team-form': {
+        const linkedSb = cfg.linkedScoreboardId
+          ? pages.flatMap(p => p.widgets).find(w => w.id === cfg.linkedScoreboardId)
+          : null;
+        const teamAName = linkedSb?.config.teamAName ?? 'Team A';
+        const teamBName = linkedSb?.config.teamBName ?? 'Team B';
+        return (
+          <>
+            <Field label="Linked Scoreboard">
+              <select className="field-input" value={cfg.linkedScoreboardId ?? ''} onChange={e => up({ linkedScoreboardId: e.target.value })}>
+                <option value="">— select scoreboard —</option>
+                {pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard')).map(w => (
+                  <option key={w.id} value={w.id}>{w.config.teamAName ?? 'Team A'} vs {w.config.teamBName ?? 'Team B'}</option>
+                ))}
+              </select>
+            </Field>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+              Shows each team's recent results and upcoming fixtures, round by round — same data as the Scoreboard widget's own Head-to-Head panel.
+            </div>
+            <CollapsibleSection label={`vMix Output — ${teamAName}`}>
+              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
+                Each field gets every row for that section joined with " | ", sent whenever the data changes.
+              </p>
+              <Field label="Results Input">
+                {renderInputPicker('tf_ra_input', cfg.vmixResultsAInputKey ?? '', cfg.vmixResultsAInputTitle,
+                  (key, title) => up({ vmixResultsAInputKey: key, vmixResultsAInputTitle: title }), undefined, allInputs)}
+              </Field>
+              {cfg.vmixResultsAInputKey && (
+                <Field label="Results Field">
+                  {renderFieldPicker(cfg.vmixResultsAInputKey, cfg.vmixResultsAField ?? '', v => up({ vmixResultsAField: v }), 'ResultsA.Text', undefined, allInputs)}
+                </Field>
+              )}
+              <Field label="Upcoming Input">
+                {renderInputPicker('tf_ua_input', cfg.vmixUpcomingAInputKey ?? '', cfg.vmixUpcomingAInputTitle,
+                  (key, title) => up({ vmixUpcomingAInputKey: key, vmixUpcomingAInputTitle: title }), undefined, allInputs)}
+              </Field>
+              {cfg.vmixUpcomingAInputKey && (
+                <Field label="Upcoming Field">
+                  {renderFieldPicker(cfg.vmixUpcomingAInputKey, cfg.vmixUpcomingAField ?? '', v => up({ vmixUpcomingAField: v }), 'UpcomingA.Text', undefined, allInputs)}
+                </Field>
+              )}
+            </CollapsibleSection>
+            <CollapsibleSection label={`vMix Output — ${teamBName}`}>
+              <Field label="Results Input">
+                {renderInputPicker('tf_rb_input', cfg.vmixResultsBInputKey ?? '', cfg.vmixResultsBInputTitle,
+                  (key, title) => up({ vmixResultsBInputKey: key, vmixResultsBInputTitle: title }), undefined, allInputs)}
+              </Field>
+              {cfg.vmixResultsBInputKey && (
+                <Field label="Results Field">
+                  {renderFieldPicker(cfg.vmixResultsBInputKey, cfg.vmixResultsBField ?? '', v => up({ vmixResultsBField: v }), 'ResultsB.Text', undefined, allInputs)}
+                </Field>
+              )}
+              <Field label="Upcoming Input">
+                {renderInputPicker('tf_ub_input', cfg.vmixUpcomingBInputKey ?? '', cfg.vmixUpcomingBInputTitle,
+                  (key, title) => up({ vmixUpcomingBInputKey: key, vmixUpcomingBInputTitle: title }), undefined, allInputs)}
+              </Field>
+              {cfg.vmixUpcomingBInputKey && (
+                <Field label="Upcoming Field">
+                  {renderFieldPicker(cfg.vmixUpcomingBInputKey, cfg.vmixUpcomingBField ?? '', v => up({ vmixUpcomingBField: v }), 'UpcomingB.Text', undefined, allInputs)}
+                </Field>
+              )}
+            </CollapsibleSection>
+          </>
+        );
+      }
+
+      case 'player-h2h': {
+        const linkedSb = cfg.linkedScoreboardId
+          ? pages.flatMap(p => p.widgets).find(w => w.id === cfg.linkedScoreboardId)
+          : null;
+        const sbCfg = linkedSb?.config ?? {};
+        const teamAName = sbCfg.teamAName ?? 'Team A';
+        const teamBName = sbCfg.teamBName ?? 'Team B';
+        return (
+          <>
+            <Field label="Linked Scoreboard">
+              <select className="field-input" value={cfg.linkedScoreboardId ?? ''}
+                onChange={e => up({ linkedScoreboardId: e.target.value, playerAId: '', playerBId: '' })}>
+                <option value="">— select scoreboard —</option>
+                {pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard')).map(w => (
+                  <option key={w.id} value={w.id}>{w.config.teamAName ?? 'Team A'} vs {w.config.teamBName ?? 'Team B'}</option>
+                ))}
+              </select>
+            </Field>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+              Which two players are compared is picked on the widget itself, not here — that's a frequent live choice, not a one-time setup step.
+            </div>
+            <CollapsibleSection label="vMix Output">
+              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
+                One input, one field per data point per player — sent whenever either player's data changes.
+              </p>
+              <Field label="vMix Input">
+                {renderInputPicker('ph2h_input', cfg.vmixInputKey ?? '', cfg.vmixInputTitle,
+                  (key, title) => up({ vmixInputKey: key, vmixInputTitle: title }), undefined, allInputs)}
+              </Field>
+              {cfg.vmixInputKey && (
+                <>
+                  <div className="wgt-cfg-subheading">{teamAName}</div>
+                  <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldNameA ?? '', v => up({ fieldNameA: v }), 'NameA.Text', undefined, allInputs)}</Field>
+                  <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJerseyA ?? '', v => up({ fieldJerseyA: v }), 'JerseyA.Text', undefined, allInputs)}</Field>
+                  <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPositionA ?? '', v => up({ fieldPositionA: v }), 'PositionA.Text', undefined, allInputs)}</Field>
+                  {PLAYER_STAT_FIELD_DEFS.map(f => (
+                    <Field key={f.key} label={`${f.label} Field`}>
+                      {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}A`] ?? '', v => up({ [`field${f.cap}A`]: v }), `${f.cap}A.Text`, undefined, allInputs)}
+                    </Field>
+                  ))}
+                  <div className="wgt-cfg-subheading">{teamBName}</div>
+                  <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldNameB ?? '', v => up({ fieldNameB: v }), 'NameB.Text', undefined, allInputs)}</Field>
+                  <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJerseyB ?? '', v => up({ fieldJerseyB: v }), 'JerseyB.Text', undefined, allInputs)}</Field>
+                  <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPositionB ?? '', v => up({ fieldPositionB: v }), 'PositionB.Text', undefined, allInputs)}</Field>
+                  {PLAYER_STAT_FIELD_DEFS.map(f => (
+                    <Field key={f.key} label={`${f.label} Field`}>
+                      {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}B`] ?? '', v => up({ [`field${f.cap}B`]: v }), `${f.cap}B.Text`, undefined, allInputs)}
+                    </Field>
+                  ))}
+                </>
+              )}
+            </CollapsibleSection>
+          </>
+        );
+      }
+
+      case 'player-stats': {
+        return (
+          <>
+            <Field label="Linked Scoreboard">
+              <select className="field-input" value={cfg.linkedScoreboardId ?? ''}
+                onChange={e => up({ linkedScoreboardId: e.target.value, playerId: '' })}>
+                <option value="">— select scoreboard —</option>
+                {pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard')).map(w => (
+                  <option key={w.id} value={w.id}>{w.config.teamAName ?? 'Team A'} vs {w.config.teamBName ?? 'Team B'}</option>
+                ))}
+              </select>
+            </Field>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+              Team (Home/Away) and Player are picked on the widget itself, not here — that's a frequent live choice, not a one-time setup step.
+            </div>
+            <CollapsibleSection label="vMix Output">
+              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
+                One input, one field per data point — sent whenever the player's data changes.
+              </p>
+              <Field label="vMix Input">
+                {renderInputPicker('pstat_input', cfg.vmixInputKey ?? '', cfg.vmixInputTitle,
+                  (key, title) => up({ vmixInputKey: key, vmixInputTitle: title }), undefined, allInputs)}
+              </Field>
+              {cfg.vmixInputKey && (
+                <>
+                  <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? '', v => up({ fieldName: v }), 'Name.Text', undefined, allInputs)}</Field>
+                  <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? '', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
+                  <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? '', v => up({ fieldPosition: v }), 'Position.Text', undefined, allInputs)}</Field>
+                  <Field label="Team Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? '', v => up({ fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
+                  {PLAYER_STAT_FIELD_DEFS.map(f => (
+                    <Field key={f.key} label={`${f.label} Field`}>
+                      {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}`] ?? '', v => up({ [`field${f.cap}`]: v }), `${f.cap}.Text`, undefined, allInputs)}
+                    </Field>
+                  ))}
+                </>
+              )}
+            </CollapsibleSection>
+          </>
+        );
       }
 
       case 'input-tally': return (
