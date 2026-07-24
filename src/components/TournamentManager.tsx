@@ -26,7 +26,7 @@ import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchSched
 import { useMatchResultsStore, type SavedMatchResult } from '../stores/matchResultsStore';
 import { resolveImageUrl, transparentLogoUrl } from '../lib/imageUrl';
 import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, findDuplicateResult } from '../utils/scoreboardSnapshot';
-import { pushTournamentNow, computePushDiff, pushResultsOnly, pullResultsOnly, type PushDiffItem } from '../lib/cloudSync';
+import { pushTournamentNow, computePushDiff, pushResultsOnly, pullResultsOnly, localizeTournamentLogos, type PushDiffItem } from '../lib/cloudSync';
 import { computeMatchNumbers } from '../utils/matchNumber';
 
 // ── Import / Export helpers ───────────────────────────────────────────────────
@@ -4432,6 +4432,25 @@ export function TournamentManager({ onClose }: Props) {
   const [pushNowError, setPushNowError] = useState('');
   const [pushDiff, setPushDiff] = useState<PushDiffItem[] | null>(null);
   const [pushDiffTournamentId, setPushDiffTournamentId] = useState<string | null>(null);
+  // "Localize Logos" — downloads any cloud-hosted logo this tournament's
+  // teams/fixtures/results still point at back to this device's own local
+  // image server, for teams pinned to the cloud URL from before the push
+  // overwrite bug was fixed (see cloudSync.ts's localizeTournamentLogos).
+  const [localizeLogosState, setLocalizeLogosState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [localizeLogosMsg, setLocalizeLogosMsg] = useState('');
+  const handleLocalizeLogos = async (tournamentId: string) => {
+    setLocalizeLogosState('running');
+    const result = await localizeTournamentLogos(tournamentId);
+    if (result.ok) {
+      setLocalizeLogosState('done');
+      setLocalizeLogosMsg(result.count ? `Localized ${result.count} logo${result.count === 1 ? '' : 's'}` : 'Nothing to localize — already local');
+      setTimeout(() => setLocalizeLogosState('idle'), 2500);
+    } else {
+      setLocalizeLogosState('error');
+      setLocalizeLogosMsg(result.error ?? 'Failed');
+      setTimeout(() => setLocalizeLogosState('idle'), 3000);
+    }
+  };
 
   const doPush = async (tournamentId: string) => {
     setPushNowState('pushing');
@@ -5124,6 +5143,19 @@ export function TournamentManager({ onClose }: Props) {
                     : pushNowState === 'done' ? '✓ Pushed'
                     : pushNowState === 'error' ? '⚠ Push Failed'
                     : '⬆ Push Now'
+                  }</button>
+                  <button
+                    className="tm-btn"
+                    disabled={localizeLogosState === 'running'}
+                    title={localizeLogosState === 'error' || localizeLogosState === 'done'
+                      ? localizeLogosMsg
+                      : "Download any cloud-hosted team logo this tournament still points at back to this device, and switch back to using it locally — fixes logos left pointing at the cloud from before local URLs were no longer overwritten by a push"}
+                    onClick={() => handleLocalizeLogos(selected.id)}
+                  >{
+                    localizeLogosState === 'running' ? '⏳ Localizing…'
+                    : localizeLogosState === 'done' ? '✓ Done'
+                    : localizeLogosState === 'error' ? '⚠ Failed'
+                    : '⬇ Localize Logos'
                   }</button>
                   <EventPicker
                     defaultName={selected.name}

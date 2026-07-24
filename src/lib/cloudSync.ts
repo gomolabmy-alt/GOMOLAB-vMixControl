@@ -627,6 +627,74 @@ export async function pullResultsOnly(tournamentId: string): Promise<{ ok: boole
   }
 }
 
+const isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+/** Downloads any cloud-hosted logo (a URL under LOGO_URL_PREFIX) still
+ *  referenced by this tournament's teams/fixtures/results back down into
+ *  this device's own local image server, and repoints those records at the
+ *  new local copy — the actual fix for a team/fixture that was already
+ *  pinned to the cloud URL before the push-side overwrite bug was fixed (see
+ *  that fix's own commit): there's no way to recover the ORIGINAL local
+ *  file that was pushed, but the cloud has the exact same bytes under a
+ *  stable, content-addressed URL, so re-downloading and re-importing it
+ *  locally reaches the same end state. A manual, explicit action (like Push
+ *  Now/Pull Now) rather than something that runs silently on launch, since
+ *  it downloads and writes files rather than just reconciling in-memory
+ *  state. Same cloud URL is only ever downloaded once per call even if
+ *  referenced by many rows (team logo + every fixture/result using it). */
+export async function localizeTournamentLogos(tournamentId: string): Promise<{ ok: boolean; error?: string; count?: number }> {
+  if (!isTauriApp) return { ok: false, error: 'Only available in the desktop app' };
+
+  const resolved = new Map<string, string>();
+  async function localize(url: string | undefined): Promise<string | undefined> {
+    if (!url || !url.startsWith(LOGO_URL_PREFIX)) return undefined; // not a cloud ref — nothing to do
+    const already = resolved.get(url);
+    if (already) return already;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return undefined;
+      const mimeType = res.headers.get('content-type') || 'image/png';
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      const base64 = bytesToBase64(bytes);
+      const hash = url.slice(LOGO_URL_PREFIX.length);
+      const ext = mimeType.split('/')[1]?.split('+')[0] || 'png';
+      const { invoke } = await import('@tauri-apps/api/core');
+      const saved = await invoke<{ name: string; url: string }>('import_image', {
+        name: `logo_${hash.slice(0, 16)}.${ext}`, dataBase64: base64, tournamentId,
+      });
+      resolved.set(url, saved.url);
+      return saved.url;
+    } catch {
+      return undefined; // offline/unreachable this cycle — leave the cloud ref in place, harmless
+    }
+  }
+
+  try {
+    let count = 0;
+    for (const t of useTeamDbStore.getState().teams.filter(t => t.tournamentId === tournamentId)) {
+      const logo = await localize(t.logo);
+      if (logo) { useTeamDbStore.getState().updateTeam(t.id, { logo }); count++; }
+    }
+    for (const m of useMatchScheduleStore.getState().matches.filter(m => m.tournamentId === tournamentId)) {
+      const [teamALogo, teamBLogo] = await Promise.all([localize(m.teamALogo), localize(m.teamBLogo)]);
+      const patch: { teamALogo?: string; teamBLogo?: string } = {};
+      if (teamALogo) patch.teamALogo = teamALogo;
+      if (teamBLogo) patch.teamBLogo = teamBLogo;
+      if (Object.keys(patch).length > 0) { useMatchScheduleStore.getState().updateMatch(m.id, patch); count++; }
+    }
+    for (const r of useMatchResultsStore.getState().results.filter(r => r.tournamentId === tournamentId)) {
+      const [teamALogo, teamBLogo] = await Promise.all([localize(r.teamALogo), localize(r.teamBLogo)]);
+      const patch: { teamALogo?: string; teamBLogo?: string } = {};
+      if (teamALogo) patch.teamALogo = teamALogo;
+      if (teamBLogo) patch.teamBLogo = teamBLogo;
+      if (Object.keys(patch).length > 0) { useMatchResultsStore.getState().updateResult(r.id, patch); count++; }
+    }
+    return { ok: true, count };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export interface PushDiffItem {
   kind: 'match' | 'result';
   status: 'new' | 'updated' | 'removed';
