@@ -424,13 +424,25 @@ pub async fn fetch_public_json(url: String) -> Result<String, String> {
         return Err("URL must start with http:// or https://".into());
     }
     let curl_bin = if cfg!(target_os = "macos") { "/usr/bin/curl" } else { "curl" };
-    let out = tokio::process::Command::new(curl_bin)
-        .args([
-            "--silent", "--show-error",
-            "--max-time", "15", "--connect-timeout", "8",
-            "--location",
-            &url,
-        ])
+    let mut cmd = tokio::process::Command::new(curl_bin);
+    cmd.args([
+        "--silent", "--show-error",
+        "--max-time", "15", "--connect-timeout", "8",
+        "--location",
+        &url,
+    ]);
+    // Without this, Windows briefly flashes a console window for curl.exe
+    // every single call — glaringly obvious here since this runs on its own
+    // timer (roster auto-sync, see externalRoster.ts) every couple of
+    // minutes, not just on a one-off user action. Same fix already applied
+    // to spawn_sleep_blocker's powershell.exe call below for the same reason.
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
         .output()
         .await
         .map_err(|e| format!("curl spawn: {e}"))?;
@@ -920,8 +932,10 @@ pub fn get_local_ips() -> Vec<String> {
         // No POSIX getifaddrs on Windows — parse `ipconfig` output instead.
         // Matched by value shape (dotted-quad) rather than the "IPv4 Address"
         // label text, since that label is localized on non-English Windows.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
         let mut result = Vec::new();
-        if let Ok(output) = std::process::Command::new("ipconfig").output() {
+        if let Ok(output) = std::process::Command::new("ipconfig").creation_flags(CREATE_NO_WINDOW).output() {
             let text = String::from_utf8_lossy(&output.stdout);
             for line in text.lines() {
                 let Some(colon) = line.find(':') else { continue };

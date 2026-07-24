@@ -446,17 +446,29 @@ async function pushAll() {
     ) {
       return;
     }
+    const bodyStr = JSON.stringify(payload);
     const res = await fetch(`${API_BASE}/api/desktop/scoring/push`, {
       method: 'POST',
       headers,
-      body: JSON.stringify(payload),
+      body: bodyStr,
     });
     if (res.ok) {
       clearPushedDeletions(payload);
       recordPushed(payload);
       useCloudSyncStatus.getState().setLastError(null);
     } else {
-      useCloudSyncStatus.getState().setLastError(`Push failed (${res.status})`);
+      // The server's own error text (e.g. "Invalid JSON body") is far more
+      // useful than the bare status code alone — pushTournamentNow already
+      // surfaces it, this background path silently discarded it before.
+      // Payload size is included too since a request this large failing to
+      // parse server-side usually means it was truncated hitting some size
+      // limit upstream (hosting platforms commonly cap serverless function
+      // request bodies in the low single-digit MB), not a malformed value.
+      const serverMsg = await res.json().catch(() => null);
+      const sizeMb = (bodyStr.length / 1024 / 1024).toFixed(2);
+      useCloudSyncStatus.getState().setLastError(
+        `Push failed (${res.status})${serverMsg?.error ? `: ${serverMsg.error}` : ''} — payload ${sizeMb}MB`
+      );
     }
   } catch {
     // Offline/network failure — no watermark to roll back, the next
