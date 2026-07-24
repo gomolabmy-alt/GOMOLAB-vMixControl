@@ -449,7 +449,7 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       teamSide: 'A',
       playerId: '',
       vmixInputKey: '', vmixInputTitle: '',
-      fieldName: '', fieldJersey: '', fieldPosition: '', fieldTeam: '',
+      fieldName: '', fieldJersey: '', fieldPosition: '', fieldTeam: '', fieldTeamLogo: '',
       fieldTries: '', fieldConversions: '', fieldPenalties: '', fieldDropGoals: '', fieldYellowCards: '', fieldRedCards: '', fieldAppearances: '',
     },
   },

@@ -2790,6 +2790,9 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? '', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
                   <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? '', v => up({ fieldPosition: v }), 'Position.Text', undefined, allInputs)}</Field>
                   <Field label="Team Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? '', v => up({ fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
+                  <Field label="Team Logo Field">
+                    {renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeamLogo ?? '', v => up({ fieldTeamLogo: v }), 'TeamLogo.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}
+                  </Field>
                   {PLAYER_STAT_FIELD_DEFS.map(f => (
                     <Field key={f.key} label={`${f.label} Field`}>
                       {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}`] ?? '', v => up({ [`field${f.cap}`]: v }), `${f.cap}.Text`, undefined, allInputs)}

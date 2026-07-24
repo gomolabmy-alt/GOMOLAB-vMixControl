@@ -64,10 +64,14 @@ export function PlayerStatsWidget({ widgetId, config }: Props) {
     set(config.fieldJersey, player.jerseyNo);
     set(config.fieldPosition, player.position);
     set(config.fieldTeam, teamName);
+    // Raw stored URL, not resolveImageUrl(teamLogo) — that substitution is
+    // only for this app's own webview to reach the local image server;
+    // vMix fetches the image itself and needs the real LAN-reachable address.
+    if (config.fieldTeamLogo && teamLogo) c.setImageField(key, config.fieldTeamLogo, teamLogo);
     for (const f of STAT_FIELDS) set(config[`field${f.key.charAt(0).toUpperCase()}${f.key.slice(1)}`], player[f.key]);
   };
 
-  const dataKey = player ? [player.id, teamName, ...STAT_FIELDS.map(f => player[f.key])].join(',') : '';
+  const dataKey = player ? [player.id, teamName, teamLogo, ...STAT_FIELDS.map(f => player[f.key])].join(',') : '';
   const prevKeyRef = useRef('');
   useEffect(() => {
     if (!player || !config.vmixInputKey) return;
