@@ -271,27 +271,35 @@ async function buildPushPayload(tournaments: Tournament[], incremental: boolean)
     Promise.all(allTeams.map(tm => withTeamLogoRef(tm, pendingLogos))),
   ]);
 
-  // A local record still carrying a raw localhost URL, or an old embedded
-  // data: URI (from before this hash-based scheme existed, or pulled from a
-  // venue still on an older build), now resolves to a short reference URL
-  // above — write that back locally too, so local storage actually shrinks
-  // back down over successive pushes instead of only ever growing every time
-  // a pull re-embeds a full image.
+  // An old embedded data: URI (from before this hash-based scheme existed,
+  // or pulled from a venue still on an older build) genuinely bloats local
+  // storage, so THAT case is worth resolving down to a short reference and
+  // writing back locally. An already-compact local server URL
+  // (http://<lan-ip>:PORT/images/...) gets no such benefit — it's already
+  // short — so it's deliberately left alone here: overwriting it with the
+  // cloud reference would force this device to fetch its own team's logo
+  // back over the internet (e.g. every time it's sent to vMix) instead of
+  // over the LAN, for zero local storage gain. The push payload above still
+  // always uses the resolved cloud reference regardless, since the cloud/
+  // website can only ever reach a publicly-resolvable URL, never this
+  // device's own LAN address.
   allMatches.forEach((m, i) => {
     const { teamALogo, teamBLogo } = matchesData[i];
-    if (teamALogo !== m.teamALogo || teamBLogo !== m.teamBLogo) {
-      useMatchScheduleStore.getState().updateMatch(m.id, { teamALogo, teamBLogo });
-    }
+    const patch: { teamALogo?: string; teamBLogo?: string } = {};
+    if (m.teamALogo?.startsWith('data:') && teamALogo !== m.teamALogo) patch.teamALogo = teamALogo;
+    if (m.teamBLogo?.startsWith('data:') && teamBLogo !== m.teamBLogo) patch.teamBLogo = teamBLogo;
+    if (Object.keys(patch).length > 0) useMatchScheduleStore.getState().updateMatch(m.id, patch);
   });
   allTeams.forEach((tm, i) => {
     const { logo } = teamsData[i];
-    if (logo !== tm.logo) useTeamDbStore.getState().updateTeam(tm.id, { logo });
+    if (tm.logo?.startsWith('data:') && logo !== tm.logo) useTeamDbStore.getState().updateTeam(tm.id, { logo });
   });
   allResults.forEach((r, i) => {
     const { teamALogo, teamBLogo } = resultsData[i];
-    if (teamALogo !== r.teamALogo || teamBLogo !== r.teamBLogo) {
-      useMatchResultsStore.getState().updateResult(r.id, { teamALogo, teamBLogo });
-    }
+    const patch: { teamALogo?: string; teamBLogo?: string } = {};
+    if (r.teamALogo?.startsWith('data:') && teamALogo !== r.teamALogo) patch.teamALogo = teamALogo;
+    if (r.teamBLogo?.startsWith('data:') && teamBLogo !== r.teamBLogo) patch.teamBLogo = teamBLogo;
+    if (Object.keys(patch).length > 0) useMatchResultsStore.getState().updateResult(r.id, patch);
   });
 
   // Fixtures/results deleted locally since the last push — sent with every
@@ -549,11 +557,15 @@ export async function pushResultsOnly(tournamentId: string): Promise<{ ok: boole
       ...(await withLogoRefs(r, pendingLogos)),
       matchNumber: r.sourceScheduleId ? matchNumbers.get(r.sourceScheduleId) : undefined,
     })));
+    // See buildPushPayload's identical guard — only a genuinely bloated
+    // data: URI is worth resolving down locally; an already-compact local
+    // server URL is left alone so this device keeps using its own LAN path.
     allResults.forEach((r, i) => {
       const { teamALogo, teamBLogo } = resultsData[i];
-      if (teamALogo !== r.teamALogo || teamBLogo !== r.teamBLogo) {
-        useMatchResultsStore.getState().updateResult(r.id, { teamALogo, teamBLogo });
-      }
+      const patch: { teamALogo?: string; teamBLogo?: string } = {};
+      if (r.teamALogo?.startsWith('data:') && teamALogo !== r.teamALogo) patch.teamALogo = teamALogo;
+      if (r.teamBLogo?.startsWith('data:') && teamBLogo !== r.teamBLogo) patch.teamBLogo = teamBLogo;
+      if (Object.keys(patch).length > 0) useMatchResultsStore.getState().updateResult(r.id, patch);
     });
 
     const venueLabel = useAppSettings.getState().canvasVenue || undefined;
