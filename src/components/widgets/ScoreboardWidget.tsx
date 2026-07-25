@@ -315,10 +315,15 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
       if (t.fieldCompetition && config.competition != null) c.setTextField(t.inputKey, t.fieldCompetition, config.competition);
       if (t.fieldCategory && config.category != null) c.setTextField(t.inputKey, t.fieldCategory, config.category);
       if (t.fieldGroup && config.group != null) c.setTextField(t.inputKey, t.fieldGroup, config.group);
+      // subtitle already reads "<Round> <Tier>" (e.g. "Semifinal 1 Cup") for a
+      // tiered-knockout fixture — see the schedule generator's own round
+      // labeling — so this one field is the tier+round merge, no separate
+      // tier field/concatenation needed here.
+      if (t.fieldRound && config.subtitle != null) c.setTextField(t.inputKey, t.fieldRound, config.subtitle);
       if (t.fieldScheduledTime && config.scheduledTime != null) c.setTextField(t.inputKey, t.fieldScheduledTime, config.scheduledTime);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.competition, config.category, config.group, config.scheduledTime, vmixSyncVersion]);
+  }, [config.competition, config.category, config.group, config.subtitle, config.scheduledTime, vmixSyncVersion]);
 
   useEffect(() => {
     if (isLinked) return;

@@ -1140,17 +1140,17 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
           {/* ── Multiple vMix Title Inputs ── */}
           {(() => {
-            type SbInput = { id: string; inputKey: string; inputTitle?: string; fieldScoreA: string; fieldScoreB: string; fieldTeamA: string; fieldTeamB: string; fieldShortA: string; fieldShortB: string; fieldTextA: string; fieldTextB: string; fieldLogoA: string; fieldLogoB: string; fieldCompetition: string; fieldCategory: string; fieldGroup: string; fieldScheduledTime: string };
+            type SbInput = { id: string; inputKey: string; inputTitle?: string; fieldScoreA: string; fieldScoreB: string; fieldTeamA: string; fieldTeamB: string; fieldShortA: string; fieldShortB: string; fieldTextA: string; fieldTextB: string; fieldLogoA: string; fieldLogoB: string; fieldCompetition: string; fieldCategory: string; fieldGroup: string; fieldRound: string; fieldScheduledTime: string };
             // Migrate legacy single-input config on first open
             const sbInputs: SbInput[] = cfg.vmixInputs?.length
               ? cfg.vmixInputs
               : cfg.vmixInputKey
-                ? [{ id: 'legacy', inputKey: cfg.vmixInputKey, inputTitle: cfg.vmixInputTitle, fieldScoreA: cfg.fieldScoreA ?? 'ScoreA.Text', fieldScoreB: cfg.fieldScoreB ?? 'ScoreB.Text', fieldTeamA: cfg.fieldTeamA ?? 'TeamA.Text', fieldTeamB: cfg.fieldTeamB ?? 'TeamB.Text', fieldShortA: cfg.fieldShortA ?? '', fieldShortB: cfg.fieldShortB ?? '', fieldTextA: cfg.fieldTextA ?? '', fieldTextB: cfg.fieldTextB ?? '', fieldLogoA: cfg.fieldLogoA ?? '', fieldLogoB: cfg.fieldLogoB ?? '', fieldCompetition: cfg.fieldCompetition ?? '', fieldCategory: cfg.fieldCategory ?? '', fieldGroup: cfg.fieldGroup ?? '', fieldScheduledTime: cfg.fieldScheduledTime ?? '' }]
+                ? [{ id: 'legacy', inputKey: cfg.vmixInputKey, inputTitle: cfg.vmixInputTitle, fieldScoreA: cfg.fieldScoreA ?? 'ScoreA.Text', fieldScoreB: cfg.fieldScoreB ?? 'ScoreB.Text', fieldTeamA: cfg.fieldTeamA ?? 'TeamA.Text', fieldTeamB: cfg.fieldTeamB ?? 'TeamB.Text', fieldShortA: cfg.fieldShortA ?? '', fieldShortB: cfg.fieldShortB ?? '', fieldTextA: cfg.fieldTextA ?? '', fieldTextB: cfg.fieldTextB ?? '', fieldLogoA: cfg.fieldLogoA ?? '', fieldLogoB: cfg.fieldLogoB ?? '', fieldCompetition: cfg.fieldCompetition ?? '', fieldCategory: cfg.fieldCategory ?? '', fieldGroup: cfg.fieldGroup ?? '', fieldRound: cfg.fieldRound ?? '', fieldScheduledTime: cfg.fieldScheduledTime ?? '' }]
                 : [];
             const setSbInputs = (next: SbInput[]) => up({ vmixInputs: next });
             const updateSb = (idx: number, patch: Partial<SbInput>) =>
               setSbInputs(sbInputs.map((s, i) => i === idx ? { ...s, ...patch } : s));
-            const addSbInput = () => setSbInputs([...sbInputs, { id: crypto.randomUUID(), inputKey: '', fieldScoreA: 'ScoreA.Text', fieldScoreB: 'ScoreB.Text', fieldTeamA: 'TeamA.Text', fieldTeamB: 'TeamB.Text', fieldShortA: '', fieldShortB: '', fieldTextA: '', fieldTextB: '', fieldLogoA: '', fieldLogoB: '', fieldCompetition: '', fieldCategory: '', fieldGroup: '', fieldScheduledTime: '' }]);
+            const addSbInput = () => setSbInputs([...sbInputs, { id: crypto.randomUUID(), inputKey: '', fieldScoreA: 'ScoreA.Text', fieldScoreB: 'ScoreB.Text', fieldTeamA: 'TeamA.Text', fieldTeamB: 'TeamB.Text', fieldShortA: '', fieldShortB: '', fieldTextA: '', fieldTextB: '', fieldLogoA: '', fieldLogoB: '', fieldCompetition: '', fieldCategory: '', fieldGroup: '', fieldRound: '', fieldScheduledTime: '' }]);
 
             return (
               <>
@@ -1186,6 +1186,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                             <Field label="Competition Field">{renderFieldPicker(inp.inputKey, inp.fieldCompetition ?? '', v => updateSb(idx, { fieldCompetition: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Category Field">{renderFieldPicker(inp.inputKey, inp.fieldCategory ?? '', v => updateSb(idx, { fieldCategory: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Group Field">{renderFieldPicker(inp.inputKey, inp.fieldGroup ?? '', v => updateSb(idx, { fieldGroup: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Round Field (Tier + Round, e.g. &quot;Semifinal 1 Cup&quot;)">{renderFieldPicker(inp.inputKey, inp.fieldRound ?? '', v => updateSb(idx, { fieldRound: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Scheduled Time Field">{renderFieldPicker(inp.inputKey, inp.fieldScheduledTime ?? '', v => updateSb(idx, { fieldScheduledTime: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Logo A Field">{renderFieldPicker(inp.inputKey, inp.fieldLogoA ?? '', v => {
                               updateSb(idx, { fieldLogoA: v });
