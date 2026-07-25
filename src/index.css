@@ -1240,6 +1240,35 @@ button { user-select: none; -webkit-user-select: none; }
 .field-input:focus { outline: none; border-color: var(--accent); }
 .field-input::placeholder { color: var(--text-muted); }
 .field-input--short { max-width: 120px; }
+
+.hotkey-recorder { display: flex; align-items: center; gap: 6px; }
+.hotkey-recorder-btn {
+  flex: 1;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: border-color var(--transition);
+}
+.hotkey-recorder-btn:hover { border-color: var(--text-secondary); }
+.hotkey-recorder-btn--listening { border-color: var(--accent); color: var(--accent); animation: hotkey-pulse 1s ease-in-out infinite; }
+@keyframes hotkey-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+.hotkey-recorder-clear {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.hotkey-recorder-clear:hover { color: #e74c3c; }
+.hotkey-recorder-warning { font-size: 11px; color: #f39c12; white-space: nowrap; }
 .wcp-btn-icon {
   flex-shrink: 0;
   width: 22px; height: 22px;
@@ -3058,6 +3087,20 @@ button { user-select: none; -webkit-user-select: none; }
 .wgt-btn-tally-badge--pgm { background: #e74c3c; color: #fff; }
 .wgt-btn-tally-badge--prv { background: #2ecc71; color: #000; }
 .wgt-btn-tally-badge--ovl { background: #f39c12; color: #000; }
+.wgt-btn-hotkey-badge {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  padding: 1px 3px;
+  border-radius: 2px;
+  line-height: 1;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+}
 .wgt-btn--on {
   background: var(--bc, #3498db) !important;
   color: #fff !important;
@@ -13094,6 +13137,15 @@ input.tm-pl-cell--stat {
   color: var(--text-muted); background: var(--bg-3); border: 1px solid var(--border-light);
   border-radius: 999px; padding: 1px 7px;
 }
+/* Match ID badge — same look (rounded pill, accent-tinted, bold) as the
+   matchNumber pill on the public scoring page, so an operator recognizes it
+   as the same identifier without needing to cross-reference the website. */
+.wgt-match-id {
+  font-size: 9px; font-weight: 800; letter-spacing: 0.04em; flex-shrink: 0;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 999px; padding: 1px 7px;
+}
 .wgt-rm-placeholder { opacity: 0.5; }
 .wgt-rm-team {
   display: flex;
@@ -13304,6 +13356,7 @@ input.tm-pl-cell--stat {
   font-weight: 600;
   letter-spacing: 0.03em;
 }
+.wgt-ms-date-group { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .wgt-ms-comp { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wgt-ms-row-matchup {
   display: flex;

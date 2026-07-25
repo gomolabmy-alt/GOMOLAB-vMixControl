@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useVmixStore } from '../../stores/vmixStore';
-import { useCanvasStore } from '../../stores/canvasStore';
+import { isAppFn, deriveToggleOn, runButtonPress, runButtonRelease, type ActionItem } from '../../lib/buttonActions';
+import { hotkeyLabel } from '../../lib/hotkeyFormat';
 
 interface Props {
   config: Record<string, any>;
@@ -8,10 +9,9 @@ interface Props {
   h: number;
 }
 
-type ActionItem = { fn: string; params: Record<string, string> };
-type SideButton = { id: string; label: string; color?: string; textColor?: string; fontSize?: number; mode?: string; actions: ActionItem[]; releaseActions?: ActionItem[] };
+type SideButton = { id: string; label: string; color?: string; textColor?: string; fontSize?: number; mode?: string; actions: ActionItem[]; releaseActions?: ActionItem[]; hotkey?: string };
 
-function isApp(fn: string) { return fn?.startsWith('App.'); }
+const isApp = isAppFn;
 
 function getActions(
   actions: ActionItem[] | undefined,
@@ -74,42 +74,9 @@ function firstInputKey(actions: ActionItem[]): string | undefined {
   return actions.find(a => a.params?.Input)?.params?.Input;
 }
 
-// Derives a toggle button's on/off state from live vMix state rather than
-// local click tracking, so it reflects reality even when the state changed
-// via another control surface, vMix itself, or a command that silently failed.
-function deriveToggleOn(actions: ActionItem[], vmixState: any): boolean {
-  if (!vmixState) return false;
-  for (const a of actions) {
-    const fn = a.fn;
-    if (!fn) continue;
-    const ovlMatch = fn.match(/^OverlayInput(\d)(In|Out|Off|Toggle)?$/);
-    if (ovlMatch) {
-      const ch = parseInt(ovlMatch[1], 10);
-      const overlay = vmixState.overlays?.find((o: any) => o.number === ch);
-      if (overlay) return !!(overlay.key && overlay.key !== '');
-    }
-    switch (fn) {
-      case 'StartRecording': case 'StopRecording': case 'RecordingToggle':
-        return !!vmixState.recording;
-      case 'StartStreaming': case 'StopStreaming': case 'StreamingToggle':
-        return !!vmixState.streaming;
-      case 'StartExternal': case 'StopExternal': case 'ExternalToggle':
-        return !!vmixState.external;
-      case 'StartFullScreen': case 'StopFullScreen': case 'FullScreenToggle':
-        return !!vmixState.fullscreen;
-      case 'FadeToBlack':
-        return !!vmixState.fadeToBlack;
-      case 'StartMultiCorder': case 'StopMultiCorder': case 'MultiCorderToggle':
-        return !!vmixState.multiCorder;
-    }
-  }
-  return false;
-}
-
 export function ButtonWidget({ config }: Props) {
-  const { getClient, vmixState } = useVmixStore();
+  const { vmixState } = useVmixStore();
   const connVmixState = vmixState;
-  const { executeAppFunction } = useCanvasStore();
   const [firing, setFiring] = useState(false);
   const [sideFiring, setSideFiring] = useState<Record<string, boolean>>({});
 
@@ -117,55 +84,29 @@ export function ButtonWidget({ config }: Props) {
   const releaseActions = getActions(config.releaseActions, config.releaseFunction, config.releaseParams);
   const sideButtons: SideButton[] = config.sideButtons ?? [];
 
-  const dispatch = async (fn: string, params: Record<string, string>) => {
-    if (!fn) return;
-    if (isApp(fn)) executeAppFunction(fn, params);
-    else await getClient()?.sendFunction(fn, params);
-  };
-
-  const runActions = async (actions: ActionItem[]) => {
-    for (const action of actions) {
-      await dispatch(action.fn, action.params);
-    }
-  };
-
   const handleDown = async () => {
-    if (config.mode === 'toggle') {
-      const currentlyOn = deriveToggleOn([...pressActions, ...releaseActions], connVmixState);
-      if (!currentlyOn) await runActions(pressActions);
-      else await runActions(releaseActions);
-    } else {
-      setFiring(true);
-      await runActions(pressActions);
-    }
+    if (config.mode !== 'toggle') setFiring(true);
+    await runButtonPress({ mode: config.mode, actions: pressActions, releaseActions });
   };
 
   const handleUp = async () => {
     if (config.mode !== 'toggle') {
       setFiring(false);
-      await runActions(releaseActions);
+      await runButtonRelease({ mode: config.mode, actions: pressActions, releaseActions });
     }
   };
 
   const handleCancel = () => { setFiring(false); };
 
   const handleSbDown = async (sb: SideButton) => {
-    const sbPress = sb.actions ?? [];
-    const sbRelease = sb.releaseActions ?? [];
-    if (sb.mode === 'toggle') {
-      const currentlyOn = deriveToggleOn([...sbPress, ...sbRelease], connVmixState);
-      if (!currentlyOn) await runActions(sbPress);
-      else await runActions(sbRelease);
-    } else {
-      setSideFiring(p => ({ ...p, [sb.id]: true }));
-      await runActions(sbPress);
-    }
+    if (sb.mode !== 'toggle') setSideFiring(p => ({ ...p, [sb.id]: true }));
+    await runButtonPress(sb);
   };
 
   const handleSbUp = async (sb: SideButton) => {
     if (sb.mode !== 'toggle') {
       setSideFiring(p => ({ ...p, [sb.id]: false }));
-      await runActions(sb.releaseActions ?? []);
+      await runButtonRelease(sb);
     }
   };
 
@@ -196,6 +137,7 @@ export function ButtonWidget({ config }: Props) {
     >
       {config.mode === 'toggle' && <span className="wgt-btn-dot" />}
       {config.label ?? 'Button'}
+      {config.hotkey && <span className="wgt-btn-hotkey-badge" title={`Hotkey: ${hotkeyLabel(config.hotkey)}`}>{hotkeyLabel(config.hotkey)}</span>}
       {mainTally && <span className={`wgt-btn-tally-badge wgt-btn-tally-badge--${mainTally === 'wgt-btn--pgm' ? 'pgm' : mainTally === 'wgt-btn--ovl' ? 'ovl' : 'prv'}`}>
         {mainTally === 'wgt-btn--pgm' ? 'PGM' : mainTally === 'wgt-btn--ovl' ? 'OVL' : 'PRV'}
       </span>}
@@ -229,6 +171,7 @@ export function ButtonWidget({ config }: Props) {
           >
             {sb.mode === 'toggle' && <span className="wgt-btn-dot" />}
             {sb.label || '—'}
+            {sb.hotkey && <span className="wgt-btn-hotkey-badge" title={`Hotkey: ${hotkeyLabel(sb.hotkey)}`}>{hotkeyLabel(sb.hotkey)}</span>}
             {sbTally && <span className={`wgt-btn-tally-badge wgt-btn-tally-badge--${sbTally === 'wgt-btn--pgm' ? 'pgm' : sbTally === 'wgt-btn--ovl' ? 'ovl' : 'prv'}`}>
               {sbTally === 'wgt-btn--pgm' ? 'PGM' : sbTally === 'wgt-btn--ovl' ? 'OVL' : 'PRV'}
             </span>}

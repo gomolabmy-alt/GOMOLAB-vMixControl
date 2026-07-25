@@ -3,6 +3,7 @@ import { useMatchResultsStore, type SavedMatchResult } from '../../stores/matchR
 import { useCanvasStore } from '../../stores/canvasStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
 import { pushResultsOnly, pullResultsOnly } from '../../lib/cloudSync';
+import { useMatchNumbers } from '../../utils/matchNumber';
 
 interface Props {
   widgetId: string;
@@ -81,6 +82,7 @@ export function RecentMatchesWidget({ widgetId, config }: Props) {
   );
 
   const shown = useMemo(() => results.slice(0, maxResults), [results, maxResults]);
+  const matchNumbers = useMatchNumbers();
 
   const groups: Group[] = useMemo(() => {
     if (!groupByCompetition) return [{ key: '__all__', competition: '', items: shown }];
@@ -190,6 +192,9 @@ export function RecentMatchesWidget({ widgetId, config }: Props) {
                     >×</button>
                   </div>
                   <div className="wgt-rm-round-row">
+                    {r.sourceScheduleId && matchNumbers.get(r.sourceScheduleId) && (
+                      <span className="wgt-match-id" title="Match ID — same as shown on the public scoring page">{matchNumbers.get(r.sourceScheduleId)}</span>
+                    )}
                     {r.matchType && <span className="wgt-rm-type-badge">{r.matchType === 'bye' ? 'BYE' : 'W/O'}</span>}
                     {r.shootout && <span className="wgt-rm-type-badge">{r.shootout.scoreA}-{r.shootout.scoreB} PENS</span>}
                     <EditableSpan

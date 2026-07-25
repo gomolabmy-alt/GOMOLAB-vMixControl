@@ -2685,18 +2685,27 @@ export function computeStandings(teams: SavedTeam[], results: SavedMatchResult[]
   for (const t of seeded) {
     rows.set(t.id, { teamId: t.id, name: t.name, shortName: t.shortName, logo: t.logo, color: t.color, played: 0, won: 0, drawn: 0, lost: 0, pf: 0, pa: 0, pts: 0 });
   }
-  const findRow = (name: string, shortName?: string) => {
+  // Matched by name AND category — `results` passed in is only ever filtered
+  // by tournament (see StandingsPanel/StandingsWidget), never by category, so
+  // without the category check a result from a completely different
+  // category's match gets attributed here purely because a team of the same
+  // name (e.g. a state fielding both "Boys" and "Girls" squads, both named
+  // "PERAK") happens to also sit in this pool — inflating played/won/pf
+  // counts with matches this pool's team never actually played.
+  const findRow = (name: string, shortName: string | undefined, category: string | undefined) => {
     const key = name.trim().toLowerCase();
     const shortKey = (shortName ?? '').trim().toLowerCase();
+    const catKey = (category ?? '').trim().toLowerCase();
     const t = teams.find(t2 =>
-      t2.name.trim().toLowerCase() === key || (!!shortKey && (t2.shortName ?? '').trim().toLowerCase() === shortKey)
+      (t2.category ?? '').trim().toLowerCase() === catKey &&
+      (t2.name.trim().toLowerCase() === key || (!!shortKey && (t2.shortName ?? '').trim().toLowerCase() === shortKey))
     );
     return t ? rows.get(t.id) : undefined;
   };
   for (const r of results) {
     if (r.matchType === 'bye') continue; // nothing was actually played
-    const rowA = findRow(r.teamAName, r.teamAShortName);
-    const rowB = findRow(r.teamBName, r.teamBShortName);
+    const rowA = findRow(r.teamAName, r.teamAShortName, r.category);
+    const rowB = findRow(r.teamBName, r.teamBShortName, r.category);
     if (!rowA || !rowB) continue; // team isn't part of this group/tournament
     rowA.played++; rowB.played++;
     rowA.pf += r.scoreA; rowA.pa += r.scoreB;

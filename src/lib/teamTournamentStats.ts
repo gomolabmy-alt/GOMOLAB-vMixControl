@@ -16,7 +16,12 @@ const norm = (s?: string) => (s ?? '').trim().toLowerCase();
  */
 export function computeTeamTournamentStats(
   results: SavedMatchResult[],
-  team: { name: string; shortName?: string },
+  /** `category` disambiguates teams that share a name across categories in
+   *  the same tournament (e.g. a state fielding both a "Boys" and "Girls"
+   *  squad both named "PERAK") — without it, the other category's matches
+   *  for a same-named team get wrongly folded into this one's form/played
+   *  count. Omit only for tournaments with no categories at all. */
+  team: { name: string; shortName?: string; category?: string },
   tournamentId: string | undefined,
   /** Schedule fixture ids that are NOT yet marked completed — a saved result
    *  can exist for one of these (e.g. an in-progress "Save Result" click, or
@@ -29,12 +34,14 @@ export function computeTeamTournamentStats(
   };
   const nameKey = norm(team.name);
   const shortKey = norm(team.shortName);
+  const categoryKey = norm(team.category);
   if (!nameKey) return stats;
 
   for (const r of results) {
     if (r.matchType === 'bye') continue; // nothing was actually played
     if (r.sourceScheduleId && incompleteScheduleIds?.has(r.sourceScheduleId)) continue; // match is still running
     if (tournamentId && r.tournamentId && r.tournamentId !== tournamentId) continue;
+    if (norm(r.category) !== categoryKey) continue;
     const aMatch = norm(r.teamAName) === nameKey || (!!shortKey && norm(r.teamAShortName) === shortKey);
     const bMatch = norm(r.teamBName) === nameKey || (!!shortKey && norm(r.teamBShortName) === shortKey);
     if (!aMatch && !bMatch) continue;

@@ -12,6 +12,10 @@ import { INPUT_TYPE_LABELS } from '../types/vmix';
 import type { VmixInput } from '../types/vmix';
 import { LogoUrlPicker } from './LogoUrlPicker';
 import { resolveImageUrl } from '../lib/imageUrl';
+import { ActionListEditor } from './ActionListEditor';
+import type { ActionItem } from '../lib/buttonActions';
+import { HotkeyRecorder } from './HotkeyRecorder';
+import { collectHotkeyBindings } from '../lib/hotkeyBindings';
 
 // Label for a player-list widget in a picker dropdown — shows the linked
 // saved team's name (teamDbStore), falling back to a short widget id.
@@ -71,7 +75,7 @@ const RUGBY_LEAGUE_INCS = [
   { label: 'Drop', value: 1 },
 ];
 
-const VMIX_FUNCTIONS: { group: string; fns: { fn: string; label: string; p: string[] }[] }[] = [
+export const VMIX_FUNCTIONS: { group: string; fns: { fn: string; label: string; p: string[] }[] }[] = [
   { group: 'Transitions', fns: [
     { fn: 'Cut',                    label: 'Cut',                    p: ['Input'] },
     { fn: 'Fade',                   label: 'Fade',                   p: ['Input'] },
@@ -273,7 +277,7 @@ const VMIX_FUNCTIONS: { group: string; fns: { fn: string; label: string; p: stri
   ]},
 ];
 
-const VMIX_ALL_FNS = VMIX_FUNCTIONS.flatMap(g => g.fns);
+export const VMIX_ALL_FNS = VMIX_FUNCTIONS.flatMap(g => g.fns);
 
 const SCORE_STYLES = [
   { value: 'basic',         label: 'Basic',              increments: [1,2,5,10] },
@@ -371,7 +375,7 @@ export function InputPickerDropdown({ currentKey, currentTitle, allInputs, onSel
   );
 }
 
-function FieldPickerDropdown({ inputKey, value, onChange, placeholder = 'Field.Text', fieldFilter, allInputs }: {
+function FieldPickerDropdown({ inputKey, value, onChange, placeholder = 'Title.Text', fieldFilter, allInputs }: {
   inputKey: string;
   value: string;
   onChange: (v: string) => void;
@@ -487,7 +491,7 @@ function CollapsibleSection({ label, children, defaultOpen = true }: { label: st
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+export function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="field-row">
       <label className="field-label">{label}</label>
@@ -540,6 +544,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
     setFinalPlayDurationText(msToFormatStr(cfg.finalPlayDurationMs ?? 0, cfg.format ?? 'mm:ss'));
   }, [cfg.finalPlayDurationMs, cfg.format]);
   const allInputs = vmixState?.inputs ?? [];
+  const allHotkeyBindings = collectHotkeyBindings(pages);
 
   const [vtCollapsed, setVTCollapsed] = useState<Record<string, boolean>>({});
   const [tfCollapsed, setTFCollapsed] = useState<Record<number, boolean>>({});
@@ -615,7 +620,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
     </Field>
   );
 
-  const renderFieldPicker = (inputKey: string, value: string, onChange: (v: string) => void, placeholder = 'Field.Text', fieldFilter?: (name: string) => boolean, inputs?: typeof allInputs) => (
+  const renderFieldPicker = (inputKey: string, value: string, onChange: (v: string) => void, placeholder = 'Title.Text', fieldFilter?: (name: string) => boolean, inputs?: typeof allInputs) => (
     <FieldPickerDropdown inputKey={inputKey} value={value} onChange={onChange} placeholder={placeholder} fieldFilter={fieldFilter} allInputs={inputs ?? allInputs} />
   );
 
@@ -623,8 +628,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
     switch (widget.type) {
 
       case 'button': {
-        type ActionItem = { fn: string; params: Record<string, string> };
-        type SideButton = { id: string; label: string; color?: string; textColor?: string; fontSize?: number; mode?: string; actions: ActionItem[]; releaseActions?: ActionItem[] };
+        type SideButton = { id: string; label: string; color?: string; textColor?: string; fontSize?: number; mode?: string; actions: ActionItem[]; releaseActions?: ActionItem[]; hotkey?: string };
         const timerWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'timer'));
         const scoreboardWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard'));
 
@@ -634,194 +638,6 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
         const savePress = (next: ActionItem[]) => up({ actions: next });
         const saveRelease = (next: ActionItem[]) => up({ releaseActions: next });
-
-        // Renders the function editor for one action item — called as a function, not a component
-        const renderFnEditor = (
-          action: ActionItem,
-          setFn: (fn: string) => void,
-          setParam: (k: string, v: string) => void,
-          idxKey: string,
-        ) => {
-          const { fn, params } = action;
-          const isApp = fn.startsWith('App.');
-          const vmixDef = VMIX_ALL_FNS.find(f => f.fn === fn);
-          const isCustomVmix = !isApp && !vmixDef;
-          const vmixSelectVal = vmixDef ? fn : '__custom__';
-
-          return (
-            <div key={idxKey} className="action-editor">
-              <Field label="Type">
-                <select className="field-input" value={isApp ? 'app' : 'vmix'} onChange={e => {
-                  if (e.target.value === 'app') setFn('App.GoToPage');
-                  else setFn('Cut');
-                }}>
-                  <option value="vmix">vMix Function</option>
-                  <option value="app">App Function</option>
-                </select>
-              </Field>
-
-              {isApp ? (
-                <>
-                  <Field label="App Function">
-                    <select className="field-input" value={fn} onChange={e => setFn(e.target.value)}>
-                      <optgroup label="Navigation">
-                        <option value="App.GoToPage">Go To Page</option>
-                      </optgroup>
-                      <optgroup label="Timer">
-                        <option value="App.TimerStart">Timer: Start</option>
-                        <option value="App.TimerPause">Timer: Pause</option>
-                        <option value="App.TimerToggle">Timer: Toggle Start/Pause</option>
-                        <option value="App.TimerReset">Timer: Reset</option>
-                        <option value="App.TimerEndPeriod">Timer: End Period</option>
-                        <option value="App.TimerSkipBreak">Timer: Skip Break</option>
-                      </optgroup>
-                      <optgroup label="Scoreboard">
-                        <option value="App.ScoreA">Score: Add Team A</option>
-                        <option value="App.ScoreB">Score: Add Team B</option>
-                        <option value="App.ScoreReset">Score: Reset</option>
-                      </optgroup>
-                      <optgroup label="Variable">
-                        <option value="App.SetVariable">Set Variable</option>
-                      </optgroup>
-                      <optgroup label="App">
-                        <option value="App.ToggleEditMode">Toggle Edit Mode</option>
-                      </optgroup>
-                    </select>
-                  </Field>
-                  {fn === 'App.GoToPage' && (
-                    <Field label="Page">
-                      <select className="field-input" value={params.Page ?? ''} onChange={e => setParam('Page', e.target.value)}>
-                        <option value="">— select page —</option>
-                        {pages.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
-                      </select>
-                    </Field>
-                  )}
-                  {['App.TimerStart','App.TimerPause','App.TimerReset','App.TimerToggle','App.TimerEndPeriod','App.TimerSkipBreak'].includes(fn) && (
-                    <Field label="Timer Widget">
-                      <select className="field-input" value={params.Input ?? ''} onChange={e => setParam('Input', e.target.value)}>
-                        <option value="">— select timer —</option>
-                        {timerWidgets.map(w => <option key={w.id} value={w.id}>{w.config.name || 'Timer'}</option>)}
-                      </select>
-                    </Field>
-                  )}
-                  {(fn === 'App.ScoreReset') && (
-                    <Field label="Scoreboard Widget">
-                      <select className="field-input" value={params.Input ?? ''} onChange={e => setParam('Input', e.target.value)}>
-                        <option value="">— select scoreboard —</option>
-                        {scoreboardWidgets.map(w => <option key={w.id} value={w.id}>{w.config.teamAName} vs {w.config.teamBName}</option>)}
-                      </select>
-                    </Field>
-                  )}
-                  {(fn === 'App.ScoreA' || fn === 'App.ScoreB') && (
-                    <>
-                      <Field label="Scoreboard Widget">
-                        <select className="field-input" value={params.Input ?? ''} onChange={e => setParam('Input', e.target.value)}>
-                          <option value="">— select scoreboard —</option>
-                          {scoreboardWidgets.map(w => <option key={w.id} value={w.id}>{w.config.teamAName} vs {w.config.teamBName}</option>)}
-                        </select>
-                      </Field>
-                      <Field label="Points">
-                        <input className="field-input" type="number" min={1} value={params.Value ?? '1'} onChange={e => setParam('Value', e.target.value)} />
-                      </Field>
-                      <Field label="Label (e.g. Try)">
-                        <input className="field-input" value={params.Label ?? ''} placeholder="Try, Conv, Pen…" onChange={e => setParam('Label', e.target.value)} />
-                      </Field>
-                    </>
-                  )}
-                  {fn === 'App.SetVariable' && (
-                    <>
-                      <Field label="Variable">
-                        <select className="field-input" value={params.Variable ?? ''} onChange={e => setParam('Variable', e.target.value)}>
-                          <option value="">— select variable —</option>
-                          {globalVariables.map(v => <option key={v.id} value={v.name}>{v.name}</option>)}
-                        </select>
-                      </Field>
-                      <Field label="Value">
-                        <input className="field-input" value={params.Value ?? ''} onChange={e => setParam('Value', e.target.value)} />
-                      </Field>
-                    </>
-                  )}
-                </>
-              ) : (
-                <>
-                  <Field label="vMix Function">
-                    <select className="field-input" value={vmixSelectVal} onChange={e => {
-                      if (e.target.value === '__custom__') setFn('');
-                      else setFn(e.target.value);
-                    }}>
-                      {VMIX_FUNCTIONS.map(g => (
-                        <optgroup key={g.group} label={g.group}>
-                          {g.fns.map(f => <option key={f.fn} value={f.fn}>{f.label}</option>)}
-                        </optgroup>
-                      ))}
-                    </select>
-                  </Field>
-                  {isCustomVmix && (
-                    <Field label="Custom Function">
-                      <input className="field-input" value={fn} onChange={e => setFn(e.target.value)} placeholder="e.g. SetFader" />
-                    </Field>
-                  )}
-                  {vmixDef && vmixDef.p.map(pk => pk === 'Input' ? (
-                    <Field key={pk} label="Input">
-                      <InputPickerDropdown
-                        currentKey={params.Input ?? ''}
-                        currentTitle={allInputs.find(i => i.key === (params.Input ?? ''))?.title}
-                        allInputs={allInputs}
-                        onSelect={(key) => setParam('Input', key)}
-                      />
-                    </Field>
-                  ) : (
-                    <Field key={pk} label={pk}>
-                      <input className="field-input" value={params[pk] ?? ''} onChange={e => setParam(pk, e.target.value)} />
-                    </Field>
-                  ))}
-                  {isCustomVmix && (
-                    <Field label="Params (Key=Value)">
-                      <textarea className="field-input" rows={3}
-                        value={Object.entries(params).map(([k,v]) => `${k}=${v}`).join('\n')}
-                        onChange={e => {
-                          const p: Record<string,string> = {};
-                          e.target.value.split('\n').forEach(line => {
-                            const [k,...rest] = line.split('=');
-                            if (k?.trim()) p[k.trim()] = rest.join('=').trim();
-                          });
-                          setParam('__bulk__', JSON.stringify(p));
-                        }} placeholder="Input=1&#10;Value=Hello" />
-                    </Field>
-                  )}
-                </>
-              )}
-            </div>
-          );
-        };
-
-        const renderActionList = (actions: ActionItem[], save: (next: ActionItem[]) => void, sectionKey: string) => (
-          <>
-            {actions.map((action, i) => (
-              <div key={`${sectionKey}-${i}`} className="action-row">
-                <div className="action-row-header">
-                  <span className="action-row-num">#{i + 1}</span>
-                  <button className="action-row-del" title="Remove" onClick={() => save(actions.filter((_, j) => j !== i))}>×</button>
-                </div>
-                {renderFnEditor(
-                  action,
-                  (fn) => save(actions.map((a, j) => j === i ? { fn, params: {} } : a)),
-                  (k, v) => {
-                    if (k === '__bulk__') {
-                      save(actions.map((a, j) => j === i ? { ...a, params: JSON.parse(v) } : a));
-                    } else {
-                      save(actions.map((a, j) => j === i ? { ...a, params: { ...a.params, [k]: v } } : a));
-                    }
-                  },
-                  `${sectionKey}-${i}`,
-                )}
-              </div>
-            ))}
-            <button className="action-add-btn" onClick={() => save([...actions, { fn: 'Cut', params: {} }])}>
-              + Add Action
-            </button>
-          </>
-        );
 
         return (
           <>
@@ -834,13 +650,20 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                 <option value="toggle">Toggle</option>
               </select>
             </Field>
+            <Field label="Hotkey">
+              <HotkeyRecorder value={cfg.hotkey ?? ''} onChange={v => up({ hotkey: v })} allBindings={allHotkeyBindings} />
+            </Field>
 
             <CollapsibleSection label="Press Actions">
-              {renderActionList(pressActions, savePress, 'press')}
+              <ActionListEditor actions={pressActions} onChange={savePress} sectionKey="press"
+                pages={pages} timerWidgets={timerWidgets} scoreboardWidgets={scoreboardWidgets}
+                globalVariables={globalVariables} allInputs={allInputs} />
             </CollapsibleSection>
 
             <CollapsibleSection label="Release Actions">
-              {renderActionList(releaseActions, saveRelease, 'release')}
+              <ActionListEditor actions={releaseActions} onChange={saveRelease} sectionKey="release"
+                pages={pages} timerWidgets={timerWidgets} scoreboardWidgets={scoreboardWidgets}
+                globalVariables={globalVariables} allInputs={allInputs} />
             </CollapsibleSection>
 
             <CollapsibleSection label="Side Buttons">
@@ -874,6 +697,9 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                                   <option value="toggle">Toggle</option>
                                 </select>
                               </Field>
+                              <Field label="Hotkey">
+                                <HotkeyRecorder value={sb.hotkey ?? ''} onChange={v => updateSb(i, { hotkey: v })} allBindings={allHotkeyBindings} />
+                              </Field>
                               <Field label="Color">
                                 <div className="color-picker">
                                   {PRESET_COLORS.map(c => (
@@ -887,10 +713,14 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                                 <input className="field-input" type="number" min={8} max={32} value={sb.fontSize ?? 11} onChange={e => updateSb(i, { fontSize: Number(e.target.value) })} />
                               </Field>
                               <CollapsibleSection label="Press Actions">
-                                {renderActionList(sb.actions ?? [], (next) => updateSb(i, { actions: next }), `sb-${i}-press`)}
+                                <ActionListEditor actions={sb.actions ?? []} onChange={(next) => updateSb(i, { actions: next })} sectionKey={`sb-${i}-press`}
+                                  pages={pages} timerWidgets={timerWidgets} scoreboardWidgets={scoreboardWidgets}
+                                  globalVariables={globalVariables} allInputs={allInputs} />
                               </CollapsibleSection>
                               <CollapsibleSection label="Release Actions">
-                                {renderActionList(sb.releaseActions ?? [], (next) => updateSb(i, { releaseActions: next }), `sb-${i}-release`)}
+                                <ActionListEditor actions={sb.releaseActions ?? []} onChange={(next) => updateSb(i, { releaseActions: next })} sectionKey={`sb-${i}-release`}
+                                  pages={pages} timerWidgets={timerWidgets} scoreboardWidgets={scoreboardWidgets}
+                                  globalVariables={globalVariables} allInputs={allInputs} />
                               </CollapsibleSection>
                             </>
                           )}
@@ -1097,6 +927,46 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             {cfg.linkedScoreboardSourceId && (
               <p className="timer-db-hint">This widget mirrors the selected scoreboard. Controls are hidden — score from the source widget.</p>
             )}
+          </CollapsibleSection>
+
+          <CollapsibleSection label="Hotkeys">
+            <p className="app-settings-hint" style={{ margin: '0 0 6px' }}>
+              Bind a physical key to any action here (score, timer, reset…) — pick "{cfg.teamAName ?? 'Team A'} vs {cfg.teamBName ?? 'Team B'}" as the target Scoreboard Widget to affect this widget. Hotkeys fire even while the app is minimized or unfocused.
+            </p>
+            {(() => {
+              const hotkeyActions: { id: string; label?: string; hotkey: string; actions: ActionItem[] }[] = cfg.hotkeyActions ?? [];
+              const updateHk = (i: number, patch: Partial<{ label: string; hotkey: string; actions: ActionItem[] }>) =>
+                up({ hotkeyActions: hotkeyActions.map((h, j) => j === i ? { ...h, ...patch } : h) });
+              return (
+                <>
+                  {hotkeyActions.map((h, i) => (
+                    <div key={h.id} className="vil-cfg-block">
+                      <div className="vil-cfg-header">
+                        <span className="vil-cfg-label">{h.label || `Hotkey ${i + 1}`}</span>
+                        <button className="btn btn--ghost btn--small"
+                          onClick={() => up({ hotkeyActions: hotkeyActions.filter((_, j) => j !== i) })}>×</button>
+                      </div>
+                      <Field label="Label">
+                        <input className="field-input" value={h.label ?? ''} placeholder="e.g. Team A +1" onChange={e => updateHk(i, { label: e.target.value })} />
+                      </Field>
+                      <Field label="Hotkey">
+                        <HotkeyRecorder value={h.hotkey} onChange={v => updateHk(i, { hotkey: v })} allBindings={allHotkeyBindings} />
+                      </Field>
+                      <CollapsibleSection label="Actions">
+                        <ActionListEditor actions={h.actions} onChange={(next) => updateHk(i, { actions: next })} sectionKey={`hk-${i}`}
+                          pages={pages} timerWidgets={pages.flatMap(p => p.widgets.filter(w => w.type === 'timer'))}
+                          scoreboardWidgets={pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard'))}
+                          globalVariables={globalVariables} allInputs={allInputs} />
+                      </CollapsibleSection>
+                    </div>
+                  ))}
+                  <button className="action-add-btn"
+                    onClick={() => up({ hotkeyActions: [...hotkeyActions, { id: crypto.randomUUID(), label: '', hotkey: '', actions: [] }] })}>
+                    + Add Hotkey
+                  </button>
+                </>
+              );
+            })()}
           </CollapsibleSection>
 
           <CollapsibleSection label="Tournament Database">
@@ -1307,16 +1177,16 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                         )}
                         {inp.inputKey && (
                           <>
-                            <Field label="Score A Field">{renderFieldPicker(inp.inputKey, inp.fieldScoreA, v => updateSb(idx, { fieldScoreA: v }), 'ScoreA.Text', undefined, allInputs)}</Field>
-                            <Field label="Score B Field">{renderFieldPicker(inp.inputKey, inp.fieldScoreB, v => updateSb(idx, { fieldScoreB: v }), 'ScoreB.Text', undefined, allInputs)}</Field>
-                            <Field label="Team A Field">{renderFieldPicker(inp.inputKey, inp.fieldTeamA, v => updateSb(idx, { fieldTeamA: v }), 'TeamA.Text', undefined, allInputs)}</Field>
-                            <Field label="Team B Field">{renderFieldPicker(inp.inputKey, inp.fieldTeamB, v => updateSb(idx, { fieldTeamB: v }), 'TeamB.Text', undefined, allInputs)}</Field>
-                            <Field label="Short Name A Field">{renderFieldPicker(inp.inputKey, inp.fieldShortA ?? '', v => updateSb(idx, { fieldShortA: v }), 'ShortA.Text', undefined, allInputs)}</Field>
-                            <Field label="Short Name B Field">{renderFieldPicker(inp.inputKey, inp.fieldShortB ?? '', v => updateSb(idx, { fieldShortB: v }), 'ShortB.Text', undefined, allInputs)}</Field>
-                            <Field label="Competition Field">{renderFieldPicker(inp.inputKey, inp.fieldCompetition ?? '', v => updateSb(idx, { fieldCompetition: v }), 'Competition.Text', undefined, allInputs)}</Field>
-                            <Field label="Category Field">{renderFieldPicker(inp.inputKey, inp.fieldCategory ?? '', v => updateSb(idx, { fieldCategory: v }), 'Category.Text', undefined, allInputs)}</Field>
-                            <Field label="Group Field">{renderFieldPicker(inp.inputKey, inp.fieldGroup ?? '', v => updateSb(idx, { fieldGroup: v }), 'Group.Text', undefined, allInputs)}</Field>
-                            <Field label="Scheduled Time Field">{renderFieldPicker(inp.inputKey, inp.fieldScheduledTime ?? '', v => updateSb(idx, { fieldScheduledTime: v }), 'Time.Text', undefined, allInputs)}</Field>
+                            <Field label="Score A Field">{renderFieldPicker(inp.inputKey, inp.fieldScoreA, v => updateSb(idx, { fieldScoreA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Score B Field">{renderFieldPicker(inp.inputKey, inp.fieldScoreB, v => updateSb(idx, { fieldScoreB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Team A Field">{renderFieldPicker(inp.inputKey, inp.fieldTeamA, v => updateSb(idx, { fieldTeamA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Team B Field">{renderFieldPicker(inp.inputKey, inp.fieldTeamB, v => updateSb(idx, { fieldTeamB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Short Name A Field">{renderFieldPicker(inp.inputKey, inp.fieldShortA ?? '', v => updateSb(idx, { fieldShortA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Short Name B Field">{renderFieldPicker(inp.inputKey, inp.fieldShortB ?? '', v => updateSb(idx, { fieldShortB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Competition Field">{renderFieldPicker(inp.inputKey, inp.fieldCompetition ?? '', v => updateSb(idx, { fieldCompetition: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Category Field">{renderFieldPicker(inp.inputKey, inp.fieldCategory ?? '', v => updateSb(idx, { fieldCategory: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Group Field">{renderFieldPicker(inp.inputKey, inp.fieldGroup ?? '', v => updateSb(idx, { fieldGroup: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Scheduled Time Field">{renderFieldPicker(inp.inputKey, inp.fieldScheduledTime ?? '', v => updateSb(idx, { fieldScheduledTime: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Logo A Field">{renderFieldPicker(inp.inputKey, inp.fieldLogoA ?? '', v => {
                               updateSb(idx, { fieldLogoA: v });
                               if (v && cfg.teamALogo) {
@@ -1489,11 +1359,11 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                       )}
                       {inp.vmixInputKey && (
                         <>
-                          <Field label="Team Name Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldTeam, v => updateSlt(idx, { fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
-                          <Field label="Scorer Name Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldScorer, v => updateSlt(idx, { fieldScorer: v }), 'Scorer.Text', undefined, allInputs)}</Field>
-                          <Field label="Jersey No. Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldJersey, v => updateSlt(idx, { fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
+                          <Field label="Team Name Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldTeam, v => updateSlt(idx, { fieldTeam: v }), 'Title.Text', undefined, allInputs)}</Field>
+                          <Field label="Scorer Name Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldScorer, v => updateSlt(idx, { fieldScorer: v }), 'Title.Text', undefined, allInputs)}</Field>
+                          <Field label="Jersey No. Field">{renderFieldPicker(inp.vmixInputKey, inp.fieldJersey, v => updateSlt(idx, { fieldJersey: v }), 'Title.Text', undefined, allInputs)}</Field>
                           <Field label="Score Action Field">
-                            {renderFieldPicker(inp.vmixInputKey, inp.fieldAction, v => updateSlt(idx, { fieldAction: v }), 'Action.Text', undefined, allInputs)}
+                            {renderFieldPicker(inp.vmixInputKey, inp.fieldAction, v => updateSlt(idx, { fieldAction: v }), 'Title.Text', undefined, allInputs)}
                           </Field>
                         </>
                       )}
@@ -1554,11 +1424,11 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               )}
               {cfg.vmixInputKey && (
                 <>
-                  <Field label="Name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Name.Text', undefined, allInputs)}</Field>
-                  <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
-                  <Field label="Position field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? 'Position.Text', v => up({ fieldPosition: v }), 'Position.Text', undefined, allInputs)}</Field>
-                  <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
-                  <Field label="Score summary field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldScoreSummary ?? '', v => up({ fieldScoreSummary: v }), 'ScoreSummary.Text', undefined, allInputs)}</Field>
+                  <Field label="Name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Position field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? 'Position.Text', v => up({ fieldPosition: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Score summary field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldScoreSummary ?? '', v => up({ fieldScoreSummary: v }), 'Title.Text', undefined, allInputs)}</Field>
                 </>
               )}
             </CollapsibleSection>
@@ -1605,10 +1475,10 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               )}
               {cfg.vmixInputKey && (
                 <>
-                  <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
-                  <Field label="Name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Name.Text', undefined, allInputs)}</Field>
-                  <Field label="Timer field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTimer ?? 'Timer.Text', v => up({ fieldTimer: v }), 'Timer.Text', undefined, allInputs)}</Field>
-                  <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
+                  <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Timer field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTimer ?? 'Timer.Text', v => up({ fieldTimer: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Title.Text', undefined, allInputs)}</Field>
                 </>
               )}
             </CollapsibleSection>
@@ -1913,7 +1783,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   (key, title) => up({ finalPlayVmixInputKey: key, finalPlayVmixInputTitle: title }))}
               </Field>
               <Field label="Field Name">
-                {renderFieldPicker(cfg.finalPlayVmixInputKey ?? '', cfg.finalPlayFieldName ?? '', v => up({ finalPlayFieldName: v }), 'FinalPlay.Text')}
+                {renderFieldPicker(cfg.finalPlayVmixInputKey ?? '', cfg.finalPlayFieldName ?? '', v => up({ finalPlayFieldName: v }), 'Title.Text')}
               </Field>
               <Field label={`Duration (${cfg.format ?? 'mm:ss'}, 0 = unlimited)`}>
                 <input className="field-input" value={finalPlayDurationText}
@@ -2269,9 +2139,9 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                         )}
                         {inp.inputKey && (
                           <>
-                            <Field label="Timer Value Field">{renderFieldPicker(inp.inputKey, inp.fieldName, v => updateTi(idx, { fieldName: v }), 'Timer.Text', undefined, allInputs)}</Field>
-                            <Field label="Timer Name Field">{renderFieldPicker(inp.inputKey, inp.fieldTimerName ?? '', v => updateTi(idx, { fieldTimerName: v }), 'TimerName.Text', undefined, allInputs)}</Field>
-                            <Field label="Period Label Field">{renderFieldPicker(inp.inputKey, inp.fieldPeriodLabel ?? '', v => updateTi(idx, { fieldPeriodLabel: v }), 'Period.Text', undefined, allInputs)}</Field>
+                            <Field label="Timer Value Field">{renderFieldPicker(inp.inputKey, inp.fieldName, v => updateTi(idx, { fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Timer Name Field">{renderFieldPicker(inp.inputKey, inp.fieldTimerName ?? '', v => updateTi(idx, { fieldTimerName: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Period Label Field">{renderFieldPicker(inp.inputKey, inp.fieldPeriodLabel ?? '', v => updateTi(idx, { fieldPeriodLabel: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Period Image Field">{renderFieldPicker(inp.inputKey, inp.fieldPeriodImage ?? '', v => updateTi(idx, { fieldPeriodImage: v }), 'PeriodImg.Source', undefined, allInputs)}</Field>
                           </>
                         )}
@@ -2293,7 +2163,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                 i => i.type === 'GT',
               )}
               {cfg.breakVmixInputKey && (
-                <Field label="Break Field Name">{renderFieldPicker(cfg.breakVmixInputKey, cfg.breakFieldName ?? '', v => up({ breakFieldName: v }), 'Timer.Text')}</Field>
+                <Field label="Break Field Name">{renderFieldPicker(cfg.breakVmixInputKey, cfg.breakFieldName ?? '', v => up({ breakFieldName: v }), 'Title.Text')}</Field>
               )}
             </CollapsibleSection>
           )}
@@ -2306,7 +2176,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               i => i.type === 'GT',
             )}
             {cfg.miniVmixInputKey && (
-              <Field label="Mini Timer Field Name">{renderFieldPicker(cfg.miniVmixInputKey, cfg.miniFieldName ?? '', v => up({ miniFieldName: v }), 'MiniTimer.Text')}</Field>
+              <Field label="Mini Timer Field Name">{renderFieldPicker(cfg.miniVmixInputKey, cfg.miniFieldName ?? '', v => up({ miniFieldName: v }), 'Title.Text')}</Field>
             )}
           </CollapsibleSection>
         </>
@@ -2326,7 +2196,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             i => i.type === 'GT',
             allInputs,
           )}
-          <Field label="Field Name">{renderFieldPicker(cfg.inputKey ?? '', cfg.fieldName ?? '', v => up({ fieldName: v }), 'Path.Text', undefined, allInputs)}</Field>
+          <Field label="Field Name">{renderFieldPicker(cfg.inputKey ?? '', cfg.fieldName ?? '', v => up({ fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
           <Field label="File Filter">
             <select className="field-input" value={cfg.accept ?? 'image/*'} onChange={e => up({ accept: e.target.value })}>
               <option value="image/*">Images only (jpg, png, gif…)</option>
@@ -2668,7 +2538,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               </Field>
               {cfg.vmixResultsAInputKey && (
                 <Field label="Results Field">
-                  {renderFieldPicker(cfg.vmixResultsAInputKey, cfg.vmixResultsAField ?? '', v => up({ vmixResultsAField: v }), 'ResultsA.Text', undefined, allInputs)}
+                  {renderFieldPicker(cfg.vmixResultsAInputKey, cfg.vmixResultsAField ?? '', v => up({ vmixResultsAField: v }), 'Title.Text', undefined, allInputs)}
                 </Field>
               )}
               <Field label="Upcoming Input">
@@ -2677,7 +2547,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               </Field>
               {cfg.vmixUpcomingAInputKey && (
                 <Field label="Upcoming Field">
-                  {renderFieldPicker(cfg.vmixUpcomingAInputKey, cfg.vmixUpcomingAField ?? '', v => up({ vmixUpcomingAField: v }), 'UpcomingA.Text', undefined, allInputs)}
+                  {renderFieldPicker(cfg.vmixUpcomingAInputKey, cfg.vmixUpcomingAField ?? '', v => up({ vmixUpcomingAField: v }), 'Title.Text', undefined, allInputs)}
                 </Field>
               )}
             </CollapsibleSection>
@@ -2688,7 +2558,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               </Field>
               {cfg.vmixResultsBInputKey && (
                 <Field label="Results Field">
-                  {renderFieldPicker(cfg.vmixResultsBInputKey, cfg.vmixResultsBField ?? '', v => up({ vmixResultsBField: v }), 'ResultsB.Text', undefined, allInputs)}
+                  {renderFieldPicker(cfg.vmixResultsBInputKey, cfg.vmixResultsBField ?? '', v => up({ vmixResultsBField: v }), 'Title.Text', undefined, allInputs)}
                 </Field>
               )}
               <Field label="Upcoming Input">
@@ -2697,7 +2567,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               </Field>
               {cfg.vmixUpcomingBInputKey && (
                 <Field label="Upcoming Field">
-                  {renderFieldPicker(cfg.vmixUpcomingBInputKey, cfg.vmixUpcomingBField ?? '', v => up({ vmixUpcomingBField: v }), 'UpcomingB.Text', undefined, allInputs)}
+                  {renderFieldPicker(cfg.vmixUpcomingBInputKey, cfg.vmixUpcomingBField ?? '', v => up({ vmixUpcomingBField: v }), 'Title.Text', undefined, allInputs)}
                 </Field>
               )}
             </CollapsibleSection>
@@ -2737,21 +2607,21 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               {cfg.vmixInputKey && (
                 <>
                   <div className="wgt-cfg-subheading">{teamAName}</div>
-                  <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldNameA ?? '', v => up({ fieldNameA: v }), 'NameA.Text', undefined, allInputs)}</Field>
-                  <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJerseyA ?? '', v => up({ fieldJerseyA: v }), 'JerseyA.Text', undefined, allInputs)}</Field>
-                  <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPositionA ?? '', v => up({ fieldPositionA: v }), 'PositionA.Text', undefined, allInputs)}</Field>
+                  <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldNameA ?? '', v => up({ fieldNameA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJerseyA ?? '', v => up({ fieldJerseyA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPositionA ?? '', v => up({ fieldPositionA: v }), 'Title.Text', undefined, allInputs)}</Field>
                   {PLAYER_STAT_FIELD_DEFS.map(f => (
                     <Field key={f.key} label={`${f.label} Field`}>
-                      {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}A`] ?? '', v => up({ [`field${f.cap}A`]: v }), `${f.cap}A.Text`, undefined, allInputs)}
+                      {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}A`] ?? '', v => up({ [`field${f.cap}A`]: v }), 'Title.Text', undefined, allInputs)}
                     </Field>
                   ))}
                   <div className="wgt-cfg-subheading">{teamBName}</div>
-                  <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldNameB ?? '', v => up({ fieldNameB: v }), 'NameB.Text', undefined, allInputs)}</Field>
-                  <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJerseyB ?? '', v => up({ fieldJerseyB: v }), 'JerseyB.Text', undefined, allInputs)}</Field>
-                  <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPositionB ?? '', v => up({ fieldPositionB: v }), 'PositionB.Text', undefined, allInputs)}</Field>
+                  <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldNameB ?? '', v => up({ fieldNameB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJerseyB ?? '', v => up({ fieldJerseyB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPositionB ?? '', v => up({ fieldPositionB: v }), 'Title.Text', undefined, allInputs)}</Field>
                   {PLAYER_STAT_FIELD_DEFS.map(f => (
                     <Field key={f.key} label={`${f.label} Field`}>
-                      {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}B`] ?? '', v => up({ [`field${f.cap}B`]: v }), `${f.cap}B.Text`, undefined, allInputs)}
+                      {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}B`] ?? '', v => up({ [`field${f.cap}B`]: v }), 'Title.Text', undefined, allInputs)}
                     </Field>
                   ))}
                 </>
@@ -2786,16 +2656,16 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               </Field>
               {cfg.vmixInputKey && (
                 <>
-                  <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? '', v => up({ fieldName: v }), 'Name.Text', undefined, allInputs)}</Field>
-                  <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? '', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
-                  <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? '', v => up({ fieldPosition: v }), 'Position.Text', undefined, allInputs)}</Field>
-                  <Field label="Team Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? '', v => up({ fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
+                  <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? '', v => up({ fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? '', v => up({ fieldJersey: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? '', v => up({ fieldPosition: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Team Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? '', v => up({ fieldTeam: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Team Logo Field">
                     {renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeamLogo ?? '', v => up({ fieldTeamLogo: v }), 'TeamLogo.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}
                   </Field>
                   {PLAYER_STAT_FIELD_DEFS.map(f => (
                     <Field key={f.key} label={`${f.label} Field`}>
-                      {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}`] ?? '', v => up({ [`field${f.cap}`]: v }), `${f.cap}.Text`, undefined, allInputs)}
+                      {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}`] ?? '', v => up({ [`field${f.cap}`]: v }), 'Title.Text', undefined, allInputs)}
                     </Field>
                   ))}
                 </>
@@ -2891,7 +2761,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               </Field>
               {cfg.vmixSummaryInputKey && (
                 <Field label="Text Field">
-                  {renderFieldPicker(cfg.vmixSummaryInputKey, cfg.vmixSummaryField ?? '', v => up({ vmixSummaryField: v }), 'Summary.Text', undefined, allInputs)}
+                  {renderFieldPicker(cfg.vmixSummaryInputKey, cfg.vmixSummaryField ?? '', v => up({ vmixSummaryField: v }), 'Title.Text', undefined, allInputs)}
                 </Field>
               )}
             </CollapsibleSection>
@@ -3055,10 +2925,10 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               {cfg.vmixTeamInputKey && (
                 <>
                   <Field label="Team name field">
-                    {renderFieldPicker(cfg.vmixTeamInputKey ?? '', cfg.vmixTeamFieldName ?? 'TeamName.Text', v => up({ vmixTeamFieldName: v }), 'TeamName.Text')}
+                    {renderFieldPicker(cfg.vmixTeamInputKey ?? '', cfg.vmixTeamFieldName ?? 'TeamName.Text', v => up({ vmixTeamFieldName: v }), 'Title.Text')}
                   </Field>
                   <Field label="Short name field">
-                    {renderFieldPicker(cfg.vmixTeamInputKey ?? '', cfg.vmixTeamFieldShort ?? '', v => up({ vmixTeamFieldShort: v }), 'ShortName.Text')}
+                    {renderFieldPicker(cfg.vmixTeamInputKey ?? '', cfg.vmixTeamFieldShort ?? '', v => up({ vmixTeamFieldShort: v }), 'Title.Text')}
                   </Field>
                   <Field label="Auto-sync on change">
                     <input type="checkbox" checked={cfg.vmixTeamAutoSync ?? false} onChange={e => up({ vmixTeamAutoSync: e.target.checked })} />
@@ -3141,10 +3011,10 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               {cfg.vmixStaffInputKey && (
                 <>
                   <Field label="Manager field">
-                    {renderFieldPicker(cfg.vmixStaffInputKey, cfg.vmixManagerField ?? '', v => up({ vmixManagerField: v }), 'Manager.Text')}
+                    {renderFieldPicker(cfg.vmixStaffInputKey, cfg.vmixManagerField ?? '', v => up({ vmixManagerField: v }), 'Title.Text')}
                   </Field>
                   <Field label="Head Coach field">
-                    {renderFieldPicker(cfg.vmixStaffInputKey, cfg.vmixHCField ?? '', v => up({ vmixHCField: v }), 'HeadCoach.Text')}
+                    {renderFieldPicker(cfg.vmixStaffInputKey, cfg.vmixHCField ?? '', v => up({ vmixHCField: v }), 'Title.Text')}
                   </Field>
                   <Field label="Auto-sync on edit">
                     <input type="checkbox" checked={cfg.vmixStaffAutoSync ?? false} onChange={e => up({ vmixStaffAutoSync: e.target.checked })} />
@@ -3266,10 +3136,10 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                       {inp.inputKey && (
                         <>
                           <Field label="Player Off field">
-                            {renderFieldPicker(inp.inputKey, inp.vmixFieldOut, v => updateSub(idx, { vmixFieldOut: v }), 'PlayerOff.Text', undefined, allInputs)}
+                            {renderFieldPicker(inp.inputKey, inp.vmixFieldOut, v => updateSub(idx, { vmixFieldOut: v }), 'Title.Text', undefined, allInputs)}
                           </Field>
                           <Field label="Player On field">
-                            {renderFieldPicker(inp.inputKey, inp.vmixFieldIn, v => updateSub(idx, { vmixFieldIn: v }), 'PlayerOn.Text', undefined, allInputs)}
+                            {renderFieldPicker(inp.inputKey, inp.vmixFieldIn, v => updateSub(idx, { vmixFieldIn: v }), 'Title.Text', undefined, allInputs)}
                           </Field>
                         </>
                       )}
@@ -3342,11 +3212,11 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                       {inp.inputKey && (
                         <>
                           <div className="config-section-label" style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>Sin bin fields</div>
-                          <Field label="Team A sin bin">{renderFieldPicker(inp.inputKey, inp.vmixFieldSinBinA, v => updateCd(idx, { vmixFieldSinBinA: v }), 'SinBinA.Text', undefined, allInputs)}</Field>
-                          <Field label="Team B sin bin">{renderFieldPicker(inp.inputKey, inp.vmixFieldSinBinB, v => updateCd(idx, { vmixFieldSinBinB: v }), 'SinBinB.Text', undefined, allInputs)}</Field>
+                          <Field label="Team A sin bin">{renderFieldPicker(inp.inputKey, inp.vmixFieldSinBinA, v => updateCd(idx, { vmixFieldSinBinA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                          <Field label="Team B sin bin">{renderFieldPicker(inp.inputKey, inp.vmixFieldSinBinB, v => updateCd(idx, { vmixFieldSinBinB: v }), 'Title.Text', undefined, allInputs)}</Field>
                           <div className="config-section-label" style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>Red card fields</div>
-                          <Field label="Team A red card">{renderFieldPicker(inp.inputKey, inp.vmixFieldRedA, v => updateCd(idx, { vmixFieldRedA: v }), 'RedA.Text', undefined, allInputs)}</Field>
-                          <Field label="Team B red card">{renderFieldPicker(inp.inputKey, inp.vmixFieldRedB, v => updateCd(idx, { vmixFieldRedB: v }), 'RedB.Text', undefined, allInputs)}</Field>
+                          <Field label="Team A red card">{renderFieldPicker(inp.inputKey, inp.vmixFieldRedA, v => updateCd(idx, { vmixFieldRedA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                          <Field label="Team B red card">{renderFieldPicker(inp.inputKey, inp.vmixFieldRedB, v => updateCd(idx, { vmixFieldRedB: v }), 'Title.Text', undefined, allInputs)}</Field>
                         </>
                       )}
                       </>)}
@@ -3411,10 +3281,10 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             </CollapsibleSection>
             {(cfg.vmixInputKeyYellow || cfg.vmixInputKeyOrange || cfg.vmixInputKeyRed) && (
               <CollapsibleSection label="Field Mapping">
-                <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Jersey.Text', undefined, allInputs)}</Field>
-                <Field label="Name field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Name.Text', undefined, allInputs)}</Field>
-                <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Team.Text', undefined, allInputs)}</Field>
-                <Field label="Card type field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldCardType ?? 'Card.Text', v => up({ fieldCardType: v }), 'Card.Text', undefined, allInputs)}</Field>
+                <Field label="Jersey No. field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldJersey ?? 'Jersey.Text', v => up({ fieldJersey: v }), 'Title.Text', undefined, allInputs)}</Field>
+                <Field label="Name field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
+                <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Title.Text', undefined, allInputs)}</Field>
+                <Field label="Card type field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldCardType ?? 'Card.Text', v => up({ fieldCardType: v }), 'Title.Text', undefined, allInputs)}</Field>
               </CollapsibleSection>
             )}
 
@@ -3550,7 +3420,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                               {allInputs.filter(i => i.type === 'GT').map(i => <option key={i.key} value={i.key}>{i.number}. {i.title}</option>)}
                             </select>
                           </Field>
-                          <Field label="Field Name">{renderFieldPicker(item.textInputKey ?? '', item.fieldName ?? '', v => patchItem(item.id, { fieldName: v }), 'Name.Text')}</Field>
+                          <Field label="Field Name">{renderFieldPicker(item.textInputKey ?? '', item.fieldName ?? '', v => patchItem(item.id, { fieldName: v }), 'Title.Text')}</Field>
                         </>
                       )}
                     </div>

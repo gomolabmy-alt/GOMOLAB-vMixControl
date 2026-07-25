@@ -616,6 +616,7 @@ export async function pullResultsOnly(tournamentId: string): Promise<{ ok: boole
       useMatchResultsStore.setState(s => ({ results: upsertById(s.results, incoming) }));
       lastPushedResult.set(rr.id, recordKey(rr.venueLabel, rr.data));
     }
+    useMatchResultsStore.getState().dedupeBySourceSchedule();
     useCloudSyncStatus.getState().setLastError(null);
     return { ok: true, count: (body.results ?? []).length };
   } catch {
@@ -871,6 +872,10 @@ async function pullAll() {
       useMatchResultsStore.setState(s => ({ results: upsertById(s.results, incoming) }));
       lastPushedResult.set(rr.id, recordKey(rr.venueLabel, rr.data));
     }
+    // A venue still on an older build (pre-deterministic result ids) can
+    // still push a fresh duplicate under a random id — collapse it back down
+    // immediately rather than waiting for this device's next launch.
+    useMatchResultsStore.getState().dedupeBySourceSchedule();
 
     for (const rtm of body.teams ?? []) {
       const before = useTeamDbStore.getState().teams.find(t => t.id === rtm.id);

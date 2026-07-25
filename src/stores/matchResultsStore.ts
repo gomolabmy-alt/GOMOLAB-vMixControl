@@ -83,6 +83,15 @@ interface MatchResultsStore {
   /** Consumes (removes) the given ids from pendingDeletedIds — called by
    *  cloudSync.ts once they've actually been pushed to the cloud. */
   clearPendingDeletedIds: (ids: string[]) => void;
+  /** Collapses any results that share a `sourceScheduleId` (the same fixture)
+   *  down to one row each — cleans up duplicates already sitting in saved
+   *  data from before results got deterministic ids (see addResult), and
+   *  from any older-build venue on a multi-venue sync that still creates
+   *  random ids. Keeps the most recently saved row per fixture, marks the
+   *  rest pendingDeletedIds so the next push removes them from the cloud
+   *  too. Returns how many duplicate rows were removed. Safe/cheap to call
+   *  on every launch — a no-op when there's nothing to collapse. */
+  dedupeBySourceSchedule: () => number;
 }
 
 export const useMatchResultsStore = create<MatchResultsStore>()(
@@ -92,8 +101,26 @@ export const useMatchResultsStore = create<MatchResultsStore>()(
       pendingDeletedIds: [],
 
       addResult: (result) => {
-        const id = crypto.randomUUID();
-        set(s => ({ results: [{ ...result, id, savedAt: Date.now() }, ...s.results] }));
+        // A fixture-linked result gets a DETERMINISTIC id derived from its
+        // sourceScheduleId instead of a random one — two independent saves
+        // of the same fixture (a local double-save, or two venues on a
+        // multi-venue sync each completing it before the other's push/pull
+        // caught up) then converge on the same id instead of becoming two
+        // separate rows. Cloud sync's upsertById (and the id-keyed upsert
+        // below) collapse them naturally instead of accumulating duplicates
+        // that double-count in standings. Manually-entered results with no
+        // linked fixture keep a random id — there's no reliable natural key
+        // to dedupe those against.
+        const id = result.sourceScheduleId ? `fixture-${result.sourceScheduleId}` : crypto.randomUUID();
+        set(s => {
+          const idx = s.results.findIndex(r => r.id === id);
+          if (idx !== -1) {
+            const next = s.results.slice();
+            next[idx] = { ...next[idx], ...result, id, savedAt: Date.now() };
+            return { results: next };
+          }
+          return { results: [{ ...result, id, savedAt: Date.now() }, ...s.results] };
+        });
         return id;
       },
 
@@ -125,6 +152,29 @@ export const useMatchResultsStore = create<MatchResultsStore>()(
       restoreResults: (results) => set({ results: results as SavedMatchResult[] }),
 
       clearPendingDeletedIds: (ids) => set(s => ({ pendingDeletedIds: s.pendingDeletedIds.filter(id => !ids.includes(id)) })),
+
+      dedupeBySourceSchedule: () => {
+        const results = get().results;
+        const bySchedule = new Map<string, SavedMatchResult[]>();
+        const passthrough: SavedMatchResult[] = [];
+        for (const r of results) {
+          if (!r.sourceScheduleId) { passthrough.push(r); continue; }
+          const arr = bySchedule.get(r.sourceScheduleId) ?? [];
+          arr.push(r);
+          bySchedule.set(r.sourceScheduleId, arr);
+        }
+        const rebuilt: SavedMatchResult[] = [...passthrough];
+        const removedIds: string[] = [];
+        for (const [scheduleId, group] of bySchedule) {
+          const canonicalId = `fixture-${scheduleId}`;
+          const survivor = group.reduce((a, b) => (b.savedAt > a.savedAt ? b : a));
+          rebuilt.push({ ...survivor, id: canonicalId });
+          for (const r of group) if (r.id !== canonicalId) removedIds.push(r.id);
+        }
+        if (removedIds.length === 0) return 0;
+        set(s => ({ results: rebuilt, pendingDeletedIds: [...s.pendingDeletedIds, ...removedIds] }));
+        return removedIds.length;
+      },
     }),
     {
       name: 'gomolab-match-results-v1',

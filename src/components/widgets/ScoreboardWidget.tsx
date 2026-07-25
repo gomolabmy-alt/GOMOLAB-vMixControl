@@ -527,14 +527,14 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
     [savedResults, dc.teamAName, dc.teamBName, dc.teamAShortName, dc.teamBShortName, incompleteScheduleIds]
   );
   const aTeamStats = useMemo(
-    () => computeTeamTournamentStats(savedResults, { name: dc.teamAName ?? 'Team A', shortName: dc.teamAShortName }, effTournamentId, incompleteScheduleIds),
+    () => computeTeamTournamentStats(savedResults, { name: dc.teamAName ?? 'Team A', shortName: dc.teamAShortName, category: dc.category }, effTournamentId, incompleteScheduleIds),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [savedResults, dc.teamAName, dc.teamAShortName, effTournamentId, incompleteScheduleIds]
+    [savedResults, dc.teamAName, dc.teamAShortName, dc.category, effTournamentId, incompleteScheduleIds]
   );
   const bTeamStats = useMemo(
-    () => computeTeamTournamentStats(savedResults, { name: dc.teamBName ?? 'Team B', shortName: dc.teamBShortName }, effTournamentId, incompleteScheduleIds),
+    () => computeTeamTournamentStats(savedResults, { name: dc.teamBName ?? 'Team B', shortName: dc.teamBShortName, category: dc.category }, effTournamentId, incompleteScheduleIds),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [savedResults, dc.teamBName, dc.teamBShortName, effTournamentId, incompleteScheduleIds]
+    [savedResults, dc.teamBName, dc.teamBShortName, dc.category, effTournamentId, incompleteScheduleIds]
   );
   // The board's own configured scoring categories (e.g. Try/Conversion/Drop
   // Goal for rugby) — passed to the H2H panel so its breakdown rows always

@@ -5,6 +5,7 @@ import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { useAppSettings } from '../../stores/appSettingsStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
 import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, findDuplicateResult } from '../../utils/scoreboardSnapshot';
+import { useMatchNumbers } from '../../utils/matchNumber';
 import { ConfirmButton } from '../ConfirmButton';
 import { ConfirmModal } from '../ConfirmModal';
 import { CanvasActionContext } from '../../lib/canvasContext';
@@ -96,6 +97,7 @@ export function MatchScheduleWidget({ widgetId, config }: Props) {
 
   const sentCount = matches.filter(m => m.sentAt).length;
   const liveFixtureIds = useLiveFixtureIds();
+  const matchNumbers = useMatchNumbers();
 
   // Ticks the "how late" durations forward against the local system clock.
   const [now, setNow] = useState(() => Date.now());
@@ -167,7 +169,10 @@ export function MatchScheduleWidget({ widgetId, config }: Props) {
                 className={`wgt-ms-row${m.sentAt ? ' wgt-ms-row--sent' : ''}${isLate ? ' wgt-ms-row--late' : ''}${isNext ? ' wgt-ms-row--next' : ''}${isLive ? ' wgt-ms-row--live' : ''}`}
               >
                 <div className="wgt-ms-row-meta">
-                  <span className="wgt-ms-date">{m.date}{m.time ? ` · ${m.time}` : ''}</span>
+                  <span className="wgt-ms-date-group">
+                    {matchNumbers.get(m.id) && <span className="wgt-match-id" title="Match ID — same as shown on the public scoring page">{matchNumbers.get(m.id)}</span>}
+                    <span className="wgt-ms-date">{m.date}{m.time ? ` · ${m.time}` : ''}</span>
+                  </span>
                   {m.competition && <span className="wgt-ms-comp">{m.competition}{m.round ? ` — ${m.round}` : ''}</span>}
                 </div>
 

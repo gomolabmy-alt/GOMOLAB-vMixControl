@@ -10,6 +10,8 @@ import { UndoToast } from './components/UndoToast';
 import { useAuthStore } from './stores/authStore';
 import { syncClient } from './lib/syncClient';
 import { startCloudSync } from './lib/cloudSync';
+import { startHotkeyRegistry } from './lib/hotkeyRegistry';
+import { useMatchResultsStore } from './stores/matchResultsStore';
 
 function CommentatorApp() {
   const { theme, setTheme } = useAppSettings();
@@ -55,7 +57,22 @@ export function App() {
   // never involves a token at all.
   useEffect(() => {
     if (!isDesktopHost) return;
+    // One-time cleanup of any results left duplicated by the old
+    // random-id scheme before results got a deterministic id per fixture
+    // (see matchResultsStore's addResult) — collapses them and queues the
+    // extras for cloud deletion, so standings stop double-counting.
+    const removed = useMatchResultsStore.getState().dedupeBySourceSchedule();
+    if (removed > 0) console.log(`[results] collapsed ${removed} duplicate saved result(s)`);
     startCloudSync();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Global OS-level hotkeys (Button widgets + any widget's Hotkeys section)
+  // — registered once at launch, re-synced internally whenever canvas state
+  // changes. Desktop-host only; fires even while minimized/unfocused.
+  useEffect(() => {
+    if (!isDesktopHost) return;
+    startHotkeyRegistry();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
