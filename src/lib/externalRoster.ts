@@ -61,6 +61,46 @@ export async function fetchExternalTeams(source: ExternalRosterSource): Promise<
   return data.teams ?? [];
 }
 
+export interface ExternalMatchSummary {
+  code: string;
+  homeTeamName: string;
+  awayTeamName: string;
+  matchDate?: string;
+  matchTime?: string;
+  status: string;
+}
+
+// The tournament-wide match list — fetched once per sync cycle (not once per
+// team) and shared, since it's the same 80-100 rows regardless of which
+// team's lineup we're about to look up within it.
+export async function fetchExternalMatches(source: ExternalRosterSource): Promise<ExternalMatchSummary[]> {
+  return fetchJson<ExternalMatchSummary[]>(`${source.baseUrl}/api/public/tournaments/${source.tournamentId}/matches`);
+}
+
+interface ExternalLineupPlayer { playerName: string; jerseyNumber?: number | null }
+interface ExternalLineupsRaw { homeLineup?: ExternalLineupPlayer[]; awayLineup?: ExternalLineupPlayer[] }
+
+// The team roster endpoint's own jerseyNumber field is usually null on this
+// source — the numbers that actually get assigned live per-MATCH instead, as
+// a starting-lineup/bench team sheet (/api/public/matches/{code}/lineups).
+// Falls back to the most recently played COMPLETED match involving this team
+// as a best-effort snapshot — jersey numbers can in principle vary match to
+// match, so this is "what they wore last time", not a guaranteed-current number.
+async function fetchLatestLineupJerseys(source: ExternalRosterSource, teamName: string, matches: ExternalMatchSummary[]): Promise<Map<string, number>> {
+  const teamMatches = matches
+    .filter(m => m.status === 'COMPLETED' && (m.homeTeamName === teamName || m.awayTeamName === teamName))
+    .sort((a, b) => `${b.matchDate ?? ''}T${b.matchTime ?? ''}`.localeCompare(`${a.matchDate ?? ''}T${a.matchTime ?? ''}`));
+  const latest = teamMatches[0];
+  if (!latest) return new Map();
+  const lineups = await fetchJson<ExternalLineupsRaw>(`${source.baseUrl}/api/public/matches/${latest.code}/lineups`);
+  const lineup = latest.homeTeamName === teamName ? lineups.homeLineup : lineups.awayLineup;
+  const map = new Map<string, number>();
+  for (const p of lineup ?? []) {
+    if (typeof p.jerseyNumber === 'number') map.set(p.playerName.trim().toLowerCase(), p.jerseyNumber);
+  }
+  return map;
+}
+
 export interface ExternalPlayerInfo {
   name: string;
   jerseyNumber?: number;
@@ -80,14 +120,19 @@ interface ExternalPlayerRaw {
   yellowCards?: number; redCards?: number; appearances?: number;
 }
 
-// Name + jersey/position (usually unpopulated in practice on this source, but
-// carried through in case a future tournament fills them in) + the same
-// cumulative-stat fields the source exposes (tries/conversions/penalties/
-// dropGoals/cards/appearances) — this app's own Player type mirrors this
-// exact field set for a direct, lossless pull.
-export async function fetchExternalPlayers(source: ExternalRosterSource, teamSlug: string): Promise<ExternalPlayerInfo[]> {
-  const data = await fetchJson<{ players?: ExternalPlayerRaw[] }>(`${source.baseUrl}/api/public/teams/${teamSlug}`);
-  return (data.players ?? [])
+// Name + jersey/position + the same cumulative-stat fields the source
+// exposes (tries/conversions/penalties/dropGoals/cards/appearances) — this
+// app's own Player type mirrors this exact field set for a direct, lossless
+// pull. jerseyNumber is filled in from the roster's own field when present,
+// else falls back to the team's most recent completed match's lineup (see
+// fetchLatestLineupJerseys) — best-effort, so a lookup failure (offline, no
+// matches played yet) just leaves those players without a number rather than
+// failing the whole pull. `matches` lets a caller looping over many teams for
+// the same tournament (auto-sync) pass in an already-fetched list instead of
+// this refetching it per team.
+export async function fetchExternalPlayers(source: ExternalRosterSource, teamSlug: string, matches?: ExternalMatchSummary[]): Promise<ExternalPlayerInfo[]> {
+  const data = await fetchJson<{ name?: string; players?: ExternalPlayerRaw[] }>(`${source.baseUrl}/api/public/teams/${teamSlug}`);
+  const players = (data.players ?? [])
     .map((p): ExternalPlayerInfo | null => {
       const name = [p.firstName, p.lastName].filter(Boolean).join(' ').trim();
       if (!name) return null;
@@ -99,6 +144,23 @@ export async function fetchExternalPlayers(source: ExternalRosterSource, teamSlu
       };
     })
     .filter((p): p is ExternalPlayerInfo => p !== null);
+
+  if (data.name && players.some(p => p.jerseyNumber === undefined)) {
+    try {
+      const matchList = matches ?? await fetchExternalMatches(source);
+      const lineupJerseys = await fetchLatestLineupJerseys(source, data.name, matchList);
+      for (const p of players) {
+        if (p.jerseyNumber === undefined) {
+          const fromLineup = lineupJerseys.get(p.name.trim().toLowerCase());
+          if (fromLineup !== undefined) p.jerseyNumber = fromLineup;
+        }
+      }
+    } catch {
+      // Lineup lookup is a best-effort supplement — roster names/stats still
+      // come through fine even if this fails.
+    }
+  }
+  return players;
 }
 
 // "Girls"/"Boys" (this app's usual youth-tournament wording) and "Women"/
@@ -176,9 +238,13 @@ async function autoSyncRosters() {
     const source = t.externalRoster;
     if (!source) continue;
     const linkedTeams = useTeamDbStore.getState().teams.filter(tm => tm.tournamentId === t.id && tm.externalTeamSlug);
+    if (linkedTeams.length === 0) continue;
+    // Fetched once per tournament, not once per team — every linked team's
+    // lineup lookup shares this same match list.
+    const matches = await fetchExternalMatches(source).catch(() => undefined);
     for (const team of linkedTeams) {
       try {
-        const players = await fetchExternalPlayers(source, team.externalTeamSlug!);
+        const players = await fetchExternalPlayers(source, team.externalTeamSlug!, matches);
         if (players.length > 0) mergeExternalPlayersIntoTeam(team.id, players);
       } catch {
         // Offline, or the source is briefly unreachable — just skip this

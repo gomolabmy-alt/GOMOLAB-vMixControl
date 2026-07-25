@@ -4,6 +4,7 @@ import { useCanvasStore } from '../../stores/canvasStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
 import { pushResultsOnly, pullResultsOnly } from '../../lib/cloudSync';
 import { useMatchNumbers } from '../../utils/matchNumber';
+import { sortResults, RESULT_SORT_LABELS, type ResultSortMode } from '../../utils/resultSort';
 
 interface Props {
   widgetId: string;
@@ -64,13 +65,14 @@ function EditableSpan({ value, onChange, className, type = 'text', title, placeh
 
 export function RecentMatchesWidget({ widgetId, config }: Props) {
   const { results: allResults, updateResult, deleteResult } = useMatchResultsStore();
-  const { pages } = useCanvasStore();
+  const { pages, updateWidgetConfig } = useCanvasStore();
   const maxResults: number = config.maxResults ?? 8;
   const groupByCompetition: boolean = config.groupByCompetition ?? true;
   const showDate: boolean = config.showDate ?? true;
   const title: string = config.title ?? 'Latest Results';
   const useFullName: boolean = config.nameDisplay === 'full';
   const compact: boolean = config.compactSize ?? false;
+  const sortMode: ResultSortMode = config.sortMode ?? 'matchId';
 
   // A canvas is normally dedicated to one tournament — falls back to that
   // instead of requiring "which tournament" to be picked on every widget.
@@ -81,8 +83,16 @@ export function RecentMatchesWidget({ widgetId, config }: Props) {
     [allResults, effectiveTournamentId]
   );
 
-  const shown = useMemo(() => results.slice(0, maxResults), [results, maxResults]);
   const matchNumbers = useMatchNumbers();
+  // matchId/kickoff sort ascending (real match running order) — "latest N"
+  // for this widget's maxResults cap is the tail of that order, reversed
+  // back to newest-on-top for display. 'updated' already sorts newest-first
+  // (savedAt descending), so its own first N is already the right slice.
+  const sortedAll = useMemo(() => sortResults(results, sortMode, matchNumbers), [results, sortMode, matchNumbers]);
+  const shown = useMemo(
+    () => sortMode === 'updated' ? sortedAll.slice(0, maxResults) : sortedAll.slice(-maxResults).reverse(),
+    [sortedAll, maxResults, sortMode]
+  );
 
   const groups: Group[] = useMemo(() => {
     if (!groupByCompetition) return [{ key: '__all__', competition: '', items: shown }];
@@ -114,6 +124,17 @@ export function RecentMatchesWidget({ widgetId, config }: Props) {
       <div className="wgt-rm-header">
         <span>{title}</span>
         <div className="wgt-rm-sync-btns" onClick={e => e.stopPropagation()}>
+          <select
+            className="wgt-rm-sort-select"
+            value={sortMode}
+            title="Sort order"
+            onPointerDown={e => e.stopPropagation()}
+            onChange={e => updateWidgetConfig(widgetId, { sortMode: e.target.value as ResultSortMode })}
+          >
+            {(Object.keys(RESULT_SORT_LABELS) as ResultSortMode[]).map(m => (
+              <option key={m} value={m}>{RESULT_SORT_LABELS[m]}</option>
+            ))}
+          </select>
           {resultsSyncState === 'error' && <span className="wgt-rm-sync-status wgt-rm-sync-status--error">⚠</span>}
           {resultsSyncState === 'done' && <span className="wgt-rm-sync-status">✓</span>}
           <button

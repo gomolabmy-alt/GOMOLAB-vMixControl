@@ -16,12 +16,14 @@ const norm = (s?: string) => (s ?? '').trim().toLowerCase();
  */
 export function computeTeamTournamentStats(
   results: SavedMatchResult[],
-  /** `category` disambiguates teams that share a name across categories in
-   *  the same tournament (e.g. a state fielding both a "Boys" and "Girls"
-   *  squad both named "PERAK") — without it, the other category's matches
-   *  for a same-named team get wrongly folded into this one's form/played
-   *  count. Omit only for tournaments with no categories at all. */
-  team: { name: string; shortName?: string; category?: string },
+  /** `id` (the SavedTeam id) is preferred when both it and a result's own
+   *  teamAId/teamBId are present — unambiguous even across categories that
+   *  reuse a team name. `category` is the fallback disambiguator otherwise
+   *  (e.g. a state fielding both a "Boys" and "Girls" squad both named
+   *  "PERAK") — without it, the other category's matches for a same-named
+   *  team get wrongly folded into this one's form/played count. Omit
+   *  category only for tournaments with no categories at all. */
+  team: { id?: string; name: string; shortName?: string; category?: string },
   tournamentId: string | undefined,
   /** Schedule fixture ids that are NOT yet marked completed — a saved result
    *  can exist for one of these (e.g. an in-progress "Save Result" click, or
@@ -37,13 +39,18 @@ export function computeTeamTournamentStats(
   const categoryKey = norm(team.category);
   if (!nameKey) return stats;
 
+  // id match (unambiguous) when available on both sides; otherwise falls
+  // back to name+category, so category still gates the match when neither
+  // this team nor the result's side has an id to compare instead.
+  const sideMatches = (sideId: string | undefined, sideName: string, sideShort: string | undefined, resultCategory: string | undefined) =>
+    team.id && sideId ? sideId === team.id : (norm(resultCategory) === categoryKey && (norm(sideName) === nameKey || (!!shortKey && norm(sideShort) === shortKey)));
+
   for (const r of results) {
     if (r.matchType === 'bye') continue; // nothing was actually played
     if (r.sourceScheduleId && incompleteScheduleIds?.has(r.sourceScheduleId)) continue; // match is still running
     if (tournamentId && r.tournamentId && r.tournamentId !== tournamentId) continue;
-    if (norm(r.category) !== categoryKey) continue;
-    const aMatch = norm(r.teamAName) === nameKey || (!!shortKey && norm(r.teamAShortName) === shortKey);
-    const bMatch = norm(r.teamBName) === nameKey || (!!shortKey && norm(r.teamBShortName) === shortKey);
+    const aMatch = sideMatches(r.teamAId, r.teamAName, r.teamAShortName, r.category);
+    const bMatch = sideMatches(r.teamBId, r.teamBName, r.teamBShortName, r.category);
     if (!aMatch && !bMatch) continue;
     const side: 'A' | 'B' = aMatch ? 'A' : 'B';
 

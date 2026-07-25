@@ -12,6 +12,7 @@ import { syncClient } from './lib/syncClient';
 import { startCloudSync } from './lib/cloudSync';
 import { startHotkeyRegistry } from './lib/hotkeyRegistry';
 import { useMatchResultsStore } from './stores/matchResultsStore';
+import { backfillTeamIds } from './lib/backfillTeamIds';
 
 function CommentatorApp() {
   const { theme, setTheme } = useAppSettings();
@@ -57,6 +58,13 @@ export function App() {
   // never involves a token at all.
   useEffect(() => {
     if (!isDesktopHost) return;
+    // Backfills teamAId/teamBId onto fixtures/results saved before those
+    // fields existed, so old data gets promoted to unambiguous id matching
+    // too (see backfillTeamIds.ts), not just new data going forward.
+    const backfilled = backfillTeamIds();
+    if (backfilled.matches > 0 || backfilled.results > 0) {
+      console.log(`[teams] backfilled ids on ${backfilled.matches} fixture(s), ${backfilled.results} result(s)`);
+    }
     // One-time cleanup of any results left duplicated by the old
     // random-id scheme before results got a deterministic id per fixture
     // (see matchResultsStore's addResult) — collapses them and queues the

@@ -4,7 +4,7 @@ import { useMatchScheduleStore } from '../../stores/matchScheduleStore';
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { useAppSettings } from '../../stores/appSettingsStore';
 import { resolveImageUrl } from '../../lib/imageUrl';
-import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, findDuplicateResult } from '../../utils/scoreboardSnapshot';
+import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, findDuplicateResult, parseScheduledDateTime } from '../../utils/scoreboardSnapshot';
 import { useMatchNumbers } from '../../utils/matchNumber';
 import { ConfirmButton } from '../ConfirmButton';
 import { ConfirmModal } from '../ConfirmModal';
@@ -15,26 +15,6 @@ interface Props {
   config: Record<string, any>;
   w: number;
   h: number;
-}
-
-// Parses "YYYY-MM-DD" + an optional loose time string ("20:30", "8:30 PM", "8:30pm")
-// into a local-timezone epoch ms, so lateness compares against the local system clock.
-function parseScheduledDateTime(date: string, time?: string): number | null {
-  const dm = date?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!dm) return null;
-  const [, y, mo, d] = dm;
-  let hours = 0, minutes = 0;
-  if (time) {
-    const tm = time.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?$/);
-    if (tm) {
-      hours = parseInt(tm[1], 10);
-      minutes = parseInt(tm[2], 10);
-      const ampm = tm[3]?.toUpperCase();
-      if (ampm === 'PM' && hours < 12) hours += 12;
-      if (ampm === 'AM' && hours === 12) hours = 0;
-    }
-  }
-  return new Date(Number(y), Number(mo) - 1, Number(d), hours, minutes, 0, 0).getTime();
 }
 
 function formatLate(ms: number): string {

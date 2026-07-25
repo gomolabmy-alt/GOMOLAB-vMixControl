@@ -27,7 +27,8 @@ import { useMatchResultsStore, type SavedMatchResult } from '../stores/matchResu
 import { resolveImageUrl, transparentLogoUrl } from '../lib/imageUrl';
 import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, findDuplicateResult } from '../utils/scoreboardSnapshot';
 import { pushTournamentNow, computePushDiff, pushResultsOnly, pullResultsOnly, localizeTournamentLogos, type PushDiffItem } from '../lib/cloudSync';
-import { computeMatchNumbers } from '../utils/matchNumber';
+import { computeMatchNumbers, useMatchNumbers } from '../utils/matchNumber';
+import { sortResults, RESULT_SORT_LABELS, type ResultSortMode } from '../utils/resultSort';
 
 // ── Import / Export helpers ───────────────────────────────────────────────────
 
@@ -1394,7 +1395,7 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
   const [randomize, setRandomize] = useState(true);
   const [thirdPlacePlayoff, setThirdPlacePlayoff] = useState(false);
 
-  const toRef = (t: SavedTeam): ScheduleTeamRef => ({ name: t.name, shortName: t.shortName, color: t.color, logo: t.logo });
+  const toRef = (t: SavedTeam): ScheduleTeamRef => ({ id: t.id, name: t.name, shortName: t.shortName, color: t.color, logo: t.logo });
 
   type PreviewFixture = GeneratedFixture & { groupName?: string; fixtureCategory?: string };
 
@@ -1897,8 +1898,8 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
       addMatch({
         tournamentId: tournament.id, competition: tournament.name,
         date: f.date, time: f.time, round: f.round, category: f.category, group: f.group, tier: f.tier,
-        teamAName: f.teamA.name, teamAShortName: f.teamA.shortName, teamAColor: f.teamA.color, teamALogo: f.teamA.logo,
-        teamBName: f.teamB?.name ?? '', teamBShortName: f.teamB?.shortName, teamBColor: f.teamB?.color ?? '#95a5a6', teamBLogo: f.teamB?.logo,
+        teamAId: f.teamA.id, teamAName: f.teamA.name, teamAShortName: f.teamA.shortName, teamAColor: f.teamA.color, teamALogo: f.teamA.logo,
+        teamBId: f.teamB?.id, teamBName: f.teamB?.name ?? '', teamBShortName: f.teamB?.shortName, teamBColor: f.teamB?.color ?? '#95a5a6', teamBLogo: f.teamB?.logo,
       });
     }
   };
@@ -2530,10 +2531,12 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
-  const results = useMemo(
-    () => allResults.filter(r => r.tournamentId === tournament.id),
-    [allResults, tournament.id]
-  );
+  const [sortMode, setSortMode] = useState<ResultSortMode>('matchId');
+  const matchNumbers = useMatchNumbers();
+  const results = useMemo(() => {
+    const scoped = allResults.filter(r => r.tournamentId === tournament.id);
+    return sortResults(scoped, sortMode, matchNumbers);
+  }, [allResults, tournament.id, sortMode, matchNumbers]);
   // Same reasoning as SchedulePanel's own hasMultipleVenues — the badge only
   // tells the operator something when results from two+ different venues
   // are actually mixed together here.
@@ -2563,6 +2566,11 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        <select className="tm-io-btn" value={sortMode} title="Sort order" onChange={e => setSortMode(e.target.value as ResultSortMode)}>
+          {(Object.keys(RESULT_SORT_LABELS) as ResultSortMode[]).map(m => (
+            <option key={m} value={m}>Sort: {RESULT_SORT_LABELS[m]}</option>
+          ))}
+        </select>
         {resultsSyncState !== 'idle' && (
           <span style={{ fontSize: 11, color: resultsSyncState === 'error' ? 'var(--red)' : 'var(--text-muted)' }}>
             {resultsSyncState === 'busy' ? '…' : resultsSyncState === 'error' ? `⚠ ${resultsSyncMsg}` : `✓ ${resultsSyncMsg}`}
@@ -2602,6 +2610,11 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
               title={expandedIds.has(r.id) ? 'Hide details' : 'Show details (score breakdown, shootout, cards)'}
               onClick={() => toggleExpanded(r.id)}
             >▸</button>
+            {r.sourceScheduleId && matchNumbers.get(r.sourceScheduleId) && (
+              <span className="tm-sched-matchnum-badge" title="Auto match number (Match # Prefix + venue letter + running sequence) — same as the Schedule tab">
+                {matchNumbers.get(r.sourceScheduleId)}
+              </span>
+            )}
             <EditableDate value={r.date} onChange={date => updateResult(r.id, { date })} disabled={!editMode} />
             <div className="tm-sched-divider" />
 
@@ -2685,14 +2698,17 @@ export function computeStandings(teams: SavedTeam[], results: SavedMatchResult[]
   for (const t of seeded) {
     rows.set(t.id, { teamId: t.id, name: t.name, shortName: t.shortName, logo: t.logo, color: t.color, played: 0, won: 0, drawn: 0, lost: 0, pf: 0, pa: 0, pts: 0 });
   }
-  // Matched by name AND category — `results` passed in is only ever filtered
-  // by tournament (see StandingsPanel/StandingsWidget), never by category, so
-  // without the category check a result from a completely different
-  // category's match gets attributed here purely because a team of the same
-  // name (e.g. a state fielding both "Boys" and "Girls" squads, both named
-  // "PERAK") happens to also sit in this pool — inflating played/won/pf
-  // counts with matches this pool's team never actually played.
-  const findRow = (name: string, shortName: string | undefined, category: string | undefined) => {
+  // Matched by id when the result carries one (unambiguous — see
+  // ScheduledMatch.teamAId/SavedMatchResult.teamAId), else by name AND
+  // category — `results` passed in is only ever filtered by tournament (see
+  // StandingsPanel/StandingsWidget), never by category, so without the
+  // category check a result from a completely different category's match
+  // gets attributed here purely because a team of the same name (e.g. a
+  // state fielding both "Boys" and "Girls" squads, both named "PERAK")
+  // happens to also sit in this pool — inflating played/won/pf counts with
+  // matches this pool's team never actually played.
+  const findRow = (id: string | undefined, name: string, shortName: string | undefined, category: string | undefined) => {
+    if (id && rows.has(id)) return rows.get(id);
     const key = name.trim().toLowerCase();
     const shortKey = (shortName ?? '').trim().toLowerCase();
     const catKey = (category ?? '').trim().toLowerCase();
@@ -2704,8 +2720,8 @@ export function computeStandings(teams: SavedTeam[], results: SavedMatchResult[]
   };
   for (const r of results) {
     if (r.matchType === 'bye') continue; // nothing was actually played
-    const rowA = findRow(r.teamAName, r.teamAShortName, r.category);
-    const rowB = findRow(r.teamBName, r.teamBShortName, r.category);
+    const rowA = findRow(r.teamAId, r.teamAName, r.teamAShortName, r.category);
+    const rowB = findRow(r.teamBId, r.teamBName, r.teamBShortName, r.category);
     if (!rowA || !rowB) continue; // team isn't part of this group/tournament
     rowA.played++; rowB.played++;
     rowA.pf += r.scoreA; rowA.pa += r.scoreB;
@@ -2927,9 +2943,30 @@ function TeamInfoModal({ tournament, teamName, category, onClose }: { tournament
 
 // A regular (non-bye/walkover) played match's score lives in a separate
 // SavedMatchResult, not on the fixture itself — matched by team names since
-// there's no id link back for a manually-saved scoreboard result. Shared by
-// the bracket viewer (to bold the winner) and the auto-advance effect below
-// (to know who advances).
+// there's no id link back for a manually-saved scoreboard result (still the
+// fallback below when either side lacks one). Shared by the bracket viewer
+// (to bold the winner) and the auto-advance effect below (to know who
+// advances).
+//
+// Prefers matching by id (ScheduledMatch.teamAId/SavedMatchResult.teamAId)
+// when both the fixture and a candidate result have one on both sides —
+// unambiguous even across categories that reuse a team name. Falls back to
+// name+category pair matching otherwise — some team names are reused across
+// categories (e.g. a state's Boys and Girls squads both named "PERAK"), and
+// without the category check a category's bracket match could pick up an
+// unrelated result from the other category that happens to have the exact
+// same two team names.
+function fixturePairOrientation(res: SavedMatchResult, m: ScheduledMatch): 'straight' | 'swapped' | null {
+  if (m.teamAId && m.teamBId && res.teamAId && res.teamBId) {
+    if (res.teamAId === m.teamAId && res.teamBId === m.teamBId) return 'straight';
+    if (res.teamAId === m.teamBId && res.teamBId === m.teamAId) return 'swapped';
+    return null; // both sides have ids and neither pairing matches — definitely not this fixture
+  }
+  if ((res.category ?? '').trim().toLowerCase() !== (m.category ?? '').trim().toLowerCase()) return null;
+  if (res.teamAName === m.teamAName && res.teamBName === m.teamBName) return 'straight';
+  if (res.teamAName === m.teamBName && res.teamBName === m.teamAName) return 'swapped';
+  return null;
+}
 export function findMatchScore(m: ScheduledMatch, results: SavedMatchResult[], tournamentId: string): { a: number; b: number } | null {
   // A bye/walkover only counts once actually confirmed via the scoreboard
   // popup (which sets completedAt) — before that it's just flagged, not
@@ -2937,13 +2974,9 @@ export function findMatchScore(m: ScheduledMatch, results: SavedMatchResult[], t
   // auto-advance, group-stage completion checks, the bracket viewer's bold).
   if (m.matchType) return m.completedAt ? { a: m.scoreA ?? 0, b: m.scoreB ?? 0 } : null;
   if (!m.completedAt) return null;
-  const r = results.find(res =>
-    res.tournamentId === tournamentId &&
-    ((res.teamAName === m.teamAName && res.teamBName === m.teamBName) ||
-     (res.teamAName === m.teamBName && res.teamBName === m.teamAName))
-  );
+  const r = results.find(res => res.tournamentId === tournamentId && fixturePairOrientation(res, m) !== null);
   if (!r) return null;
-  return r.teamAName === m.teamAName ? { a: r.scoreA, b: r.scoreB } : { a: r.scoreB, b: r.scoreA };
+  return fixturePairOrientation(r, m) === 'straight' ? { a: r.scoreA, b: r.scoreB } : { a: r.scoreB, b: r.scoreA };
 }
 
 // Like findMatchScore, but also resolves a shootout decider when the raw
@@ -2957,13 +2990,9 @@ export function findMatchWinner(m: ScheduledMatch, results: SavedMatchResult[], 
   if (score.a > score.b) return { side: 'A' };
   if (score.b > score.a) return { side: 'B' };
   if (m.matchType || !m.completedAt) return null; // genuine unresolved draw (bye/walkover already handled above; incomplete fixture)
-  const r = results.find(res =>
-    res.tournamentId === tournamentId &&
-    ((res.teamAName === m.teamAName && res.teamBName === m.teamBName) ||
-     (res.teamAName === m.teamBName && res.teamBName === m.teamAName))
-  );
+  const r = results.find(res => res.tournamentId === tournamentId && fixturePairOrientation(res, m) !== null);
   if (!r?.shootout) return null; // a genuine round-robin draw with no decider
-  const straight = r.teamAName === m.teamAName;
+  const straight = fixturePairOrientation(r, m) === 'straight';
   const side: 'A' | 'B' = straight ? r.shootout.winner : (r.shootout.winner === 'A' ? 'B' : 'A');
   const shootout = straight ? { scoreA: r.shootout.scoreA, scoreB: r.shootout.scoreB } : { scoreA: r.shootout.scoreB, scoreB: r.shootout.scoreA };
   return { side, shootout };
@@ -4766,22 +4795,22 @@ export function TournamentManager({ onClose }: Props) {
         const win = findMatchWinner(qf, scopedResults, selected.id);
         if (!win) continue;
         const winner = win.side === 'A'
-          ? { name: qf.teamAName, shortName: qf.teamAShortName, color: qf.teamAColor, logo: qf.teamALogo }
-          : { name: qf.teamBName, shortName: qf.teamBShortName, color: qf.teamBColor, logo: qf.teamBLogo };
+          ? { id: qf.teamAId, name: qf.teamAName, shortName: qf.teamAShortName, color: qf.teamAColor, logo: qf.teamALogo }
+          : { id: qf.teamBId, name: qf.teamBName, shortName: qf.teamBShortName, color: qf.teamBColor, logo: qf.teamBLogo };
         const loser = win.side === 'A'
-          ? { name: qf.teamBName, shortName: qf.teamBShortName, color: qf.teamBColor, logo: qf.teamBLogo }
-          : { name: qf.teamAName, shortName: qf.teamAShortName, color: qf.teamAColor, logo: qf.teamALogo };
+          ? { id: qf.teamBId, name: qf.teamBName, shortName: qf.teamBShortName, color: qf.teamBColor, logo: qf.teamBLogo }
+          : { id: qf.teamAId, name: qf.teamAName, shortName: qf.teamAShortName, color: qf.teamAColor, logo: qf.teamALogo };
         const matchLabel = bareStageLabel(qf);
         const winnerPh = `Winner of ${qf.tier} ${matchLabel}`;
         const loserPh = `Loser of ${qf.tier} ${matchLabel}`;
         for (const target of catMatches) {
           if (winner.name) {
-            if (target.teamAName === winnerPh && isPlaceholderTeamName(target.teamAName)) updateMatch(target.id, { teamAName: winner.name, teamAShortName: winner.shortName, teamAColor: winner.color, teamALogo: winner.logo });
-            if (target.teamBName === winnerPh && isPlaceholderTeamName(target.teamBName)) updateMatch(target.id, { teamBName: winner.name, teamBShortName: winner.shortName, teamBColor: winner.color, teamBLogo: winner.logo });
+            if (target.teamAName === winnerPh && isPlaceholderTeamName(target.teamAName)) updateMatch(target.id, { teamAId: winner.id, teamAName: winner.name, teamAShortName: winner.shortName, teamAColor: winner.color, teamALogo: winner.logo });
+            if (target.teamBName === winnerPh && isPlaceholderTeamName(target.teamBName)) updateMatch(target.id, { teamBId: winner.id, teamBName: winner.name, teamBShortName: winner.shortName, teamBColor: winner.color, teamBLogo: winner.logo });
           }
           if (loser.name) {
-            if (target.teamAName === loserPh && isPlaceholderTeamName(target.teamAName)) updateMatch(target.id, { teamAName: loser.name, teamAShortName: loser.shortName, teamAColor: loser.color, teamALogo: loser.logo });
-            if (target.teamBName === loserPh && isPlaceholderTeamName(target.teamBName)) updateMatch(target.id, { teamBName: loser.name, teamBShortName: loser.shortName, teamBColor: loser.color, teamBLogo: loser.logo });
+            if (target.teamAName === loserPh && isPlaceholderTeamName(target.teamAName)) updateMatch(target.id, { teamAId: loser.id, teamAName: loser.name, teamAShortName: loser.shortName, teamAColor: loser.color, teamALogo: loser.logo });
+            if (target.teamBName === loserPh && isPlaceholderTeamName(target.teamBName)) updateMatch(target.id, { teamBId: loser.id, teamBName: loser.name, teamBShortName: loser.shortName, teamBColor: loser.color, teamBLogo: loser.logo });
           }
         }
       }
@@ -4819,28 +4848,28 @@ export function TournamentManager({ onClose }: Props) {
             const k = matchIndexOf(cur);
             const slot: 'A' | 'B' = k % 2 === 0 ? 'A' : 'B';
             const winner = win.side === 'A'
-              ? { name: cur.teamAName, shortName: cur.teamAShortName, color: cur.teamAColor, logo: cur.teamALogo }
-              : { name: cur.teamBName, shortName: cur.teamBShortName, color: cur.teamBColor, logo: cur.teamBLogo };
+              ? { id: cur.teamAId, name: cur.teamAName, shortName: cur.teamAShortName, color: cur.teamAColor, logo: cur.teamALogo }
+              : { id: cur.teamBId, name: cur.teamBName, shortName: cur.teamBShortName, color: cur.teamBColor, logo: cur.teamBLogo };
             const next = nextByIndex.get(Math.floor(k / 2));
             if (next && winner.name) {
               const curName = slot === 'A' ? next.teamAName : next.teamBName;
               if (curName !== winner.name && isPlaceholderTeamName(curName)) {
                 updateMatch(next.id, slot === 'A'
-                  ? { teamAName: winner.name, teamAShortName: winner.shortName, teamAColor: winner.color, teamALogo: winner.logo }
-                  : { teamBName: winner.name, teamBShortName: winner.shortName, teamBColor: winner.color, teamBLogo: winner.logo });
+                  ? { teamAId: winner.id, teamAName: winner.name, teamAShortName: winner.shortName, teamAColor: winner.color, teamALogo: winner.logo }
+                  : { teamBId: winner.id, teamBName: winner.name, teamBShortName: winner.shortName, teamBColor: winner.color, teamBLogo: winner.logo });
               }
             }
             // 3rd/4th place playoff: the Semifinal LOSER fills the corresponding slot.
             if (thirdPlaceMatch && stageName === 'Semifinal') {
               const loser = win.side === 'A'
-                ? { name: cur.teamBName, shortName: cur.teamBShortName, color: cur.teamBColor, logo: cur.teamBLogo }
-                : { name: cur.teamAName, shortName: cur.teamAShortName, color: cur.teamAColor, logo: cur.teamALogo };
+                ? { id: cur.teamBId, name: cur.teamBName, shortName: cur.teamBShortName, color: cur.teamBColor, logo: cur.teamBLogo }
+                : { id: cur.teamAId, name: cur.teamAName, shortName: cur.teamAShortName, color: cur.teamAColor, logo: cur.teamALogo };
               if (loser.name) {
                 const curName = slot === 'A' ? thirdPlaceMatch.teamAName : thirdPlaceMatch.teamBName;
                 if (curName !== loser.name && isPlaceholderTeamName(curName)) {
                   updateMatch(thirdPlaceMatch.id, slot === 'A'
-                    ? { teamAName: loser.name, teamAShortName: loser.shortName, teamAColor: loser.color, teamALogo: loser.logo }
-                    : { teamBName: loser.name, teamBShortName: loser.shortName, teamBColor: loser.color, teamBLogo: loser.logo });
+                    ? { teamAId: loser.id, teamAName: loser.name, teamAShortName: loser.shortName, teamAColor: loser.color, teamALogo: loser.logo }
+                    : { teamBId: loser.id, teamBName: loser.name, teamBShortName: loser.shortName, teamBColor: loser.color, teamBLogo: loser.logo });
                 }
               }
             }
@@ -4894,8 +4923,8 @@ export function TournamentManager({ onClose }: Props) {
           const standing = standingsByGroup.get(groupName)?.[rank - 1];
           if (!standing) continue;
           updateMatch(m.id, side === 'A'
-            ? { teamAName: standing.name, teamAShortName: standing.shortName, teamAColor: standing.color, teamALogo: standing.logo }
-            : { teamBName: standing.name, teamBShortName: standing.shortName, teamBColor: standing.color, teamBLogo: standing.logo });
+            ? { teamAId: standing.teamId, teamAName: standing.name, teamAShortName: standing.shortName, teamAColor: standing.color, teamALogo: standing.logo }
+            : { teamBId: standing.teamId, teamBName: standing.name, teamBShortName: standing.shortName, teamBColor: standing.color, teamBLogo: standing.logo });
         }
       }
     }

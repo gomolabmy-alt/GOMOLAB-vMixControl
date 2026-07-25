@@ -17,10 +17,17 @@ export interface HeadToHeadStats {
 
 const norm = (s?: string) => (s ?? '').trim().toLowerCase();
 
-/** Whether a result's side (name+shortName) matches the given team identity —
- *  same case-insensitive name/shortName convention used for team
- *  disambiguation elsewhere in this app (see TeamMatchHistoryButton). */
-function sideIs(n: string | undefined, s: string | undefined, team: { name: string; shortName?: string }): boolean {
+/** Whether a result's side matches the given team identity — id match
+ *  preferred when both the team and that side have one (unambiguous even
+ *  across categories that reuse a team name); otherwise falls back to
+ *  category + name/shortName (same case-insensitive convention used for
+ *  team disambiguation elsewhere in this app, see TeamMatchHistoryButton) —
+ *  checked per-side so a legacy result with no id on this particular side
+ *  still gets the category guard, even when the team we're comparing
+ *  against does have an id (from a DIFFERENT, id-carrying result). */
+function sideIs(id: string | undefined, n: string | undefined, s: string | undefined, resultCategory: string | undefined, team: { id?: string; name: string; shortName?: string; category?: string }): boolean {
+  if (team.id && id) return id === team.id;
+  if (norm(resultCategory) !== norm(team.category)) return false;
   const nameKey = norm(team.name);
   const shortKey = norm(team.shortName);
   if (!nameKey || !n) return false;
@@ -29,13 +36,18 @@ function sideIs(n: string | undefined, s: string | undefined, team: { name: stri
 
 /**
  * All-time head-to-head record between two teams, pulled from every saved
- * result in the database (no tournament/category scoping — "head to head"
- * means the all-time record, the standard broadcast meaning).
+ * result in the database (no TOURNAMENT scoping — "head to head" means the
+ * all-time record, the standard broadcast meaning, so a rematch in next
+ * year's tournament still counts). Still scoped by CATEGORY when given
+ * (id match, when available, makes this redundant but harmless) — some team
+ * names are reused across categories in the same tournament (e.g. a state's
+ * Boys and Girls squads both named "PERAK"), and those are different teams
+ * entirely, not a rivalry history to combine.
  */
 export function computeHeadToHead(
   results: SavedMatchResult[],
-  teamA: { name: string; shortName?: string },
-  teamB: { name: string; shortName?: string },
+  teamA: { id?: string; name: string; shortName?: string; category?: string },
+  teamB: { id?: string; name: string; shortName?: string; category?: string },
   /** Schedule fixture ids not yet marked completed — a result can exist for
    *  one (an in-progress save, or the auto-save before a board is
    *  overwritten) without the match actually being over, so it isn't a
@@ -55,8 +67,8 @@ export function computeHeadToHead(
   for (const r of results) {
     if (r.matchType === 'bye') continue; // nothing was actually played
     if (r.sourceScheduleId && incompleteScheduleIds?.has(r.sourceScheduleId)) continue; // match is still running
-    const straight = sideIs(r.teamAName, r.teamAShortName, teamA) && sideIs(r.teamBName, r.teamBShortName, teamB);
-    const swapped = sideIs(r.teamAName, r.teamAShortName, teamB) && sideIs(r.teamBName, r.teamBShortName, teamA);
+    const straight = sideIs(r.teamAId, r.teamAName, r.teamAShortName, r.category, teamA) && sideIs(r.teamBId, r.teamBName, r.teamBShortName, r.category, teamB);
+    const swapped = sideIs(r.teamAId, r.teamAName, r.teamAShortName, r.category, teamB) && sideIs(r.teamBId, r.teamBName, r.teamBShortName, r.category, teamA);
     if (!straight && !swapped) continue;
 
     stats.meetings.push(r);

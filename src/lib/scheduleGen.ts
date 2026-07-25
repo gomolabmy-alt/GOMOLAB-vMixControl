@@ -3,6 +3,11 @@
 // about and test in isolation from React/Zustand.
 
 export interface ScheduleTeamRef {
+  /** The originating SavedTeam's id, when this ref was built from a real
+   *  Team DB record (not a placeholder like "1st Group A") — carried onto
+   *  the generated fixture so downstream matching can use it instead of
+   *  name+category string matching. */
+  id?: string;
   name: string;
   shortName?: string;
   color: string;

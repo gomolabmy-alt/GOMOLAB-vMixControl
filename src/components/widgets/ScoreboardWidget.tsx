@@ -388,11 +388,13 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
     updateWidgetConfig(widgetId, { [field]: color });
   };
 
-  // Fills name + short name + color + logo together from a saved team pick.
-  const handleTeamPick = (team: 'A' | 'B', picked: { name: string; shortName?: string; color: string; logo?: string }) => {
+  // Fills name + short name + color + logo together from a saved team pick —
+  // plus its SavedTeam id, so results saved from here can be matched
+  // unambiguously later instead of relying on name+category matching.
+  const handleTeamPick = (team: 'A' | 'B', picked: { id: string; name: string; shortName?: string; color: string; logo?: string }) => {
     const patch = team === 'A'
-      ? { teamAName: picked.name, teamAShortName: picked.shortName ?? '', teamAColor: picked.color, teamALogo: picked.logo ?? '' }
-      : { teamBName: picked.name, teamBShortName: picked.shortName ?? '', teamBColor: picked.color, teamBLogo: picked.logo ?? '' };
+      ? { teamAId: picked.id, teamAName: picked.name, teamAShortName: picked.shortName ?? '', teamAColor: picked.color, teamALogo: picked.logo ?? '' }
+      : { teamBId: picked.id, teamBName: picked.name, teamBShortName: picked.shortName ?? '', teamBColor: picked.color, teamBLogo: picked.logo ?? '' };
     updateWidgetConfig(widgetId, patch);
   };
 
@@ -519,22 +521,22 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const h2h = useMemo(
     () => computeHeadToHead(
       savedResults,
-      { name: dc.teamAName ?? 'Team A', shortName: dc.teamAShortName },
-      { name: dc.teamBName ?? 'Team B', shortName: dc.teamBShortName },
+      { id: dc.teamAId, name: dc.teamAName ?? 'Team A', shortName: dc.teamAShortName, category: dc.category },
+      { id: dc.teamBId, name: dc.teamBName ?? 'Team B', shortName: dc.teamBShortName, category: dc.category },
       incompleteScheduleIds,
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [savedResults, dc.teamAName, dc.teamBName, dc.teamAShortName, dc.teamBShortName, incompleteScheduleIds]
+    [savedResults, dc.teamAId, dc.teamBId, dc.teamAName, dc.teamBName, dc.teamAShortName, dc.teamBShortName, dc.category, incompleteScheduleIds]
   );
   const aTeamStats = useMemo(
-    () => computeTeamTournamentStats(savedResults, { name: dc.teamAName ?? 'Team A', shortName: dc.teamAShortName, category: dc.category }, effTournamentId, incompleteScheduleIds),
+    () => computeTeamTournamentStats(savedResults, { id: dc.teamAId, name: dc.teamAName ?? 'Team A', shortName: dc.teamAShortName, category: dc.category }, effTournamentId, incompleteScheduleIds),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [savedResults, dc.teamAName, dc.teamAShortName, dc.category, effTournamentId, incompleteScheduleIds]
+    [savedResults, dc.teamAId, dc.teamAName, dc.teamAShortName, dc.category, effTournamentId, incompleteScheduleIds]
   );
   const bTeamStats = useMemo(
-    () => computeTeamTournamentStats(savedResults, { name: dc.teamBName ?? 'Team B', shortName: dc.teamBShortName, category: dc.category }, effTournamentId, incompleteScheduleIds),
+    () => computeTeamTournamentStats(savedResults, { id: dc.teamBId, name: dc.teamBName ?? 'Team B', shortName: dc.teamBShortName, category: dc.category }, effTournamentId, incompleteScheduleIds),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [savedResults, dc.teamBName, dc.teamBShortName, dc.category, effTournamentId, incompleteScheduleIds]
+    [savedResults, dc.teamBId, dc.teamBName, dc.teamBShortName, dc.category, effTournamentId, incompleteScheduleIds]
   );
   // The board's own configured scoring categories (e.g. Try/Conversion/Drop
   // Goal for rugby) — passed to the H2H panel so its breakdown rows always
@@ -702,6 +704,8 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
                 <TeamPicker
                   onPick={picked => handleTeamPick('A', picked)}
                   current={{ name: config.teamAName, shortName: config.teamAShortName, color: teamAColor, logo: dc.teamALogo }}
+                  tournamentId={effTournamentId}
+                  category={dc.category}
                 />
               </div>
             </div>
@@ -776,6 +780,8 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
                 <TeamPicker
                   onPick={picked => handleTeamPick('B', picked)}
                   current={{ name: config.teamBName, shortName: config.teamBShortName, color: teamBColor, logo: dc.teamBLogo }}
+                  tournamentId={effTournamentId}
+                  category={dc.category}
                 />
               </div>
             </div>

@@ -20,6 +20,12 @@ export interface SavedMatchResult {
    *  over from the originating fixture so a same-named team entered in
    *  multiple categories doesn't get its stats/history mixed together. */
   category?: string;
+  /** The SavedTeam id behind teamAName/teamBName, when known — same purpose
+   *  as ScheduledMatch.teamAId/teamBId: lets matching use an unambiguous id
+   *  instead of name+category string matching (still the fallback when
+   *  either side lacks one). */
+  teamAId?: string;
+  teamBId?: string;
   teamAName: string;
   teamAShortName?: string;
   teamALogo?: string;

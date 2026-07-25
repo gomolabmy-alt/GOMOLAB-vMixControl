@@ -4,9 +4,16 @@ import { useTeamDbStore, type SavedTeam } from '../stores/teamDbStore';
 import { resolveImageUrl } from '../lib/imageUrl';
 
 interface Props {
-  onPick: (team: Omit<SavedTeam, 'id'>) => void;
+  onPick: (team: SavedTeam) => void;
   /** Current widget values, offered as a one-click "save current as new team". */
   current: { name?: string; shortName?: string; color?: string; logo?: string };
+  /** Scopes the list to this tournament (and, if given, category) — without
+   *  it every saved team across every tournament is listed, making it
+   *  impossible to tell apart two same-named teams in different categories
+   *  (e.g. a state's Boys and Girls squads both named "PERAK"). Omit only
+   *  when no tournament context is available. */
+  tournamentId?: string;
+  category?: string;
 }
 
 // Compact popup listing saved teams — picking one fills name + short name +
@@ -16,8 +23,11 @@ interface Props {
 // button with fixed coordinates: the scoreboard widget's team column has
 // overflow:hidden (for the logo/name layout), which would silently clip an
 // absolutely-positioned popup nested inside it — a portal escapes that.
-export function TeamPicker({ onPick, current }: Props) {
-  const { teams, addTeam, deleteTeam } = useTeamDbStore();
+export function TeamPicker({ onPick, current, tournamentId, category }: Props) {
+  const { teams: allTeams, addTeam, deleteTeam } = useTeamDbStore();
+  const teams = tournamentId
+    ? allTeams.filter(t => t.tournamentId === tournamentId && (!category || t.category === category))
+    : allTeams;
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
   const popupRef = useRef<HTMLDivElement>(null);
@@ -52,6 +62,8 @@ export function TeamPicker({ onPick, current }: Props) {
       shortName: current.shortName,
       color: current.color ?? '#3498db',
       logo: current.logo,
+      tournamentId,
+      category,
     });
   };
 
@@ -107,6 +119,11 @@ export function TeamPicker({ onPick, current }: Props) {
                 }
                 <span style={{ fontSize: 12, color: 'var(--text-secondary)', flex: 1, minWidth: 0,
                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
+                {t.category && (
+                  <span title="Category" style={{ fontSize: 9, fontWeight: 700, color: 'var(--accent)',
+                    background: 'color-mix(in srgb, var(--accent) 15%, transparent)', border: '1px solid var(--accent)',
+                    borderRadius: 999, padding: '1px 6px', flexShrink: 0 }}>{t.category}</span>
+                )}
                 {t.shortName && <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t.shortName}</span>}
                 <button
                   title="Delete saved team"

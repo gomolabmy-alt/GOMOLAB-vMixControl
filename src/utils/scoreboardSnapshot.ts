@@ -10,6 +10,28 @@ function formatTimeOfDay(ms: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+// Parses "YYYY-MM-DD" + an optional loose time string ("20:30", "8:30 PM",
+// "8:30pm") into a local-timezone epoch ms — shared by anything that needs
+// to sort/compare fixtures or results by their actual scheduled kickoff
+// instead of string-sorting the date/time fields separately.
+export function parseScheduledDateTime(date: string | undefined, time?: string): number | null {
+  const dm = date?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!dm) return null;
+  const [, y, mo, d] = dm;
+  let hours = 0, minutes = 0;
+  if (time) {
+    const tm = time.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?$/);
+    if (tm) {
+      hours = parseInt(tm[1], 10);
+      minutes = parseInt(tm[2], 10);
+      const ampm = tm[3]?.toUpperCase();
+      if (ampm === 'PM' && hours < 12) hours += 12;
+      if (ampm === 'AM' && hours === 12) hours = 0;
+    }
+  }
+  return new Date(Number(y), Number(mo) - 1, Number(d), hours, minutes, 0, 0).getTime();
+}
+
 // Shared between ScoreboardWidget (its own "Save Result"/"Load Match") and
 // MatchScheduleWidget ("Send to Scoreboard") so both paths protect against
 // silently overwriting a match that hasn't been saved yet.
@@ -53,11 +75,13 @@ export function buildResultFromConfig(cfg: Record<string, any>): Omit<SavedMatch
     competition: cfg.competition || undefined,
     round: cfg.subtitle || undefined,
     category: cfg.category || undefined,
+    teamAId: cfg.teamAId || undefined,
     teamAName: cfg.teamAName || 'Team A',
     teamAShortName: cfg.teamAShortName || undefined,
     teamALogo: cfg.teamALogo || undefined,
     teamAColor: cfg.teamAColor ?? '#e74c3c',
     scoreA: cfg.scoreA ?? 0,
+    teamBId: cfg.teamBId || undefined,
     teamBName: cfg.teamBName || 'Team B',
     teamBShortName: cfg.teamBShortName || undefined,
     teamBLogo: cfg.teamBLogo || undefined,
@@ -130,8 +154,8 @@ export function buildLoadMatchPatch(m: ScheduledMatch): Record<string, any> {
   return {
     competition: m.competition ?? '', subtitle: m.round ?? '', category: m.category ?? '',
     group: m.group ?? '', scheduledTime: m.time ?? '',
-    teamAName: m.teamAName, teamAShortName: m.teamAShortName ?? '', teamAColor: m.teamAColor, teamALogo: m.teamALogo ?? '',
-    teamBName: m.teamBName, teamBShortName: m.teamBShortName ?? '', teamBColor: m.teamBColor, teamBLogo: m.teamBLogo ?? '',
+    teamAId: m.teamAId, teamAName: m.teamAName, teamAShortName: m.teamAShortName ?? '', teamAColor: m.teamAColor, teamALogo: m.teamALogo ?? '',
+    teamBId: m.teamBId, teamBName: m.teamBName, teamBShortName: m.teamBShortName ?? '', teamBColor: m.teamBColor, teamBLogo: m.teamBLogo ?? '',
     // A bye/walkover never gets "played" on the clock — carry over whatever
     // scoreline the operator already set on the fixture instead of resetting
     // to 0-0, since there's no live match to score it during.

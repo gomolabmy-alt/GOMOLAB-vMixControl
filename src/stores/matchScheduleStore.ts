@@ -35,6 +35,15 @@ export interface ScheduledMatch {
    *  two same-date fixtures was a no-op, since the sort below only ever
    *  looked at `date`. */
   sortIndex?: number;
+  /** The SavedTeam id behind teamAName/teamBName, when known (drawn from the
+   *  Team DB rather than typed/imported by hand) — lets standings/bracket/
+   *  form/head-to-head matching use an unambiguous id instead of name+
+   *  category string matching, which is still the fallback when either side
+   *  has no id (manual entry, CSV import, or data from before this field
+   *  existed). Two teams can share a name across categories (e.g. a state's
+   *  Boys and Girls squads both named "PERAK") but never share an id. */
+  teamAId?: string;
+  teamBId?: string;
   teamAName: string;
   teamAShortName?: string;
   teamALogo?: string;
