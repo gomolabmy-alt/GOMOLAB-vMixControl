@@ -4805,12 +4805,24 @@ export function TournamentManager({ onClose }: Props) {
         const loserPh = `Loser of ${qf.tier} ${matchLabel}`;
         for (const target of catMatches) {
           if (winner.name) {
-            if (target.teamAName === winnerPh && isPlaceholderTeamName(target.teamAName)) updateMatch(target.id, { teamAId: winner.id, teamAName: winner.name, teamAShortName: winner.shortName, teamAColor: winner.color, teamALogo: winner.logo });
-            if (target.teamBName === winnerPh && isPlaceholderTeamName(target.teamBName)) updateMatch(target.id, { teamBId: winner.id, teamBName: winner.name, teamBShortName: winner.shortName, teamBColor: winner.color, teamBLogo: winner.logo });
+            if (target.teamAName === winnerPh && isPlaceholderTeamName(target.teamAName)) {
+              updateMatch(target.id, { teamAId: winner.id, teamAName: winner.name, teamAShortName: winner.shortName, teamAColor: winner.color, teamALogo: winner.logo });
+              useCanvasStore.getState().syncScoreboardTeamForFixture(target.id, 'A', winnerPh, winner);
+            }
+            if (target.teamBName === winnerPh && isPlaceholderTeamName(target.teamBName)) {
+              updateMatch(target.id, { teamBId: winner.id, teamBName: winner.name, teamBShortName: winner.shortName, teamBColor: winner.color, teamBLogo: winner.logo });
+              useCanvasStore.getState().syncScoreboardTeamForFixture(target.id, 'B', winnerPh, winner);
+            }
           }
           if (loser.name) {
-            if (target.teamAName === loserPh && isPlaceholderTeamName(target.teamAName)) updateMatch(target.id, { teamAId: loser.id, teamAName: loser.name, teamAShortName: loser.shortName, teamAColor: loser.color, teamALogo: loser.logo });
-            if (target.teamBName === loserPh && isPlaceholderTeamName(target.teamBName)) updateMatch(target.id, { teamBId: loser.id, teamBName: loser.name, teamBShortName: loser.shortName, teamBColor: loser.color, teamBLogo: loser.logo });
+            if (target.teamAName === loserPh && isPlaceholderTeamName(target.teamAName)) {
+              updateMatch(target.id, { teamAId: loser.id, teamAName: loser.name, teamAShortName: loser.shortName, teamAColor: loser.color, teamALogo: loser.logo });
+              useCanvasStore.getState().syncScoreboardTeamForFixture(target.id, 'A', loserPh, loser);
+            }
+            if (target.teamBName === loserPh && isPlaceholderTeamName(target.teamBName)) {
+              updateMatch(target.id, { teamBId: loser.id, teamBName: loser.name, teamBShortName: loser.shortName, teamBColor: loser.color, teamBLogo: loser.logo });
+              useCanvasStore.getState().syncScoreboardTeamForFixture(target.id, 'B', loserPh, loser);
+            }
           }
         }
       }
@@ -4857,6 +4869,7 @@ export function TournamentManager({ onClose }: Props) {
                 updateMatch(next.id, slot === 'A'
                   ? { teamAId: winner.id, teamAName: winner.name, teamAShortName: winner.shortName, teamAColor: winner.color, teamALogo: winner.logo }
                   : { teamBId: winner.id, teamBName: winner.name, teamBShortName: winner.shortName, teamBColor: winner.color, teamBLogo: winner.logo });
+                useCanvasStore.getState().syncScoreboardTeamForFixture(next.id, slot, curName, winner);
               }
             }
             // 3rd/4th place playoff: the Semifinal LOSER fills the corresponding slot.
@@ -4870,6 +4883,7 @@ export function TournamentManager({ onClose }: Props) {
                   updateMatch(thirdPlaceMatch.id, slot === 'A'
                     ? { teamAId: loser.id, teamAName: loser.name, teamAShortName: loser.shortName, teamAColor: loser.color, teamALogo: loser.logo }
                     : { teamBId: loser.id, teamBName: loser.name, teamBShortName: loser.shortName, teamBColor: loser.color, teamBLogo: loser.logo });
+                  useCanvasStore.getState().syncScoreboardTeamForFixture(thirdPlaceMatch.id, slot, curName, loser);
                 }
               }
             }
@@ -4925,6 +4939,7 @@ export function TournamentManager({ onClose }: Props) {
           updateMatch(m.id, side === 'A'
             ? { teamAId: standing.teamId, teamAName: standing.name, teamAShortName: standing.shortName, teamAColor: standing.color, teamALogo: standing.logo }
             : { teamBId: standing.teamId, teamBName: standing.name, teamBShortName: standing.shortName, teamBColor: standing.color, teamBLogo: standing.logo });
+          useCanvasStore.getState().syncScoreboardTeamForFixture(m.id, side, curName!, { id: standing.teamId, name: standing.name, shortName: standing.shortName, color: standing.color, logo: standing.logo });
         }
       }
     }

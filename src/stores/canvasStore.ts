@@ -319,6 +319,22 @@ interface CanvasStore {
    *  displaying stats from the reset attempt. */
   resetScoreboardStateForMatches: (matchIds: string[]) => void;
 
+  /** Pushes a resolved bracket placeholder ("Winner of Semifinal 1", "1st
+   *  Group A", etc.) into any scoreboard widget that already has that
+   *  fixture loaded — without this, a scoreboard prepared BEFORE the
+   *  placeholder resolved (a common "get the Final ready early" workflow)
+   *  keeps showing the stale placeholder text in its own team name fields
+   *  forever, including whatever gets pushed to vMix, even though the
+   *  Schedule tab itself now shows the real team. Only overwrites a side
+   *  still showing the exact placeholder text it was loaded with — never
+   *  touches a manually-corrected or already-resolved name. */
+  syncScoreboardTeamForFixture: (
+    fixtureId: string,
+    side: 'A' | 'B',
+    oldPlaceholder: string,
+    team: { id?: string; name: string; shortName?: string; color: string; logo?: string },
+  ) => void;
+
   // Scoreboard cards
   addScoreboardCard: (widgetId: string, team: 'A' | 'B', cardType: 'yellow' | 'red', player: string, timeStr: string) => void;
   removeScoreboardCard: (widgetId: string, team: 'A' | 'B', cardId: string) => void;
@@ -1997,6 +2013,25 @@ export const useCanvasStore = create<CanvasStore>()(
             }),
           });
           set({ pages: get().pages.map(resetPage), commentatorPages: get().commentatorPages.map(resetPage) });
+        },
+
+        syncScoreboardTeamForFixture: (fixtureId, side, oldPlaceholder, team) => {
+          const patchFor = (w: CanvasWidget) => {
+            if (w.type !== 'scoreboard' || w.config.linkedScoreboardSourceId || w.config.linkedScheduleMatchId !== fixtureId) return null;
+            const curName = side === 'A' ? w.config.teamAName : w.config.teamBName;
+            if (curName !== oldPlaceholder) return null;
+            return side === 'A'
+              ? { teamAId: team.id, teamAName: team.name, teamAShortName: team.shortName, teamAColor: team.color, teamALogo: team.logo }
+              : { teamBId: team.id, teamBName: team.name, teamBShortName: team.shortName, teamBColor: team.color, teamBLogo: team.logo };
+          };
+          const applyToPage = (p: CanvasPage): CanvasPage => ({
+            ...p,
+            widgets: p.widgets.map((w) => {
+              const patch = patchFor(w);
+              return patch ? { ...w, config: { ...w.config, ...patch } } : w;
+            }),
+          });
+          set({ pages: get().pages.map(applyToPage), commentatorPages: get().commentatorPages.map(applyToPage) });
         },
 
         // Reverts the single most recent scoring action for one team — e.g.
