@@ -13,6 +13,7 @@ import { startCloudSync } from './lib/cloudSync';
 import { startHotkeyRegistry } from './lib/hotkeyRegistry';
 import { useMatchResultsStore } from './stores/matchResultsStore';
 import { backfillTeamIds } from './lib/backfillTeamIds';
+import { startTournamentAutoAdvance } from './lib/tournamentAutoAdvance';
 
 function CommentatorApp() {
   const { theme, setTheme } = useAppSettings();
@@ -81,6 +82,16 @@ export function App() {
   useEffect(() => {
     if (!isDesktopHost) return;
     startHotkeyRegistry();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Bracket auto-advance, groups-knockout auto-fill, and bye/walkover sync —
+  // always running now, not just while the 🏆 Tournament Database window is
+  // open (see tournamentAutoAdvance.ts for why). Desktop-host only, same as
+  // every other write-owning background process here.
+  useEffect(() => {
+    if (!isDesktopHost) return;
+    startTournamentAutoAdvance();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
