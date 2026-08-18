@@ -712,6 +712,11 @@ function matchFingerprint(d: any) {
     scoreA: d.scoreA ?? 0, scoreB: d.scoreB ?? 0,
     round: d.round ?? '', date: d.date ?? '', time: d.time ?? '',
     completedAt: !!d.completedAt, matchType: d.matchType ?? '',
+    // A tier-only correction (see TournamentManager.tsx's findTierMismatches)
+    // wouldn't otherwise show up in the "Push Diff" preview at all — it
+    // doesn't touch any of the fields above — even though the actual push
+    // itself (recordKey, a full-object comparison) already sends it correctly.
+    tier: d.tier ?? '',
   };
 }
 function resultFingerprint(d: any) {
@@ -795,13 +800,31 @@ export async function computePushDiff(tournamentId: string): Promise<PushDiffIte
   }
 }
 
+// Throttle, not a plain debounce: a plain clear-and-reschedule timer never
+// fires at all while changes keep arriving faster than the window — which
+// a millisecond-precision Timer widget does (it ticks every 20ms while
+// running), and canvasStore is one of the subscribed stores. That would
+// silently stall cloud push for as long as such a timer kept running (i.e.
+// the whole match). Still coalesces bursts into one push, but guarantees
+// one at least every PUSH_DEBOUNCE_MS under continuous activity.
+let lastPushScheduledAt = 0;
 function schedulePush() {
   // A pull applying incoming changes triggers these same store subscriptions
   // — skip scheduling a push for those, or every pull would immediately
   // echo the same data straight back to the server.
   if (pullInFlight) return;
-  if (pushDebounceTimer) clearTimeout(pushDebounceTimer);
-  pushDebounceTimer = setTimeout(() => { pushAll(); }, PUSH_DEBOUNCE_MS);
+  const elapsed = Date.now() - lastPushScheduledAt;
+  if (elapsed >= PUSH_DEBOUNCE_MS) {
+    if (pushDebounceTimer) { clearTimeout(pushDebounceTimer); pushDebounceTimer = null; }
+    lastPushScheduledAt = Date.now();
+    pushAll();
+  } else if (!pushDebounceTimer) {
+    pushDebounceTimer = setTimeout(() => {
+      pushDebounceTimer = null;
+      lastPushScheduledAt = Date.now();
+      pushAll();
+    }, PUSH_DEBOUNCE_MS - elapsed);
+  }
 }
 
 async function pullAll() {

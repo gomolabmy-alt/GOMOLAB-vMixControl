@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState, useContext } from 'react';
+import { ArrowUp, Star } from 'lucide-react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useTeamDbStore } from '../../stores/teamDbStore';
+import { useAppSettings } from '../../stores/appSettingsStore';
 import { useUndoStore } from '../../stores/undoStore';
 import { buildActionSummary } from '../../utils/scoreActions';
+import { autoLinkedWidget, autoLinkedWidgetId, autoLinkedWidgetPair } from '../../lib/autoLink';
+import { resolvePlayerListRoster } from '../../lib/playerListSquad';
+import { simplifyPlayerName, type SimpleNameOptions } from '../../lib/simpleName';
 
 interface Props {
   widgetId: string;
@@ -32,7 +37,10 @@ interface SummaryRow {
   summary: string; // just the action counts part, e.g. "3 Try, 1 Conv"
 }
 
-function buildSummaryRows(log: LogEntry[]): SummaryRow[] {
+// `scorer` stays the raw name (used elsewhere to match against the roster
+// by exact name — see highlightPlayer's p.name === row.scorer lookup);
+// only the display/vMix-facing `line` text goes through Simple Names.
+function buildSummaryRows(log: LogEntry[], simpleNameOpts: SimpleNameOptions): SummaryRow[] {
   const players: Record<string, {
     jerseyNo: string;
     scorer: string;
@@ -51,7 +59,7 @@ function buildSummaryRows(log: LogEntry[]): SummaryRow[] {
   }
 
   return Object.values(players).map(p => {
-    const name = [p.jerseyNo, p.scorer].filter(Boolean).join(' ');
+    const name = [p.jerseyNo, p.scorer ? simplifyPlayerName(p.scorer, simpleNameOpts) : ''].filter(Boolean).join(' ');
     const actCounts: Record<string, number> = {};
     for (const [act, { count }] of Object.entries(p.actions)) actCounts[act] = count;
     const acts = buildActionSummary(actCounts);
@@ -59,17 +67,22 @@ function buildSummaryRows(log: LogEntry[]): SummaryRow[] {
   });
 }
 
-export function ScoreLogWidget({ config }: Props) {
+export function ScoreLogWidget({ widgetId, config }: Props) {
   const store = useCanvasStore();
   const ctx = useContext(CanvasActionContext);
   const { pages } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { getClient, vmixSyncVersion } = useVmixStore();
   const { teams: teamDbTeams } = useTeamDbStore();
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const simpleNameOpts: SimpleNameOptions = { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker };
+  const disp = (name: string) => simplifyPlayerName(name, simpleNameOpts);
   const [activeHighlightKey, setActiveHighlightKey] = useState('');
 
   const allWidgets = pages.flatMap(p => p.widgets);
-  const linkedScoreboard = allWidgets.find(w => w.id === config.linkedScoreboardId);
+  // Falls back to the sole Scoreboard widget on this page when nothing's
+  // been explicitly linked in settings — an explicit pick always wins.
+  const linkedScoreboard = autoLinkedWidget(pages, widgetId, config.linkedScoreboardId, 'scoreboard');
   const log: LogEntry[] = linkedScoreboard?.config.scoreLog ?? [];
 
   const teamFilter: 'A' | 'all' | 'B' = config.teamFilter ?? 'all';
@@ -82,15 +95,15 @@ export function ScoreLogWidget({ config }: Props) {
   const dotColor = teamFilter === 'A' ? teamAColor : teamFilter === 'B' ? teamBColor : undefined;
 
   const clearLog = () => {
-    if (!config.linkedScoreboardId) return;
+    if (!linkedScoreboard) return;
     const before = log;
-    updateWidgetConfig(config.linkedScoreboardId, { scoreLog: [] });
-    useUndoStore.getState().pushUndo('Cleared score log', () => updateWidgetConfig(config.linkedScoreboardId, { scoreLog: before }));
+    updateWidgetConfig(linkedScoreboard.id, { scoreLog: [] });
+    useUndoStore.getState().pushUndo('Cleared score log', () => updateWidgetConfig(linkedScoreboard.id, { scoreLog: before }));
   };
 
   // vMix summary output
   const hasSummaryTarget = !!(config.vmixSummaryInputKey && config.vmixSummaryField);
-  const summaryRows = filteredLog.length > 0 ? buildSummaryRows(filteredLog) : [];
+  const summaryRows = filteredLog.length > 0 ? buildSummaryRows(filteredLog, simpleNameOpts) : [];
 
   const sendSummary = () => {
     const c = getClient();
@@ -108,17 +121,21 @@ export function ScoreLogWidget({ config }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [logKey, hasSummaryTarget, vmixSyncVersion]);
 
-  // Player highlight
-  const highlightTargetId: string = config.linkedPlayerHighlightId ?? '';
+  // Player highlight — falls back to the sole Player Highlight widget on
+  // this page when nothing's been explicitly linked in settings.
+  const highlightTargetId: string = autoLinkedWidgetId(pages, widgetId, config.linkedPlayerHighlightId, 'player-lower-third') ?? '';
 
   const highlightPlayer = (row: SummaryRow) => {
     if (!highlightTargetId) return;
     const sbCfg = linkedScoreboard?.config ?? {};
-    const plWidgetId = row.team === 'A' ? sbCfg.linkedPlayerListA : sbCfg.linkedPlayerListB;
-    const plWidget = plWidgetId ? allWidgets.find(w => w.id === plWidgetId) : null;
-    const plCfg = plWidget?.config ?? {};
-    const side: 'A' | 'B' = plCfg.teamSide ?? row.team;
-    const teamData = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
+    // Resolved the same way the scoreboard itself would (explicit link, or
+    // the two Player List widgets on its page assigned by teamSide/position).
+    const { a: plA, b: plB } = linkedScoreboard
+      ? autoLinkedWidgetPair(pages, linkedScoreboard.id, sbCfg.linkedPlayerListA, sbCfg.linkedPlayerListB, 'player-list')
+      : {};
+    const plWidget = row.team === 'A' ? plA : plB;
+    const side: 'A' | 'B' = row.team;
+    const { team: teamData } = resolvePlayerListRoster(plWidget, side, teamDbTeams);
     const player = teamData?.players?.find(
       (p: any) => (row.jerseyNo && p.jerseyNo === row.jerseyNo) || (row.scorer && p.name === row.scorer)
     );
@@ -126,7 +143,7 @@ export function ScoreLogWidget({ config }: Props) {
     setActiveHighlightKey(rowId);
     updateWidgetConfig(highlightTargetId, {
       highlightedPlayerId:    player?.id ?? rowId,
-      highlightedName:        player?.name ?? row.scorer,
+      highlightedName:        disp(player?.name ?? row.scorer),
       highlightedJersey:      player?.jerseyNo ?? row.jerseyNo,
       highlightedPosition:    player?.position ?? '',
       highlightedTeam:        teamData?.name ?? row.scorer,
@@ -145,11 +162,11 @@ export function ScoreLogWidget({ config }: Props) {
             {hasSummaryTarget && (
               <button
                 className="wgt-score-log-clr"
-                style={{ color: 'var(--accent)' }}
+                style={{ color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: 3 }}
                 onClick={sendSummary}
                 disabled={!getClient()}
                 title="Send summary to vMix"
-              >↑ Send</button>
+              ><ArrowUp size={11} strokeWidth={2} /> Send</button>
             )}
             {log.length > 0 && (
               <button className="wgt-score-log-clr" onClick={clearLog}>Clear</button>
@@ -171,7 +188,7 @@ export function ScoreLogWidget({ config }: Props) {
                       className={`wgt-score-log-summary-hl${activeHighlightKey === rowId ? ' wgt-score-log-summary-hl--active' : ''}`}
                       title="Highlight player"
                       onClick={() => highlightPlayer(row)}
-                    >★</button>
+                    ><Star size={11} strokeWidth={2} /></button>
                   )}
                 </div>
               );
@@ -180,10 +197,10 @@ export function ScoreLogWidget({ config }: Props) {
         )}
 
         <div className="wgt-score-log-entries">
-          {!config.linkedScoreboardId && (
+          {!linkedScoreboard && (
             <div className="wgt-score-log-empty">Link a scoreboard in settings</div>
           )}
-          {config.linkedScoreboardId && filteredLog.length === 0 && (
+          {linkedScoreboard && filteredLog.length === 0 && (
             <div className="wgt-score-log-empty">No scores yet</div>
           )}
           {filteredLog.map(entry => (
@@ -193,7 +210,7 @@ export function ScoreLogWidget({ config }: Props) {
               <span className="wgt-score-log-time">{entry.timeStr}</span>
               <span className="wgt-score-log-text">
                 {entry.team === 'A' ? teamAShort : teamBShort}
-                {entry.scorer ? ` · ${entry.jerseyNo ? '#' + entry.jerseyNo + ' ' : ''}${entry.scorer}` : ''} — {entry.action}
+                {entry.scorer ? ` · ${entry.jerseyNo ? '#' + entry.jerseyNo + ' ' : ''}${disp(entry.scorer)}` : ''} — {entry.action}
               </span>
             </div>
           ))}

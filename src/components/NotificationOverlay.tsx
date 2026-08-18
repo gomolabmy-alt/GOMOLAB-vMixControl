@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { CircleDot, Square, ArrowLeftRight, Pause, ArrowRight, ArrowLeft, X } from 'lucide-react';
 import { useCanvasStore, formatTime } from '../stores/canvasStore';
 import { useAppSettings } from '../stores/appSettingsStore';
 
@@ -38,12 +39,6 @@ const CARD_COLORS: Record<CardType, string> = {
   'orange-card': '#e67e22',
   'red-card': '#e74c3c',
 };
-const CARD_ICONS: Record<CardType, string> = {
-  'yellow-card': '🟨',
-  'orange-card': '🟧',
-  'red-card': '🟥',
-};
-
 function NotifCard({ notif, onDismiss, durationMs }: { notif: Notif; onDismiss: () => void; durationMs: number }) {
   const barRef = useRef<HTMLDivElement>(null);
 
@@ -70,10 +65,10 @@ function NotifCard({ notif, onDismiss, durationMs }: { notif: Notif; onDismiss: 
     <div className="notif-card" style={{ borderLeftColor: accentColor }}>
       <div className="notif-card-inner">
         <div className="notif-icon" style={{ color: accentColor }}>
-          {notif.type === 'goal' && '⚽'}
-          {notif.type === 'card' && CARD_ICONS[notif.cardType!]}
-          {notif.type === 'sub' && '↕'}
-          {notif.type === 'time-pause' && '⏸'}
+          {notif.type === 'goal' && <CircleDot size={16} />}
+          {notif.type === 'card' && <Square size={14} fill={CARD_COLORS[notif.cardType!]} stroke="none" />}
+          {notif.type === 'sub' && <ArrowLeftRight size={16} />}
+          {notif.type === 'time-pause' && <Pause size={16} />}
         </div>
         <div className="notif-body">
           {notif.type === 'goal' && (
@@ -112,12 +107,12 @@ function NotifCard({ notif, onDismiss, durationMs }: { notif: Notif; onDismiss: 
             <>
               <div className="notif-title" style={{ color: accentColor }}>Substitution</div>
               <div className="notif-detail notif-sub-in">
-                <span className="notif-sub-arrow">▶</span>
+                <span className="notif-sub-arrow"><ArrowRight size={12} /></span>
                 {notif.jerseyNoIn && <span className="notif-jersey">#{notif.jerseyNoIn}</span>}
                 <span>{notif.playerIn ?? '—'}</span>
               </div>
               <div className="notif-detail notif-sub-out">
-                <span className="notif-sub-arrow" style={{ opacity: 0.5 }}>◀</span>
+                <span className="notif-sub-arrow" style={{ opacity: 0.5 }}><ArrowLeft size={12} /></span>
                 {notif.jerseyNoOff && <span className="notif-jersey" style={{ opacity: 0.7 }}>#{notif.jerseyNoOff}</span>}
                 <span style={{ opacity: 0.7 }}>{notif.playerOut ?? '—'}</span>
               </div>
@@ -133,7 +128,7 @@ function NotifCard({ notif, onDismiss, durationMs }: { notif: Notif; onDismiss: 
             </>
           )}
         </div>
-        <button className="notif-close" onClick={onDismiss}>✕</button>
+        <button className="notif-close" onClick={onDismiss}><X size={12} /></button>
       </div>
       <div className="notif-progress">
         <div ref={barRef} className="notif-progress-bar" style={{ background: accentColor }} />

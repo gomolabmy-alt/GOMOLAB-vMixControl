@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link2, RefreshCw } from 'lucide-react';
 import type { Tournament, Player } from '../types/tournament';
 import { useTournamentStore } from '../stores/tournamentStore';
 import { useTeamDbStore } from '../stores/teamDbStore';
@@ -66,7 +67,9 @@ export function ExternalRosterLinkBar({ tournament }: { tournament: Tournament }
   if (!link) {
     return (
       <div className="tm-ext-roster-bar">
-        <button className="tm-io-btn" onClick={() => setEditing(true)}>🔗 Link roster API</button>
+        <button className="tm-io-btn" onClick={() => setEditing(true)}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Link2 size={14} /> Link roster API</span>
+        </button>
       </div>
     );
   }
@@ -74,7 +77,7 @@ export function ExternalRosterLinkBar({ tournament }: { tournament: Tournament }
   return (
     <div className="tm-ext-roster-bar">
       <span className="tm-ext-roster-linked" title={`${link.baseUrl}/api/public/tournaments/${link.tournamentId}`}>
-        🔗 Linked: <strong>{link.tournamentName ?? link.tournamentId}</strong>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Link2 size={14} /> Linked: <strong>{link.tournamentName ?? link.tournamentId}</strong></span>
       </span>
       <button className="tm-io-btn" onClick={() => { setEditing(true); setUrl(''); }}>Change</button>
       <button className="tm-io-btn tm-io-btn--danger" onClick={() => setConfirmingUnlink(true)}>Unlink</button>
@@ -177,7 +180,9 @@ export function PullPlayersButton({
       <button className="tm-io-btn" onClick={openPicker} title={linkedSlug
         ? `Auto-syncing from the roster API every couple of minutes — click to re-pick, or pull now`
         : `Pull player names from the linked roster API into "${displayName}"`}>
-        {linkedSlug ? '🔄 Auto-syncing' : '🔗 Pull from API'}
+        {linkedSlug
+          ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><RefreshCw size={14} /> Auto-syncing</span>
+          : <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Link2 size={14} /> Pull from API</span>}
       </button>
       {open && (
         <div className="modal-overlay" onClick={() => setOpen(false)}>
@@ -200,7 +205,7 @@ export function PullPlayersButton({
                     {t.logoUrl && <img src={t.logoUrl} alt="" className="tm-ext-roster-team-logo" />}
                     <span className="tm-ext-roster-team-name">
                       {t.name}
-                      {t.slug === linkedSlug && <span title="Currently auto-syncing from this team"> 🔄</span>}
+                      {t.slug === linkedSlug && <span title="Currently auto-syncing from this team" style={{ display: 'inline-flex', alignItems: 'center', marginLeft: 4 }}><RefreshCw size={11} /></span>}
                     </span>
                     <span className="tm-io-btn tm-io-btn--ok">{pulling === t.slug ? 'Pulling…' : 'Pull'}</span>
                   </div>

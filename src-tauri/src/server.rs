@@ -42,6 +42,12 @@ pub struct ServerState {
     pub commentator_cached_state: Arc<RwLock<Option<String>>>,
     pub cached_vmix_state: Arc<RwLock<Option<String>>>,
     pub cached_vmix_data: Arc<RwLock<Option<String>>>,
+    // Companion (Stream Deck) bridge — see src/lib/companionBridge.ts. Cached
+    // the same way as vMix state/data so a freshly-connected Companion
+    // module gets the current hotkey-binding list and REC/STR/toggle
+    // feedback immediately, not just on the next time the host re-sends it.
+    pub cached_companion_list: Arc<RwLock<Option<String>>>,
+    pub cached_companion_feedback: Arc<RwLock<Option<String>>>,
     pub interactive_enabled: Arc<RwLock<bool>>,
     pub readonly_enabled: Arc<RwLock<bool>>,
     pub commentator_enabled: Arc<RwLock<bool>>,
@@ -69,6 +75,8 @@ impl ServerState {
             commentator_cached_state: Arc::new(RwLock::new(None)),
             cached_vmix_state: Arc::new(RwLock::new(None)),
             cached_vmix_data: Arc::new(RwLock::new(None)),
+            cached_companion_list: Arc::new(RwLock::new(None)),
+            cached_companion_feedback: Arc::new(RwLock::new(None)),
             interactive_enabled: Arc::new(RwLock::new(true)),
             readonly_enabled: Arc::new(RwLock::new(true)),
             commentator_enabled: Arc::new(RwLock::new(true)),
@@ -291,6 +299,12 @@ async fn handle_interactive_ws(socket: WebSocket, state: Arc<ServerState>) {
                             if let Some(cached) = state_r.cached_vmix_data.read().await.as_ref() {
                                 let _ = tx_r.send(Message::Text(cached.clone()));
                             }
+                            if let Some(cached) = state_r.cached_companion_list.read().await.as_ref() {
+                                let _ = tx_r.send(Message::Text(cached.clone()));
+                            }
+                            if let Some(cached) = state_r.cached_companion_feedback.read().await.as_ref() {
+                                let _ = tx_r.send(Message::Text(cached.clone()));
+                            }
                             continue;
                         }
                         "ACTION" => {
@@ -308,6 +322,21 @@ async fn handle_interactive_ws(socket: WebSocket, state: Arc<ServerState>) {
                         }
                         "VMIX_STATE" => {
                             *state_r.cached_vmix_data.write().await = Some(text.clone());
+                            broadcast(&state_r.readonly_clients, text).await;
+                            broadcast(&state_r.commentator_clients, text).await;
+                        }
+                        // Host → Companion (Stream Deck bridge): the list of
+                        // triggerable hotkey bindings, and lightweight
+                        // REC/STR/FTB/toggle feedback — cached the same way
+                        // as vMix state so a Companion client that connects
+                        // (or reconnects) gets the latest right away.
+                        "COMPANION_LIST" => {
+                            *state_r.cached_companion_list.write().await = Some(text.clone());
+                            broadcast(&state_r.readonly_clients, text).await;
+                            broadcast(&state_r.commentator_clients, text).await;
+                        }
+                        "COMPANION_FEEDBACK" => {
+                            *state_r.cached_companion_feedback.write().await = Some(text.clone());
                             broadcast(&state_r.readonly_clients, text).await;
                             broadcast(&state_r.commentator_clients, text).await;
                         }
@@ -368,6 +397,12 @@ async fn handle_readonly_ws(socket: WebSocket, state: Arc<ServerState>, ip: Stri
     if let Some(cached) = state.cached_vmix_data.read().await.as_ref() {
         let _ = tx.send(Message::Text(cached.clone()));
     }
+    if let Some(cached) = state.cached_companion_list.read().await.as_ref() {
+        let _ = tx.send(Message::Text(cached.clone()));
+    }
+    if let Some(cached) = state.cached_companion_feedback.read().await.as_ref() {
+        let _ = tx.send(Message::Text(cached.clone()));
+    }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     let state_r = Arc::clone(&state);
@@ -389,8 +424,21 @@ async fn handle_readonly_ws(socket: WebSocket, state: Arc<ServerState>, ip: Stri
                                 if let Some(cached) = state_r.cached_vmix_data.read().await.as_ref() {
                                     let _ = tx_r.send(Message::Text(cached.clone()));
                                 }
+                                if let Some(cached) = state_r.cached_companion_list.read().await.as_ref() {
+                                    let _ = tx_r.send(Message::Text(cached.clone()));
+                                }
+                                if let Some(cached) = state_r.cached_companion_feedback.read().await.as_ref() {
+                                    let _ = tx_r.send(Message::Text(cached.clone()));
+                                }
                             }
                             "VMIX_COMMAND" => {
+                                broadcast(&state_r.interactive_clients, text).await;
+                            }
+                            // Companion (Stream Deck) → host: ask for the
+                            // current hotkey-binding list, or trigger one by
+                            // its accelerator — same relay-only-to-host
+                            // pattern as VMIX_COMMAND.
+                            "COMPANION_REQUEST_LIST" | "COMPANION_TRIGGER" => {
                                 broadcast(&state_r.interactive_clients, text).await;
                             }
                             _ => {}
@@ -447,6 +495,12 @@ async fn handle_commentator_ws(socket: WebSocket, state: Arc<ServerState>, ip: S
     if let Some(cached) = state.cached_vmix_data.read().await.as_ref() {
         let _ = tx.send(Message::Text(cached.clone()));
     }
+    if let Some(cached) = state.cached_companion_list.read().await.as_ref() {
+        let _ = tx.send(Message::Text(cached.clone()));
+    }
+    if let Some(cached) = state.cached_companion_feedback.read().await.as_ref() {
+        let _ = tx.send(Message::Text(cached.clone()));
+    }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     let state_r = Arc::clone(&state);
@@ -473,6 +527,12 @@ async fn handle_commentator_ws(socket: WebSocket, state: Arc<ServerState>, ip: S
                             if let Some(cached) = state_r.cached_vmix_data.read().await.as_ref() {
                                 let _ = tx_r.send(Message::Text(cached.clone()));
                             }
+                            if let Some(cached) = state_r.cached_companion_list.read().await.as_ref() {
+                                let _ = tx_r.send(Message::Text(cached.clone()));
+                            }
+                            if let Some(cached) = state_r.cached_companion_feedback.read().await.as_ref() {
+                                let _ = tx_r.send(Message::Text(cached.clone()));
+                            }
                         }
                         "COMMENTATOR_FULL_STATE" => {
                             *state_r.commentator_cached_state.write().await = Some(text.clone());
@@ -494,6 +554,9 @@ async fn handle_commentator_ws(socket: WebSocket, state: Arc<ServerState>, ip: S
                             broadcast(&state_r.interactive_clients, text).await;
                         }
                         "VMIX_COMMAND" => {
+                            broadcast(&state_r.interactive_clients, text).await;
+                        }
+                        "COMPANION_REQUEST_LIST" | "COMPANION_TRIGGER" => {
                             broadcast(&state_r.interactive_clients, text).await;
                         }
                         _ => {}

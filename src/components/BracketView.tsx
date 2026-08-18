@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, useEffect } from 'react';
+import { Medal, Check, Pencil } from 'lucide-react';
 import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
 import type { SavedMatchResult } from '../stores/matchResultsStore';
 import {
@@ -48,20 +49,83 @@ export function BracketView({ matches, thirdPlaceMatch, results, tournamentId, e
     return Array.from(byStage.entries()).sort((a, b) => knockoutStageSize(b[0]) - knockoutStageSize(a[0]));
   }, [matches]);
 
-  const centers = useMemo(() => computeBracketCenters(stages.map(([, ms]) => ms.length)), [stages]);
+  // A stage is normally fed by the immediately preceding one (today's only
+  // shape: Quarterfinal -> Semifinal -> Final). A placement ladder (see
+  // scheduleGen.ts's buildPlacementLadder) can instead produce two SAME-SIZE
+  // sibling finals fed by the SAME earlier round (e.g. "9th-10th Placing"
+  // and "11th-12th Placing" both fed by "9th-12th Placing") — detect the
+  // real feeder via "Winner of X"/"Loser of X" placeholder-text reference
+  // rather than assuming strict adjacency, and render any sibling beyond
+  // the first STACKED in its primary's column instead of claiming its own
+  // — the same treatment already used for the 3rd Place Playoff below,
+  // generalized from that one hardcoded case to however many are detected.
+  // For every existing (non-tied) bracket shape this reproduces today's
+  // r -> r+1 behavior exactly, since a plain sequential bracket already
+  // trivially satisfies the placeholder-reference check at each step.
+  const { stackedOf, stackedGroups, colOfStage, feederIdx, primaryStageIndices } = useMemo(() => {
+    const feederIdx: (number | null)[] = stages.map((_, s) => {
+      if (s === 0) return null;
+      const myMatches = stages[s][1];
+      for (let f = s - 1; f >= 0; f--) {
+        const feederMatches = stages[f][1];
+        const feeds = myMatches.some(m =>
+          feederMatches.some(fm =>
+            m.teamAName === `Winner of ${fm.round}` || m.teamAName === `Loser of ${fm.round}` ||
+            m.teamBName === `Winner of ${fm.round}` || m.teamBName === `Loser of ${fm.round}`
+          )
+        );
+        if (feeds) return f;
+      }
+      return s - 1;
+    });
+    const primaryForFeeder = new Map<number, number>();
+    const stackedOf = new Map<number, number>();
+    const stackedGroups = new Map<number, number[]>();
+    stages.forEach((_, s) => {
+      const f = feederIdx[s];
+      if (f === null) return;
+      if (!primaryForFeeder.has(f)) primaryForFeeder.set(f, s);
+      else {
+        const primary = primaryForFeeder.get(f)!;
+        stackedOf.set(s, primary);
+        if (!stackedGroups.has(primary)) stackedGroups.set(primary, []);
+        stackedGroups.get(primary)!.push(s);
+      }
+    });
+    const primaryStageIndices = stages.map((_, s) => s).filter(s => !stackedOf.has(s));
+    const primaryPosOf = new Map<number, number>();
+    primaryStageIndices.forEach((s, pos) => primaryPosOf.set(s, pos));
+    const colOfStage = (s: number) => primaryPosOf.get(stackedOf.get(s) ?? s) ?? 0;
+    return { stackedOf, stackedGroups, colOfStage, feederIdx, primaryStageIndices };
+  }, [stages]);
+  const primaryStages = useMemo(() => stages.filter((_, s) => !stackedOf.has(s)), [stages, stackedOf]);
+
+  const centers = useMemo(() => computeBracketCenters(primaryStages.map(([, ms]) => ms.length)), [primaryStages]);
   const bracketHeight = centers[0] ? centers[0].length * (BRACKET_MATCH_H + BRACKET_BASE_GAP) : 0;
-  const bracketWidth = stages.length * (BRACKET_COL_W + BRACKET_COL_GAP) - BRACKET_COL_GAP;
+  const bracketWidth = primaryStages.length * (BRACKET_COL_W + BRACKET_COL_GAP) - BRACKET_COL_GAP;
+  // Vertical offset for the k-th stacked sibling under its primary's own
+  // single match (k=0 is the first/closest) — same spacing the 3rd Place
+  // Playoff already uses below the Final.
+  const stackedOffset = (k: number) => (k + 1) * (BRACKET_MATCH_H + BRACKET_BASE_GAP * 2.5);
+  let maxStackedBottom = 0;
+  for (const [primary, stackedList] of stackedGroups.entries()) {
+    const baseY = centers[colOfStage(primary)]?.[0] ?? 0;
+    stackedList.forEach((_, k) => { maxStackedBottom = Math.max(maxStackedBottom, baseY + stackedOffset(k)); });
+  }
 
   // The 3rd Place Playoff isn't a normal bracket round (it's fed by the two
   // Semifinal LOSERS, not winners) — position it in the Final's column, below
   // the Final match, and draw its own connector from the Semifinal matches.
-  const semifinalStageIdx = stages.findIndex(([name]) => name === 'Semifinal');
-  const finalStageIdx = stages.length - 1;
+  const semifinalRawIdx = stages.findIndex(([name]) => name === 'Semifinal');
+  const semifinalStageIdx = semifinalRawIdx >= 0 ? colOfStage(semifinalRawIdx) : -1;
+  const finalStageIdx = primaryStages.length - 1;
   const finalCenterY = centers[finalStageIdx]?.[0] ?? 0;
   const thirdPlaceY = finalCenterY + BRACKET_MATCH_H + BRACKET_BASE_GAP * 2.5;
-  const containerHeight = thirdPlaceMatch
-    ? Math.max(bracketHeight, thirdPlaceY + BRACKET_MATCH_H / 2 + 20)
-    : bracketHeight;
+  const containerHeight = Math.max(
+    bracketHeight,
+    thirdPlaceMatch ? thirdPlaceY + BRACKET_MATCH_H / 2 + 20 : 0,
+    maxStackedBottom ? maxStackedBottom + BRACKET_MATCH_H / 2 + 20 : 0,
+  );
   const naturalWidth = bracketWidth;
   const naturalHeight = containerHeight + 24;
 
@@ -120,13 +184,59 @@ export function BracketView({ matches, thirdPlaceMatch, results, tournamentId, e
   const semifinalStage = stages.find(([name]) => name === 'Semifinal');
   const canAddThirdPlace = editable && !!onAddThirdPlace && !!semifinalStage && !thirdPlaceMatch;
 
+  // Shared match-card renderer — used for every primary-column match, every
+  // stacked-sibling match (see stackedGroups above), and the 3rd Place
+  // Playoff below, so all three stay visually identical.
+  const renderMatch = (m: ScheduledMatch, centerY: number, slotEditable: boolean) => {
+    const score = findScore(m);
+    const win = findWinner(m);
+    const aWins = win?.side === 'A';
+    const bWins = win?.side === 'B';
+    return (
+      <div
+        key={m.id}
+        className={`tm-bracket-match${slotEditable ? ' tm-bracket-match--editing' : ''}`}
+        style={{ position: 'absolute', top: 24 + centerY - BRACKET_MATCH_H / 2, left: 0, width: BRACKET_COL_W, height: BRACKET_MATCH_H }}
+        title={win?.shootout ? `Won on penalties, ${win.shootout.scoreA}-${win.shootout.scoreB}` : undefined}
+      >
+        <div className={`tm-bracket-team${aWins ? ' tm-bracket-team--winner' : ''}`}>
+          <div style={{ width: 26, height: 26, flexShrink: 0 }}><ScheduleBadge logo={m.teamALogo} color={m.teamAColor} /></div>
+          {slotEditable ? (
+            <select className="tm-bracket-slot-select" value={m.teamAName} onChange={e => swapSlot(m.id, 'A', e.target.value)}>
+              {round1Slots.map(s => <option key={`${s.matchId}-${s.side}`} value={s.name}>{s.name}</option>)}
+            </select>
+          ) : onSelectTeam ? (
+            <span className="tm-bracket-team-name tm-bracket-team-name--clickable" onClick={() => onSelectTeam(m.teamAName)}>{m.teamAShortName || m.teamAName}</span>
+          ) : (
+            <span className="tm-bracket-team-name">{m.teamAShortName || m.teamAName}</span>
+          )}
+          {score && <span className="tm-bracket-score">{score.a}{win?.shootout && aWins ? <sup className="tm-bracket-pens">p</sup> : null}</span>}
+        </div>
+        <div className={`tm-bracket-team${bWins ? ' tm-bracket-team--winner' : ''}`}>
+          <div style={{ width: 26, height: 26, flexShrink: 0 }}><ScheduleBadge logo={m.teamBLogo} color={m.teamBColor} /></div>
+          {slotEditable && m.teamBName ? (
+            <select className="tm-bracket-slot-select" value={m.teamBName} onChange={e => swapSlot(m.id, 'B', e.target.value)}>
+              {round1Slots.map(s => <option key={`${s.matchId}-${s.side}`} value={s.name}>{s.name}</option>)}
+            </select>
+          ) : (
+            <span
+              className={m.teamBName && onSelectTeam ? 'tm-bracket-team-name tm-bracket-team-name--clickable' : 'tm-bracket-team-name'}
+              onClick={m.teamBName && onSelectTeam ? () => onSelectTeam(m.teamBName) : undefined}
+            >{m.teamBName ? (m.teamBShortName || m.teamBName) : 'BYE'}</span>
+          )}
+          {score && <span className="tm-bracket-score">{score.b}{win?.shootout && bWins ? <sup className="tm-bracket-pens">p</sup> : null}</span>}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="tm-bracket-panel">
       {editable && (round1Slots.length > 0 || canAddThirdPlace) && (
         <div className="tm-bracket-modal-header">
           {canAddThirdPlace && (
             <button className="tm-io-btn" onClick={onAddThirdPlace} title="Add a 3rd/4th place playoff between the Semifinal losers">
-              🥉 Add 3rd Place Playoff
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Medal size={14} /> Add 3rd Place Playoff</span>
             </button>
           )}
           {round1Slots.length > 0 && (
@@ -135,14 +245,16 @@ export function BracketView({ matches, thirdPlaceMatch, results, tournamentId, e
               onClick={() => setEditMode(v => !v)}
               title="Swap which entrant lands in which Round 1 bracket slot"
             >
-              {editMode ? '✓ Done Editing' : '✏️ Edit Arrangement'}
+              {editMode
+                ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Check size={14} /> Done Editing</span>
+                : <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Pencil size={14} /> Edit Arrangement</span>}
             </button>
           )}
         </div>
       )}
       {editMode && (
         <div className="tm-gen-warn" style={{ marginTop: 0 }}>
-          ✏️ Edit mode: pick a different entrant in any Round 1 slot to swap it with whoever currently holds that spot.
+          Edit mode: pick a different entrant in any Round 1 slot to swap it with whoever currently holds that spot.
         </div>
       )}
 
@@ -157,19 +269,24 @@ export function BracketView({ matches, thirdPlaceMatch, results, tournamentId, e
               width={bracketWidth} height={containerHeight + 24}
               style={{ position: 'absolute', left: 0, top: 24, pointerEvents: 'none' }}
             >
-              {stages.slice(0, -1).map(([, stageMatches], r) => {
-                const colLeft = r * (BRACKET_COL_W + BRACKET_COL_GAP);
+              {primaryStageIndices.slice(1).map((rawIdx, i0) => {
+                const col = i0 + 1;
+                const feederRaw = feederIdx[rawIdx];
+                if (feederRaw === null) return null;
+                const feederCol = colOfStage(feederRaw);
+                const feederMatches = stages[feederRaw][1];
+                const colLeft = feederCol * (BRACKET_COL_W + BRACKET_COL_GAP);
                 const xStart = colLeft + BRACKET_COL_W;
                 const xMid = xStart + BRACKET_COL_GAP / 2;
                 const xEnd = xStart + BRACKET_COL_GAP;
                 const pairs: React.ReactNode[] = [];
-                for (let i = 0; i < stageMatches.length; i += 2) {
-                  const y1 = centers[r][i];
-                  const y2 = centers[r][i + 1] ?? y1;
-                  const yMid = centers[r + 1]?.[i / 2] ?? (y1 + y2) / 2;
+                for (let i = 0; i < feederMatches.length; i += 2) {
+                  const y1 = centers[feederCol][i];
+                  const y2 = centers[feederCol][i + 1] ?? y1;
+                  const yMid = centers[col]?.[i / 2] ?? (y1 + y2) / 2;
                   pairs.push(
                     <path
-                      key={`${r}-${i}`}
+                      key={`${col}-${i}`}
                       d={`M ${xStart} ${y1} L ${xMid} ${y1} L ${xMid} ${y2} L ${xStart} ${y2} M ${xMid} ${yMid} L ${xEnd} ${yMid}`}
                       fill="none"
                       className="tm-bracket-line"
@@ -177,6 +294,39 @@ export function BracketView({ matches, thirdPlaceMatch, results, tournamentId, e
                   );
                 }
                 return pairs;
+              })}
+              {/* Stacked siblings (e.g. "11th-12th Placing" stacked under
+                  "9th-10th Placing" — both fed by "9th-12th Placing") each
+                  draw their own connector from the shared feeder into their
+                  stacked Y position, same geometry as the 3rd Place Playoff
+                  connector below, generalized to however many are detected. */}
+              {Array.from(stackedGroups.entries()).flatMap(([primary, stackedList]) => {
+                const primaryCol = colOfStage(primary);
+                const feederRaw = feederIdx[primary];
+                if (feederRaw === null) return [];
+                const feederCol = colOfStage(feederRaw);
+                const colLeft = feederCol * (BRACKET_COL_W + BRACKET_COL_GAP);
+                const xStart = colLeft + BRACKET_COL_W;
+                const xMid = xStart + BRACKET_COL_GAP / 2;
+                const xEnd = xStart + BRACKET_COL_GAP;
+                // Each stacked sibling draws from the SAME shared feeder
+                // round as its primary (a match's winner and loser are the
+                // two halves of one binary outcome, not disjoint slices of
+                // a bigger feeder) — same geometry as the 3rd Place Playoff
+                // connector below, one point per feeder match.
+                const y1 = centers[feederCol]?.[0] ?? 0;
+                const y2 = centers[feederCol]?.[1] ?? y1;
+                return stackedList.map((_, k) => {
+                  const y = (centers[primaryCol]?.[0] ?? 0) + stackedOffset(k);
+                  return (
+                    <path
+                      key={`stacked-${primary}-${k}`}
+                      d={`M ${xStart} ${y1} L ${xMid} ${y1} L ${xMid} ${y} L ${xEnd} ${y} M ${xMid} ${y2} L ${xStart} ${y2}`}
+                      fill="none"
+                      className="tm-bracket-line tm-bracket-line--third"
+                    />
+                  );
+                });
               })}
               {thirdPlaceMatch && semifinalStageIdx >= 0 && (() => {
                 const colLeft = semifinalStageIdx * (BRACKET_COL_W + BRACKET_COL_GAP);
@@ -194,7 +344,7 @@ export function BracketView({ matches, thirdPlaceMatch, results, tournamentId, e
                 );
               })()}
             </svg>
-            {stages.map(([stageName, stageMatches], r) => (
+            {primaryStages.map(([stageName, stageMatches], r) => (
               <div
                 key={stageName}
                 className="tm-bracket-col"
@@ -210,52 +360,31 @@ export function BracketView({ matches, thirdPlaceMatch, results, tournamentId, e
                     unlike the in-app Bracket tab) shows a bare "Semifinal"
                     with no way to tell which tier's bracket is on screen. */}
                 <div className="tm-bracket-col-title">{stageMatches[0]?.tier ? `${stageMatches[0].tier} ${stageName}` : stageName}</div>
-                {stageMatches.map((m, i) => {
-                  const score = findScore(m);
-                  const win = findWinner(m);
-                  const aWins = win?.side === 'A';
-                  const bWins = win?.side === 'B';
-                  const centerY = centers[r]?.[i] ?? 0;
-                  const slotEditable = editable && editMode && r === 0;
-                  return (
-                    <div
-                      key={m.id}
-                      className={`tm-bracket-match${slotEditable ? ' tm-bracket-match--editing' : ''}`}
-                      style={{ position: 'absolute', top: 24 + centerY - BRACKET_MATCH_H / 2, left: 0, width: BRACKET_COL_W, height: BRACKET_MATCH_H }}
-                      title={win?.shootout ? `Won on penalties, ${win.shootout.scoreA}-${win.shootout.scoreB}` : undefined}
-                    >
-                      <div className={`tm-bracket-team${aWins ? ' tm-bracket-team--winner' : ''}`}>
-                        <div style={{ width: 26, height: 26, flexShrink: 0 }}><ScheduleBadge logo={m.teamALogo} color={m.teamAColor} /></div>
-                        {slotEditable ? (
-                          <select className="tm-bracket-slot-select" value={m.teamAName} onChange={e => swapSlot(m.id, 'A', e.target.value)}>
-                            {round1Slots.map(s => <option key={`${s.matchId}-${s.side}`} value={s.name}>{s.name}</option>)}
-                          </select>
-                        ) : onSelectTeam ? (
-                          <span className="tm-bracket-team-name tm-bracket-team-name--clickable" onClick={() => onSelectTeam(m.teamAName)}>{m.teamAShortName || m.teamAName}</span>
-                        ) : (
-                          <span className="tm-bracket-team-name">{m.teamAShortName || m.teamAName}</span>
-                        )}
-                        {score && <span className="tm-bracket-score">{score.a}{win?.shootout && aWins ? <sup className="tm-bracket-pens">p</sup> : null}</span>}
-                      </div>
-                      <div className={`tm-bracket-team${bWins ? ' tm-bracket-team--winner' : ''}`}>
-                        <div style={{ width: 26, height: 26, flexShrink: 0 }}><ScheduleBadge logo={m.teamBLogo} color={m.teamBColor} /></div>
-                        {slotEditable && m.teamBName ? (
-                          <select className="tm-bracket-slot-select" value={m.teamBName} onChange={e => swapSlot(m.id, 'B', e.target.value)}>
-                            {round1Slots.map(s => <option key={`${s.matchId}-${s.side}`} value={s.name}>{s.name}</option>)}
-                          </select>
-                        ) : (
-                          <span
-                            className={m.teamBName && onSelectTeam ? 'tm-bracket-team-name tm-bracket-team-name--clickable' : 'tm-bracket-team-name'}
-                            onClick={m.teamBName && onSelectTeam ? () => onSelectTeam(m.teamBName) : undefined}
-                          >{m.teamBName ? (m.teamBShortName || m.teamBName) : 'BYE'}</span>
-                        )}
-                        {score && <span className="tm-bracket-score">{score.b}{win?.shootout && bWins ? <sup className="tm-bracket-pens">p</sup> : null}</span>}
-                      </div>
-                    </div>
-                  );
-                })}
+                {stageMatches.map((m, i) => renderMatch(m, centers[r]?.[i] ?? 0, !!editable && editMode && r === 0))}
               </div>
             ))}
+            {/* Stacked siblings (e.g. "11th-12th Placing") render in their
+                primary's column, offset below it — same treatment as the
+                3rd Place Playoff block further down, generalized. */}
+            {Array.from(stackedGroups.entries()).flatMap(([primary, stackedList]) =>
+              stackedList.map((stackedRawIdx, k) => {
+                const [stageName, stageMatches] = stages[stackedRawIdx];
+                const col = colOfStage(primary);
+                const y = (centers[col]?.[0] ?? 0) + stackedOffset(k);
+                return (
+                  <div
+                    key={`stacked-col-${stackedRawIdx}`}
+                    className="tm-bracket-col"
+                    style={{ position: 'absolute', left: col * (BRACKET_COL_W + BRACKET_COL_GAP), top: 0, width: BRACKET_COL_W, height: containerHeight + 24 }}
+                  >
+                    <div className="tm-bracket-col-title tm-bracket-col-title--third" style={{ position: 'absolute', top: y - BRACKET_MATCH_H / 2 - 16 }}>
+                      {stageMatches[0]?.tier ? `${stageMatches[0].tier} ${stageName}` : stageName}
+                    </div>
+                    {stageMatches.map(m => renderMatch(m, y, false))}
+                  </div>
+                );
+              })
+            )}
             {thirdPlaceMatch && (() => {
               const score = findScore(thirdPlaceMatch);
               const win = findWinner(thirdPlaceMatch);
@@ -269,7 +398,7 @@ export function BracketView({ matches, thirdPlaceMatch, results, tournamentId, e
                   <div
                     className="tm-bracket-col-title tm-bracket-col-title--third"
                     style={{ position: 'absolute', top: thirdPlaceY - BRACKET_MATCH_H / 2 - 16 }}
-                  >🥉 {thirdPlaceMatch.tier ? `${thirdPlaceMatch.tier} ` : ''}3rd Place</div>
+                  ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Medal size={12} /> {thirdPlaceMatch.tier ? `${thirdPlaceMatch.tier} ` : ''}3rd Place</span></div>
                   <div
                     className="tm-bracket-match"
                     style={{ position: 'absolute', top: thirdPlaceY - BRACKET_MATCH_H / 2, left: 0, width: BRACKET_COL_W, height: BRACKET_MATCH_H }}

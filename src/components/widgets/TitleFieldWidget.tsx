@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { ArrowRight } from 'lucide-react';
 import { useVmixStore } from '../../stores/vmixStore';
 import { LogoUrlPicker } from '../LogoUrlPicker';
 
@@ -116,7 +117,7 @@ export function TitleFieldWidget({ config }: Props) {
       <div className="wgt-tf-fields">
         {!configured && (
           <div className="wgt-tf-row" style={{ padding: '8px', justifyContent: 'center', opacity: 0.5, fontSize: 11 }}>
-            Set inputs in ⚙
+            Set inputs in settings
           </div>
         )}
 
@@ -164,7 +165,7 @@ export function TitleFieldWidget({ config }: Props) {
                           disabled={!grp.inputKey}
                           title="Send to vMix"
                           onClick={() => sendField(grp.inputKey, field, val)}
-                        >→</button>
+                        ><ArrowRight size={13} strokeWidth={2} /></button>
                       )}
                     </>
                   )}

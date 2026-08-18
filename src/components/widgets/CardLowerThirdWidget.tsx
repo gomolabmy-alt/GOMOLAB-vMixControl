@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
+import { X, ChevronDown, ArrowUp, Eye, EyeOff, ArrowLeftRight } from 'lucide-react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useTeamDbStore } from '../../stores/teamDbStore';
+import { useAppSettings } from '../../stores/appSettingsStore';
+import { autoLinkedWidgetPair } from '../../lib/autoLink';
+import { resolvePlayerListRoster } from '../../lib/playerListSquad';
+import { simplifyPlayerName, type SimpleNameOptions } from '../../lib/simpleName';
+import { resolveImageUrl } from '../../lib/imageUrl';
+import type { CanvasWidget } from '../../types/canvas';
+import type { SavedTeam } from '../../stores/teamDbStore';
 
 interface Props {
   widgetId: string;
@@ -18,6 +26,7 @@ interface CardPlayer {
   jerseyNo: string;
   teamName: string;
   teamColor: string;
+  teamLogo?: string;
   teamSide: 'A' | 'B';
   cardType: RugbyCard;
 }
@@ -28,21 +37,26 @@ const CARD_COLOR: Record<RugbyCard, string> = {
   red:    '#e74c3c',
 };
 
+// vMix merge composer (WidgetConfigPanel's 'card-lower-third' case).
+type CardMergeKey = 'jersey' | 'name' | 'team' | 'cardType';
+function resolveCardMergePart(player: CardPlayer, key: CardMergeKey): string {
+  if (key === 'jersey') return player.jerseyNo;
+  if (key === 'name') return player.name;
+  if (key === 'team') return player.teamName;
+  return CARD_LABEL[player.cardType];
+}
+
 const CARD_LABEL: Record<RugbyCard, string> = {
   yellow: 'Yellow Card',
   orange: 'Orange Card',
   red:    'Red Card',
 };
 
-function resolveCardPlayers(allWidgets: any[], teamDbTeams: any[], linkedId: string): CardPlayer[] {
-  const plw = allWidgets.find(w => w.id === linkedId);
+function resolveCardPlayers(plw: CanvasWidget | undefined, teamDbTeams: SavedTeam[], side: 'A' | 'B', simpleNameOpts: SimpleNameOptions): CardPlayer[] {
   if (!plw) return [];
 
-  const plCfg = plw.config;
-  const side: 'A' | 'B' = plCfg.teamSide ?? 'A';
-  const team = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
-  const players: any[] = team?.players ?? [];
-  const playerCards: Record<string, RugbyCard[]> = plCfg.playerCards ?? {};
+  const { team, playerCards } = resolvePlayerListRoster(plw, side, teamDbTeams);
+  const players = team?.players ?? [];
 
   const results: CardPlayer[] = [];
 
@@ -64,10 +78,11 @@ function resolveCardPlayers(allWidgets: any[], teamDbTeams: any[], linkedId: str
     const player = players.find(p => p.id === id);
     results.push({
       playerId: id,
-      name: player?.name ?? '?',
+      name: player ? simplifyPlayerName(player.name, simpleNameOpts) : '?',
       jerseyNo: player?.jerseyNo ?? '',
       teamName: team?.name ?? (side === 'A' ? 'Team A' : 'Team B'),
       teamColor: team?.color ?? (side === 'A' ? '#e74c3c' : '#3498db'),
+      teamLogo: team?.logo,
       teamSide: side,
       cardType,
     });
@@ -76,15 +91,23 @@ function resolveCardPlayers(allWidgets: any[], teamDbTeams: any[], linkedId: str
   return results;
 }
 
-export function CardLowerThirdWidget({ config }: Props) {
+export function CardLowerThirdWidget({ widgetId, config }: Props) {
   const { pages } = useCanvasStore();
   const { teams: teamDbTeams } = useTeamDbStore();
   const { client, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const simpleNameOpts: SimpleNameOptions = { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker };
 
-  const allWidgets = pages.flatMap(p => p.widgets);
+  // Falls back to the two Player List widgets on this page (assigned by
+  // their own teamSide A/B, or left-to-right position) when neither side's
+  // been explicitly linked in settings — an explicit pick always wins. A
+  // lone side-by-side Player List widget covers both sides by itself.
+  const { a: playerListA, b: playerListB } = autoLinkedWidgetPair(
+    pages, widgetId, config.linkedPlayerListA, config.linkedPlayerListB, 'player-list'
+  );
 
-  const teamAPlayers = resolveCardPlayers(allWidgets, teamDbTeams, config.linkedPlayerListA ?? '');
-  const teamBPlayers = resolveCardPlayers(allWidgets, teamDbTeams, config.linkedPlayerListB ?? '');
+  const teamAPlayers = resolveCardPlayers(playerListA, teamDbTeams, 'A', simpleNameOpts);
+  const teamBPlayers = resolveCardPlayers(playerListB, teamDbTeams, 'B', simpleNameOpts);
   const allCardPlayers = [...teamAPlayers, ...teamBPlayers];
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -124,6 +147,10 @@ export function CardLowerThirdWidget({ config }: Props) {
     if (config.fieldName)     client.setTextField(key, config.fieldName,     player.name);
     if (config.fieldTeam)     client.setTextField(key, config.fieldTeam,     player.teamName);
     if (config.fieldCardType) client.setTextField(key, config.fieldCardType, CARD_LABEL[player.cardType]);
+    if (config.fieldTeamLogo && player.teamLogo) client.setImageField(key, config.fieldTeamLogo, player.teamLogo);
+    if (config.mergedPrefix && config.mergedParts?.length) {
+      client.setTextField(key, config.mergedPrefix, config.mergedParts.map((k: CardMergeKey) => resolveCardMergePart(player, k)).join(config.mergedSeparator ?? ' '));
+    }
   };
 
   const selectedInputKey = selected ? resolveInputKey(selected.cardType) : undefined;
@@ -145,7 +172,7 @@ export function CardLowerThirdWidget({ config }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vmixSyncVersion]);
 
-  const configured = config.linkedPlayerListA || config.linkedPlayerListB;
+  const configured = !!(playerListA || playerListB);
 
   return (
     <div className="wgt-clt">
@@ -159,7 +186,7 @@ export function CardLowerThirdWidget({ config }: Props) {
               className="wgt-clt-picker-close"
               onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setShowPicker(false); }}
               onClick={(e) => e.stopPropagation()}
-            >✕</button>
+            ><X size={14} strokeWidth={2} /></button>
           </div>
           <div className="wgt-clt-picker-list">
             {allCardPlayers.length === 0 && (
@@ -185,7 +212,7 @@ export function CardLowerThirdWidget({ config }: Props) {
       {/* ── Preview ───────────────────────────────────────────────────────── */}
       <div className="wgt-clt-preview">
         {!configured ? (
-          <div className="wgt-clt-empty">Link player lists in ⚙</div>
+          <div className="wgt-clt-empty">Link player lists in settings</div>
         ) : selected ? (
           <>
             <div className="wgt-clt-team-bar" style={{ background: selected.teamColor }} />
@@ -196,6 +223,7 @@ export function CardLowerThirdWidget({ config }: Props) {
             />
             <div className="wgt-clt-info">
               <div className="wgt-clt-identity">
+                {selected.teamLogo && <img className="wgt-clt-team-logo" src={resolveImageUrl(selected.teamLogo)} alt="" />}
                 {selected.jerseyNo && <span className="wgt-clt-jersey">{selected.jerseyNo}</span>}
                 <span className="wgt-clt-name">{selected.name}</span>
                 <span className="wgt-clt-team-name" style={{ color: selected.teamColor }}>{selected.teamName}</span>
@@ -210,7 +238,8 @@ export function CardLowerThirdWidget({ config }: Props) {
                 title="Switch player"
                 onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setShowPicker(true); }}
                 onClick={(e) => e.stopPropagation()}
-              >⇄ {allCardPlayers.length}</button>
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              ><ArrowLeftRight size={12} strokeWidth={2} /> {allCardPlayers.length}</button>
             )}
           </>
         ) : (
@@ -226,28 +255,32 @@ export function CardLowerThirdWidget({ config }: Props) {
           onClick={(e) => e.stopPropagation()}
           disabled={allCardPlayers.length === 0}
           title="Pick player"
-        >▾ Pick</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><ChevronDown size={12} strokeWidth={2} /> Pick</button>
         <button
           className="wgt-clt-btn wgt-clt-btn--send"
           onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); sendToVmix(selected); }}
           onClick={(e) => e.stopPropagation()}
           disabled={!client || !hasInput || !selected}
           title="Send to vMix"
-        >↑ Send</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><ArrowUp size={12} strokeWidth={2} /> Send</button>
         <button
           className={`wgt-clt-btn wgt-clt-btn--show${overlayActive ? ' wgt-clt-btn--active' : ''}`}
           onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); overlayIn(ch, selectedInputKey); }}
           onClick={(e) => e.stopPropagation()}
           disabled={!vmixState || !hasInput}
           title="Show overlay"
-        >▶ Show</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><Eye size={12} strokeWidth={2} /> Show</button>
         <button
           className={`wgt-clt-btn wgt-clt-btn--hide${!overlayActive ? ' wgt-clt-btn--active' : ''}`}
           onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); overlayOut(ch); }}
           onClick={(e) => e.stopPropagation()}
           disabled={!vmixState || !hasInput}
           title="Hide overlay"
-        >■ Hide</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><EyeOff size={12} strokeWidth={2} /> Hide</button>
       </div>
     </div>
   );

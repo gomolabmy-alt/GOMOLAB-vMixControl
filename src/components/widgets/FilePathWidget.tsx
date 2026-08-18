@@ -1,4 +1,5 @@
 import { useRef, useContext, useEffect } from 'react';
+import { FolderOpen, CornerDownLeft } from 'lucide-react';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
@@ -70,7 +71,7 @@ export function FilePathWidget({ widgetId, config }: Props) {
         className="wgt-filepath-browse"
         onClick={() => fileInputRef.current?.click()}
       >
-        📁 Browse
+        <FolderOpen size={14} strokeWidth={2} /> Browse
       </button>
 
       {/* Path display / manual edit */}
@@ -88,15 +89,16 @@ export function FilePathWidget({ widgetId, config }: Props) {
       {/* Send bar */}
       <div className="wgt-filepath-footer">
         <span className="wgt-filepath-target">
-          {inputMeta ? `→ ${inputMeta.number}. ${inputMeta.title} · ${config.fieldName}` : '⚙ Set target in settings'}
+          {inputMeta ? `→ ${inputMeta.number}. ${inputMeta.title} · ${config.fieldName}` : 'Set target in settings'}
         </span>
         {!config.autoSend && (
           <button
             className="wgt-filepath-send"
             onClick={() => send(currentPath)}
             disabled={!configured || !currentPath}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
           >
-            Send ↵
+            Send <CornerDownLeft size={11} strokeWidth={2} />
           </button>
         )}
         {config.autoSend && currentPath && (

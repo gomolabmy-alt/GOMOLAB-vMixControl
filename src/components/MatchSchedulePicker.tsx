@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { CalendarDays, Check, X } from 'lucide-react';
 import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
 import { useAppSettings } from '../stores/appSettingsStore';
 import { resolveImageUrl } from '../lib/imageUrl';
@@ -10,6 +11,9 @@ interface Props {
    *  canvas's own bound tournament (a canvas is normally dedicated to one),
    *  so this picker doesn't need its own separate tournament selector. */
   tournamentId?: string;
+  /** Same idea as `tournamentId`, for the canvas's own bound venue (the 🖥
+   *  canvas picker's Venue sub-select). */
+  venue?: string;
 }
 
 // Popup listing upcoming scheduled matches — picking one fills in both
@@ -17,19 +21,20 @@ interface Props {
 // in one click. Rendered via a portal (same reasoning as TeamPicker): the
 // scoreboard's team column has overflow:hidden, which would clip a nested
 // absolutely-positioned popup.
-export function MatchSchedulePicker({ onPick, tournamentId }: Props) {
+export function MatchSchedulePicker({ onPick, tournamentId, venue }: Props) {
   const { matches: allMatches, deleteMatch } = useMatchScheduleStore();
   const { canvasTournamentId, canvasVenue } = useAppSettings();
   const effTournamentId = tournamentId || canvasTournamentId;
-  // Scoped to this canvas's tournament, or (if unbound) this install's
+  const effVenue = venue || canvasVenue;
+  // Scoped to this canvas's tournament+venue, or (if unbound) this install's
   // selected tournament/venue (title bar 🏟 picker) — so a venue operator
   // can't accidentally load another venue's fixture.
   const matches = useMemo(
     () => allMatches.filter(m =>
       (!effTournamentId || m.tournamentId === effTournamentId) &&
-      (!canvasVenue || m.venue === canvasVenue)
+      (!effVenue || m.venue === effVenue)
     ),
-    [allMatches, effTournamentId, canvasVenue]
+    [allMatches, effTournamentId, effVenue]
   );
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
@@ -65,7 +70,7 @@ export function MatchSchedulePicker({ onPick, tournamentId }: Props) {
         title="Load a scheduled match into this scoreboard"
         onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); toggle(); }}
         onClick={e => e.stopPropagation()}
-      >📅 Load Match</button>
+      ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><CalendarDays size={14} /> Load Match</span></button>
       {open && pos && createPortal(
         <div
           ref={popupRef}
@@ -84,8 +89,8 @@ export function MatchSchedulePicker({ onPick, tournamentId }: Props) {
           {matches.length === 0 ? (
             <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
               {allMatches.length > 0 && (canvasTournamentId || canvasVenue)
-                ? 'No fixtures for the selected tournament/venue — check the 🏟 picker in the title bar'
-                : 'No scheduled matches yet — add some in 🏆 DB → Schedule'}
+                ? 'No fixtures for the selected tournament/venue — check the picker in the title bar'
+                : 'No scheduled matches yet — add some in DB → Schedule'}
             </div>
           ) : (
             matches.map(m => (
@@ -97,7 +102,7 @@ export function MatchSchedulePicker({ onPick, tournamentId }: Props) {
                 className="team-picker-item"
               >
                 <div style={{ fontSize: 9, color: 'var(--text-muted)', width: 44, flexShrink: 0, lineHeight: 1.2 }}>
-                  {m.sentAt ? '✓ sent' : (<>{m.date}{m.time ? <><br />{m.time}</> : null}</>)}
+                  {m.sentAt ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Check size={11} /> sent</span> : (<>{m.date}{m.time ? <><br />{m.time}</> : null}</>)}
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 1, flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
@@ -128,8 +133,8 @@ export function MatchSchedulePicker({ onPick, tournamentId }: Props) {
                 <button
                   title="Delete scheduled match"
                   onClick={e => { e.stopPropagation(); deleteMatch(m.id); }}
-                  style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 13, padding: '0 2px', flexShrink: 0 }}
-                >×</button>
+                  style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 13, padding: '0 2px', flexShrink: 0, display: 'inline-flex', alignItems: 'center' }}
+                ><X size={12} /></button>
               </div>
             ))
           )}

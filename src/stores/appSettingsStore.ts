@@ -49,6 +49,23 @@ interface AppSettingsState {
   canvasVenue: string;
   setCanvasTournamentId: (v: string) => void;
   setCanvasVenue: (v: string) => void;
+  // App sidebar (replaces the old separate title bar + status bar) — whether
+  // it's showing full labels or just its icon rail. Persisted so a venue
+  // that always runs collapsed for max canvas space doesn't have to
+  // re-collapse it every launch.
+  sidebarCollapsed: boolean;
+  setSidebarCollapsed: (v: boolean) => void;
+  // Simple Names — applies everywhere a player's name is read-only
+  // displayed or pushed to vMix (never to an editable name input, so it
+  // can't overwrite a player's real stored name). See src/lib/simpleName.ts.
+  simplifyMuhammadNames: boolean;
+  simplifyFirstNameOnly: boolean;
+  removeBinMarkers: boolean;
+  truncateAtBinMarker: boolean;
+  setSimplifyMuhammadNames: (v: boolean) => void;
+  setSimplifyFirstNameOnly: (v: boolean) => void;
+  setRemoveBinMarkers: (v: boolean) => void;
+  setTruncateAtBinMarker: (v: boolean) => void;
 }
 
 export const useAppSettings = create<AppSettingsState>()(
@@ -88,6 +105,18 @@ export const useAppSettings = create<AppSettingsState>()(
       canvasVenue: '',
       setCanvasTournamentId: (v) => set({ canvasTournamentId: v, canvasVenue: '' }),
       setCanvasVenue: (v) => set({ canvasVenue: v }),
+
+      sidebarCollapsed: false,
+      setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
+
+      simplifyMuhammadNames: false,
+      simplifyFirstNameOnly: false,
+      removeBinMarkers: false,
+      truncateAtBinMarker: false,
+      setSimplifyMuhammadNames: (v) => set({ simplifyMuhammadNames: v }),
+      setSimplifyFirstNameOnly: (v) => set({ simplifyFirstNameOnly: v }),
+      setRemoveBinMarkers: (v) => set({ removeBinMarkers: v }),
+      setTruncateAtBinMarker: (v) => set({ truncateAtBinMarker: v }),
     }),
     { name: 'gomolab-app-settings' },
   ),

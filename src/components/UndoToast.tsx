@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { X } from 'lucide-react';
 import { useUndoStore } from '../stores/undoStore';
 
 const TOAST_DURATION_MS = 8000;
@@ -37,7 +38,7 @@ export function UndoToast() {
             className="undo-toast-btn"
             onClick={() => { entry.undo(); removeEntry(entry.id); setVisibleId(null); }}
           >Undo</button>
-          <button className="undo-toast-close" onClick={() => setVisibleId(null)} title="Dismiss">✕</button>
+          <button className="undo-toast-close" onClick={() => setVisibleId(null)} title="Dismiss"><X size={14} strokeWidth={2} /></button>
         </div>
       </div>
     </div>

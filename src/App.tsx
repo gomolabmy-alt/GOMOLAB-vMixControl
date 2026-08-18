@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
+import { Sun, Moon, Mic } from 'lucide-react';
 import { useVmixStore } from './stores/vmixStore';
 import { useAppSettings } from './stores/appSettingsStore';
-import { TitleBar } from './components/TitleBar';
-import { StatusBar } from './components/StatusBar';
+import { Sidebar } from './components/Sidebar';
 import { Canvas } from './components/Canvas';
 import { SplashScreen } from './components/SplashScreen';
 import { SignInGate } from './components/SignInGate';
@@ -13,7 +13,11 @@ import { startCloudSync } from './lib/cloudSync';
 import { startHotkeyRegistry } from './lib/hotkeyRegistry';
 import { useMatchResultsStore } from './stores/matchResultsStore';
 import { backfillTeamIds } from './lib/backfillTeamIds';
+import { backfillResultStageData } from './lib/backfillResultStageData';
+import { backfillTierMismatches } from './lib/backfillTierMismatches';
 import { startTournamentAutoAdvance } from './lib/tournamentAutoAdvance';
+import { startCountdownVmixSync } from './lib/countdownVmixSync';
+import { startCompanionBridge } from './lib/companionBridge';
 
 function CommentatorApp() {
   const { theme, setTheme } = useAppSettings();
@@ -23,7 +27,7 @@ function CommentatorApp() {
         className="commentator-theme-btn"
         onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
         title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-      >{theme === 'dark' ? '☀' : '🌙'}</button>
+      >{theme === 'dark' ? <Sun size={16} strokeWidth={1.75} /> : <Moon size={16} strokeWidth={1.75} />}</button>
       <Canvas mode="commentator" />
     </div>
   );
@@ -66,6 +70,23 @@ export function App() {
     if (backfilled.matches > 0 || backfilled.results > 0) {
       console.log(`[teams] backfilled ids on ${backfilled.matches} fixture(s), ${backfilled.results} result(s)`);
     }
+    // Backfills group/tier onto results saved before those fields existed,
+    // by joining back to their originating fixture (see
+    // backfillResultStageData.ts) — needed so group standings computed from
+    // old data can already tell pool-stage results apart from bracket ones.
+    const stageBackfilled = backfillResultStageData();
+    if (stageBackfilled > 0) {
+      console.log(`[results] backfilled group/tier on ${stageBackfilled} result(s)`);
+    }
+    // Silently corrects any fixture whose tier doesn't match its own round
+    // text/references (see backfillTierMismatches.ts) — a drag/swap-left-
+    // the-wrong-tier-behind fixture gets fixed automatically instead of
+    // needing the operator to click through the Schedule/Bracket tab's
+    // repair banner; only genuinely ambiguous ones stay there.
+    const tierBackfilled = backfillTierMismatches();
+    if (tierBackfilled > 0) {
+      console.log(`[matches] backfilled tier on ${tierBackfilled} fixture(s)`);
+    }
     // One-time cleanup of any results left duplicated by the old
     // random-id scheme before results got a deterministic id per fixture
     // (see matchResultsStore's addResult) — collapses them and queues the
@@ -92,6 +113,25 @@ export function App() {
   useEffect(() => {
     if (!isDesktopHost) return;
     startTournamentAutoAdvance();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Countdown widget → vMix text push, every second, regardless of which
+  // canvas tab is currently active (see countdownVmixSync.ts — a widget on
+  // an inactive tab isn't mounted at all, so its own per-render push effect
+  // alone can't cover this). Desktop-host only, same as the above.
+  useEffect(() => {
+    if (!isDesktopHost) return;
+    startCountdownVmixSync();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Stream Deck / Companion bridge — lets a Bitfocus Companion module
+  // connected as a plain read-only sync client trigger any hotkey-bound
+  // action and receive REC/STR/FTB/toggle feedback (see companionBridge.ts).
+  useEffect(() => {
+    if (!isDesktopHost) return;
+    startCompanionBridge();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -124,22 +164,26 @@ export function App() {
   return (
     <div className="app-layout">
       {!splashDone && <SplashScreen onDone={() => setSplashDone(true)} />}
-      <TitleBar />
-      <StatusBar />
-      <UndoToast />
-      {isDesktopHost && (
-        <div className="canvas-mode-bar">
-          <button
-            className={`canvas-mode-btn ${canvasMode === 'main' ? 'canvas-mode-btn--active' : ''}`}
-            onClick={() => setCanvasMode('main')}
-          >Main Canvas</button>
-          <button
-            className={`canvas-mode-btn ${canvasMode === 'commentator' ? 'canvas-mode-btn--active' : ''}`}
-            onClick={() => setCanvasMode('commentator')}
-          >🎙 Commentator</button>
+      <div className="app-shell">
+        <Sidebar />
+        <div className="app-main">
+          <UndoToast />
+          {isDesktopHost && (
+            <div className="canvas-mode-bar">
+              <button
+                className={`canvas-mode-btn ${canvasMode === 'main' ? 'canvas-mode-btn--active' : ''}`}
+                onClick={() => setCanvasMode('main')}
+              >Main Canvas</button>
+              <button
+                className={`canvas-mode-btn ${canvasMode === 'commentator' ? 'canvas-mode-btn--active' : ''}`}
+                onClick={() => setCanvasMode('commentator')}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              ><Mic size={12} strokeWidth={2} /> Commentator</button>
+            </div>
+          )}
+          <Canvas mode={canvasMode} />
         </div>
-      )}
-      <Canvas mode={canvasMode} />
+      </div>
     </div>
   );
 }

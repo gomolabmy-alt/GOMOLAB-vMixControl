@@ -1,0 +1,23 @@
+{
+  "name": "companion-module-gomolab-vmixcontrol",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bitfocus Companion module for GOMOLAB vMix Control — triggers hotkey-bound actions and shows live REC/STR/FTB/toggle feedback on a Stream Deck.",
+  "main": "src/main.ts",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "companion-module-build",
+    "package": "companion-module-build"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@companion-module/base": "^2.1.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@companion-module/tools": "^3.0.2",
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.4.0"
+  }
+}

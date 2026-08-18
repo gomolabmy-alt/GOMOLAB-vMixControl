@@ -3,12 +3,14 @@ import { StrictMode, Component, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
 import { App } from './App';
+import { PopoutPage } from './components/PopoutPage';
 import { syncClient } from './lib/syncClient';
 import { useCanvasStore, initCanvasSync, initCommentatorSync } from './stores/canvasStore';
 import { useTournamentStore, initTournamentSync } from './stores/tournamentStore';
 import { useTeamDbStore } from './stores/teamDbStore';
 import { useMatchScheduleStore } from './stores/matchScheduleStore';
 import { useMatchResultsStore } from './stores/matchResultsStore';
+import { useRundownStore } from './stores/rundownStore';
 import { useAuthStore } from './stores/authStore';
 
 class RootErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
@@ -51,10 +53,21 @@ const isDesktopHost = typeof window !== 'undefined' && (
   ((import.meta as any).env?.DEV && window.location.hostname === 'localhost')
 );
 
-// Sign-in gate only applies to the actual packaged app — a plain Tauri
-// runtime check, not the broader dev/localhost fallback above (the deep-link
-// plugin only exists inside a real Tauri process).
-if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+// A popped-out canvas page (see Canvas.tsx's pop-out button / PopoutPage.tsx)
+// is a second real Tauri window loading this exact same app with
+// `?popoutPage=<id>` in its URL — still `isDesktopHost` (it IS a real Tauri
+// webview), but it must never self-appoint as a second sync host: only the
+// ONE main window does. Every "am I the host" decision below uses
+// `isMainWindow`, not the raw `isDesktopHost` check.
+const popoutPageId = typeof window !== 'undefined'
+  ? new URLSearchParams(window.location.search).get('popoutPage')
+  : null;
+const isMainWindow = isDesktopHost && !popoutPageId;
+
+// Sign-in gate only applies to the actual packaged app's main window — a
+// popped-out window doesn't need its own separate auth verification/
+// deep-link handling, that's the main window's job.
+if (isMainWindow) {
   import('./lib/deepLink').then(({ initDeepLink }) => initDeepLink());
   useAuthStore.getState().verify();
   // Re-checks periodically (not just at launch) so a remote "Force Sign Out"
@@ -63,7 +76,7 @@ if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
   setInterval(() => useAuthStore.getState().verify(), 120_000);
 }
 
-syncClient.connect(isDesktopHost ? () => ({
+syncClient.connect(isMainWindow ? () => ({
   type: 'FULL_STATE' as const,
   canvas: (() => {
     const s = useCanvasStore.getState();
@@ -76,10 +89,11 @@ syncClient.connect(isDesktopHost ? () => ({
   teamDb: { teams: useTeamDbStore.getState().teams },
   matchSchedule: { matches: useMatchScheduleStore.getState().matches },
   matchResults: { results: useMatchResultsStore.getState().results },
+  rundown: { segments: useRundownStore.getState().segments },
 }) : undefined);
 
 function sendCommentatorHeartbeat() {
-  if (!isDesktopHost) return;
+  if (!isMainWindow) return;
   const s = useCanvasStore.getState();
   syncClient.send({
     type: 'COMMENTATOR_FULL_STATE' as const,
@@ -91,7 +105,7 @@ function sendCommentatorHeartbeat() {
 // never gets stale. Without this, browsers that connect after a score change or
 // timer update receive the original on-connect snapshot and miss those changes.
 // Also push COMMENTATOR_FULL_STATE so new commentator clients get fresh state.
-if (isDesktopHost) {
+if (isMainWindow) {
   setInterval(() => {
     syncClient.sendFullState();
     sendCommentatorHeartbeat();
@@ -104,7 +118,7 @@ const fallbackEl = document.getElementById('boot-fallback');
 createRoot(rootEl).render(
   <StrictMode>
     <RootErrorBoundary>
-      <App />
+      {popoutPageId ? <PopoutPage pageId={popoutPageId} /> : <App />}
     </RootErrorBoundary>
   </StrictMode>,
 );

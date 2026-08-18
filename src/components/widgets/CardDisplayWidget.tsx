@@ -1,9 +1,16 @@
 import { useMemo, useEffect, useCallback } from 'react';
+import { ArrowRight } from 'lucide-react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
+import { useAppSettings } from '../../stores/appSettingsStore';
+import { autoLinkedWidgetPair } from '../../lib/autoLink';
+import { resolvePlayerListRoster } from '../../lib/playerListSquad';
+import { simplifyPlayerName } from '../../lib/simpleName';
+import { resolveImageUrl } from '../../lib/imageUrl';
 
 interface Props {
+  widgetId: string;
   config: Record<string, any>;
 }
 
@@ -27,22 +34,28 @@ const CARD_LABEL: Record<ActiveCard, string> = {
   red:    'Red card — dismissed',
 };
 
-export function CardDisplayWidget({ config: cfg }: Props) {
+export function CardDisplayWidget({ widgetId, config: cfg }: Props) {
   const { pages } = useCanvasStore();
   const { teams: teamDbTeams } = useTeamDbStore();
   const { getClient, vmixSyncVersion } = useVmixStore();
+  // Simple Names (App Settings) — this widget only ever displays cards
+  // read-only / pushes to vMix, no editable name field to protect.
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const disp = (name: string) => simplifyPlayerName(name, { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker });
 
-  const allWidgets = useMemo(() => pages.flatMap(p => p.widgets), [pages]);
+  // Falls back to the two Player List widgets on this page (assigned by
+  // their own teamSide A/B, or left-to-right position) when neither side's
+  // been explicitly linked in settings — an explicit pick always wins.
+  const { a: playerListA, b: playerListB } = useMemo(
+    () => autoLinkedWidgetPair(pages, widgetId, cfg.linkedPlayerListA, cfg.linkedPlayerListB, 'player-list'),
+    [pages, widgetId, cfg.linkedPlayerListA, cfg.linkedPlayerListB]
+  );
 
-  function resolveTeam(linkedId: string): { name: string; color: string; entries: CardEntry[] } {
-    const plw = allWidgets.find(w => w.id === linkedId);
+  function resolveTeam(plw: typeof playerListA, side: 'A' | 'B'): { name: string; color: string; logo?: string; entries: CardEntry[] } {
     if (!plw) return { name: '—', color: '#888', entries: [] };
 
-    const plCfg = plw.config;
-    const team = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
+    const { team, playerCards, sinBinEntries } = resolvePlayerListRoster(plw, side, teamDbTeams);
     const players = team?.players ?? [];
-    const playerCards: Record<string, RugbyCard[]> = plCfg.playerCards ?? {};
-    const sinBinEntries: Record<string, number> = plCfg.sinBinEntries ?? {};
 
     const entries: CardEntry[] = [];
 
@@ -52,28 +65,28 @@ export function CardDisplayWidget({ config: cfg }: Props) {
 
       if (hasRed) {
         const player = players.find(p => p.id === id);
-        entries.push({ playerId: id, name: player?.name ?? '?', jerseyNo: player?.jerseyNo ?? '', activeCard: 'red' });
+        entries.push({ playerId: id, name: player ? disp(player.name) : '?', jerseyNo: player?.jerseyNo ?? '', activeCard: 'red' });
       } else if (yellows === 1 && sinBinEntries[id] !== undefined) {
         const player = players.find(p => p.id === id);
-        entries.push({ playerId: id, name: player?.name ?? '?', jerseyNo: player?.jerseyNo ?? '', activeCard: 'sinbin' });
+        entries.push({ playerId: id, name: player ? disp(player.name) : '?', jerseyNo: player?.jerseyNo ?? '', activeCard: 'sinbin' });
       }
     }
 
-    return { name: team?.name ?? '—', color: team?.color ?? '#888', entries };
+    return { name: team?.name ?? '—', color: team?.color ?? '#888', logo: team?.logo, entries };
   }
 
-  const teamA = useMemo(() => resolveTeam(cfg.linkedPlayerListA ?? ''), [cfg.linkedPlayerListA, allWidgets, teamDbTeams]);
-  const teamB = useMemo(() => resolveTeam(cfg.linkedPlayerListB ?? ''), [cfg.linkedPlayerListB, allWidgets, teamDbTeams]);
+  const teamA = useMemo(() => resolveTeam(playerListA, 'A'), [playerListA, teamDbTeams, simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker]);
+  const teamB = useMemo(() => resolveTeam(playerListB, 'B'), [playerListB, teamDbTeams, simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker]);
 
   const showNames: boolean = cfg.showNames !== false;
 
   // ── vMix sync ──────────────────────────────────────────────────────
   const syncToVmix = useCallback(() => {
-    const cdTargets: Array<{inputKey:string;vmixFieldSinBinA?:string;vmixFieldSinBinB?:string;vmixFieldRedA?:string;vmixFieldRedB?:string}> =
+    const cdTargets: Array<{inputKey:string;vmixFieldSinBinA?:string;vmixFieldSinBinB?:string;vmixFieldRedA?:string;vmixFieldRedB?:string;vmixFieldLogoA?:string;vmixFieldLogoB?:string;mergedPrefix?:string;mergedParts?:string[];mergedSeparator?:string}> =
       cfg.vmixInputs?.length
         ? cfg.vmixInputs
         : cfg.vmixInputKey
-          ? [{ inputKey: cfg.vmixInputKey, vmixFieldSinBinA: cfg.vmixFieldSinBinA, vmixFieldSinBinB: cfg.vmixFieldSinBinB, vmixFieldRedA: cfg.vmixFieldRedA, vmixFieldRedB: cfg.vmixFieldRedB }]
+          ? [{ inputKey: cfg.vmixInputKey, vmixFieldSinBinA: cfg.vmixFieldSinBinA, vmixFieldSinBinB: cfg.vmixFieldSinBinB, vmixFieldRedA: cfg.vmixFieldRedA, vmixFieldRedB: cfg.vmixFieldRedB, vmixFieldLogoA: cfg.vmixFieldLogoA, vmixFieldLogoB: cfg.vmixFieldLogoB }]
           : [];
     if (!cdTargets.length) return;
 
@@ -81,6 +94,7 @@ export function CardDisplayWidget({ config: cfg }: Props) {
     const sinbinB = teamB.entries.filter(e => e.activeCard === 'sinbin').map(e => e.name).join(', ');
     const redA    = teamA.entries.filter(e => e.activeCard === 'red').map(e => e.name).join(', ');
     const redB    = teamB.entries.filter(e => e.activeCard === 'red').map(e => e.name).join(', ');
+    const src: Record<string, string> = { sinbinA, sinbinB, redA, redB };
 
     for (const t of cdTargets) {
       if (!t.inputKey) continue;
@@ -90,9 +104,14 @@ export function CardDisplayWidget({ config: cfg }: Props) {
       if (t.vmixFieldSinBinB) c.setTextField(t.inputKey, t.vmixFieldSinBinB, sinbinB);
       if (t.vmixFieldRedA)    c.setTextField(t.inputKey, t.vmixFieldRedA,    redA);
       if (t.vmixFieldRedB)    c.setTextField(t.inputKey, t.vmixFieldRedB,    redB);
+      if (t.vmixFieldLogoA && teamA.logo) c.setImageField(t.inputKey, t.vmixFieldLogoA, teamA.logo);
+      if (t.vmixFieldLogoB && teamB.logo) c.setImageField(t.inputKey, t.vmixFieldLogoB, teamB.logo);
+      if (t.mergedPrefix && t.mergedParts?.length) {
+        c.setTextField(t.inputKey, t.mergedPrefix, t.mergedParts.map(k => src[k] ?? '').join(t.mergedSeparator ?? ' '));
+      }
     }
   }, [cfg.vmixInputs, cfg.vmixInputKey, cfg.vmixFieldSinBinA, cfg.vmixFieldSinBinB, cfg.vmixFieldRedA, cfg.vmixFieldRedB,
-      teamA.entries, teamB.entries, getClient]);
+      cfg.vmixFieldLogoA, cfg.vmixFieldLogoB, teamA.entries, teamA.logo, teamB.entries, teamB.logo, getClient]);
 
   useEffect(() => {
     if (cfg.vmixAutoSync) syncToVmix();
@@ -117,18 +136,18 @@ export function CardDisplayWidget({ config: cfg }: Props) {
     ));
   }
 
-  const configured = cfg.linkedPlayerListA || cfg.linkedPlayerListB;
+  const configured = !!(playerListA || playerListB);
 
   return (
     <div className="wgt-cd">
       {!configured ? (
-        <div className="wgt-cd-uncfg">Link player lists in ⚙</div>
+        <div className="wgt-cd-uncfg">Link player lists in settings</div>
       ) : (
         <>
           <div className="wgt-cd-cols">
             <div className="wgt-cd-col">
               <div className="wgt-cd-team-hdr" style={{ color: teamA.color }}>
-                <span className="wgt-cd-team-dot" style={{ background: teamA.color }} />
+                {teamA.logo ? <img className="wgt-cd-team-logo" src={resolveImageUrl(teamA.logo)} alt="" /> : <span className="wgt-cd-team-dot" style={{ background: teamA.color }} />}
                 {teamA.name}
               </div>
               <div className="wgt-cd-entries">{renderEntries(teamA.entries)}</div>
@@ -138,7 +157,7 @@ export function CardDisplayWidget({ config: cfg }: Props) {
 
             <div className="wgt-cd-col">
               <div className="wgt-cd-team-hdr" style={{ color: teamB.color }}>
-                <span className="wgt-cd-team-dot" style={{ background: teamB.color }} />
+                {teamB.logo ? <img className="wgt-cd-team-logo" src={resolveImageUrl(teamB.logo)} alt="" /> : <span className="wgt-cd-team-dot" style={{ background: teamB.color }} />}
                 {teamB.name}
               </div>
               <div className="wgt-cd-entries">{renderEntries(teamB.entries)}</div>
@@ -147,7 +166,9 @@ export function CardDisplayWidget({ config: cfg }: Props) {
 
           {cfg.vmixInputKey && !cfg.vmixAutoSync && (
             <div className="wgt-cd-footer">
-              <button className="wgt-cd-sync-btn" onClick={syncToVmix}>⇒ Sync to vMix</button>
+              <button className="wgt-cd-sync-btn" onClick={syncToVmix} style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                <ArrowRight size={12} strokeWidth={2} /> Sync to vMix
+              </button>
             </div>
           )}
         </>

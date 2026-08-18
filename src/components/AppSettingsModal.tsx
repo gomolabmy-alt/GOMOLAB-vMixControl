@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Settings, X } from 'lucide-react';
 import { useAppSettings, SCALE_PRESETS } from '../stores/appSettingsStore';
 
 const DURATION_PRESETS = [2000, 3000, 5000, 8000, 10000, 15000, 20000, 30000];
@@ -21,6 +22,8 @@ export function AppSettingsModal({ onClose }: Props) {
     canvasWidth, canvasHeight, canvasScale, setCanvasSize, setCanvasScale,
     notifyGoal, notifyCard, notifySub, notifyTimePause, notifyDurationMs,
     setNotifyGoal, setNotifyCard, setNotifySub, setNotifyTimePause, setNotifyDurationMs,
+    simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker,
+    setSimplifyMuhammadNames, setSimplifyFirstNameOnly, setRemoveBinMarkers, setTruncateAtBinMarker,
   } = useAppSettings();
 
   const [draftW, setDraftW] = useState(String(canvasWidth));
@@ -36,12 +39,12 @@ export function AppSettingsModal({ onClose }: Props) {
     <div className="app-settings-backdrop" onPointerDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="app-settings-modal">
         <div className="app-settings-header">
-          <span className="app-settings-title">⚙ App Settings</span>
+          <span className="app-settings-title" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><Settings size={14} strokeWidth={2} /> App Settings</span>
           <button
             className="app-settings-close"
             onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); onClose(); }}
             onClick={(e) => e.stopPropagation()}
-          >✕</button>
+          ><X size={16} strokeWidth={2} /></button>
         </div>
 
         <div className="app-settings-body">
@@ -180,6 +183,35 @@ export function AppSettingsModal({ onClose }: Props) {
                 />
                 <span className="app-settings-scale-val">{(notifyDurationMs / 1000).toFixed(1)}s</span>
               </div>
+            </div>
+          </div>
+
+          {/* ── Simple Names ─────────────────────────────────────────────── */}
+          <div className="app-settings-section">
+            <div className="app-settings-section-label">Simple Names</div>
+            <p className="app-settings-hint">
+              Applies everywhere a player's name is shown or pushed to vMix
+              — never to a name you're actively editing, so this can't
+              overwrite anyone's real stored name.
+            </p>
+
+            <div className="app-settings-notif-toggles">
+              <label className="app-settings-notif-toggle">
+                <input type="checkbox" checked={simplifyMuhammadNames} onChange={e => setSimplifyMuhammadNames(e.target.checked)} />
+                <span>Shorten Muhammad / Mohd / etc. to "M."</span>
+              </label>
+              <label className="app-settings-notif-toggle">
+                <input type="checkbox" checked={simplifyFirstNameOnly} onChange={e => setSimplifyFirstNameOnly(e.target.checked)} />
+                <span>First name only</span>
+              </label>
+              <label className="app-settings-notif-toggle">
+                <input type="checkbox" checked={removeBinMarkers} disabled={truncateAtBinMarker} onChange={e => setRemoveBinMarkers(e.target.checked)} />
+                <span>Remove "bin"/"binti"/"bt"/"b." (e.g. "Ahmad bin Abdullah" → "Ahmad Abdullah")</span>
+              </label>
+              <label className="app-settings-notif-toggle">
+                <input type="checkbox" checked={truncateAtBinMarker} onChange={e => setTruncateAtBinMarker(e.target.checked)} />
+                <span>Hide everything after "bin"/"binti"/"bt"/"b." (e.g. "Ahmad bin Abdullah" → "Ahmad") — overrides the option above</span>
+              </label>
             </div>
           </div>
 

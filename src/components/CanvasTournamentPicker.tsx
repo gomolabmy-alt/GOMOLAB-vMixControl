@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { Monitor, ChevronDown, Copy, ArrowRight } from 'lucide-react';
 import { useCanvasStore } from '../stores/canvasStore';
 import { useTournamentStore } from '../stores/tournamentStore';
 
@@ -8,9 +10,16 @@ import { useTournamentStore } from '../stores/tournamentStore';
 // canvas is already bound to a given tournament, duplicating the current
 // layout as a starting point for a new one when none exists yet.
 export function CanvasTournamentPicker() {
-  const { pages, activePageId, setActivePage, setPageTournament, addPage, duplicatePage } = useCanvasStore();
+  const { pages, activePageId, setActivePage, setPageTournament, setPageVenue, addPage, duplicatePage } = useCanvasStore();
   const { tournaments } = useTournamentStore();
   const [open, setOpen] = useState(false);
+  // Rendered via a portal into document.body, positioned with fixed
+  // coordinates: this button lives in the sidebar's own scroll container
+  // (`.sb-scroll`, overflow-x: hidden), which would silently clip a wide
+  // absolutely-positioned panel nested inside it once it grows past the
+  // sidebar's ~250px width — a portal escapes that (same pattern as
+  // TeamPicker.tsx).
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLButtonElement>(null);
 
@@ -24,8 +33,18 @@ export function CanvasTournamentPicker() {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
+  const toggle = () => {
+    if (!open && anchorRef.current) {
+      const r = anchorRef.current.getBoundingClientRect();
+      const panelWidth = 300;
+      setPos({ top: r.bottom + 6, left: Math.min(r.left, window.innerWidth - panelWidth - 12) });
+    }
+    setOpen(v => !v);
+  };
+
   const activePage = pages.find(p => p.id === activePageId);
   const boundTournament = tournaments.find(t => t.id === activePage?.tournamentId);
+  const venues = boundTournament?.venues ?? [];
 
   const pageForTournament = (tournamentId: string) => pages.find(p => p.tournamentId === tournamentId);
 
@@ -43,17 +62,19 @@ export function CanvasTournamentPicker() {
   };
 
   return (
-    <div style={{ position: 'relative', display: 'inline-flex' }}>
+    <div style={{ position: 'relative', width: '100%' }}>
       <button
         ref={anchorRef}
-        className={`status-btn${open ? ' status-btn--edit-active' : ''}`}
-        onClick={() => setOpen(v => !v)}
-        title="Bind this canvas to a tournament, or switch to another tournament's canvas"
+        className={`sb-row${open ? ' sb-row--active' : ''}`}
+        onClick={toggle}
+        title="Bind this canvas to a tournament + venue, or switch to another tournament's canvas"
       >
-        🖥 {boundTournament ? boundTournament.name : 'Canvas'} ▾
+        <span className="sb-row-icon"><Monitor size={14} strokeWidth={2} /></span>
+        <span className="sb-row-text">{boundTournament ? `${boundTournament.name}${activePage?.venue ? ` — ${activePage.venue}` : ''}` : 'Canvas'}</span>
+        <span className="sb-row-chevron"><ChevronDown size={11} strokeWidth={2} /></span>
       </button>
-      {open && (
-        <div ref={panelRef} className="canvas-tourn-panel">
+      {open && pos && createPortal(
+        <div ref={panelRef} className="canvas-tourn-panel" style={{ position: 'fixed', top: pos.top, left: pos.left }}>
           <div className="canvas-tourn-panel-section">
             <div className="canvas-tourn-panel-label">This canvas ({activePage?.name}) is for:</div>
             <select
@@ -65,6 +86,22 @@ export function CanvasTournamentPicker() {
               <option value="">— Unbound (no specific tournament) —</option>
               {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
+            {boundTournament && (
+              <>
+                <div className="canvas-tourn-panel-label" style={{ marginTop: 8 }}>Venue:</div>
+                <select
+                  className="tm-input"
+                  style={{ width: '100%' }}
+                  value={activePage?.venue ?? ''}
+                  disabled={venues.length === 0}
+                  onChange={e => activePage && setPageVenue(activePage.id, e.target.value || undefined)}
+                >
+                  <option value="">All Venues</option>
+                  {venues.map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+                {venues.length === 0 && <div className="sb-popover-hint">No venues set up — DB → Schedule tab</div>}
+              </>
+            )}
           </div>
 
           {tournaments.length > 0 && (
@@ -80,11 +117,12 @@ export function CanvasTournamentPicker() {
                         className="tm-io-btn"
                         disabled={page.id === activePageId}
                         onClick={() => { setActivePage(page.id); setOpen(false); }}
-                      >{page.id === activePageId ? 'Current' : `→ ${page.name}`}</button>
+                        style={page.id === activePageId ? undefined : { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}
+                      >{page.id === activePageId ? 'Current' : <><ArrowRight size={12} strokeWidth={2} /> {page.name}</>}</button>
                     ) : (
                       <span style={{ display: 'flex', gap: 4 }}>
                         <button className="tm-io-btn" title="Create a blank canvas for this tournament" onClick={() => createForTournament(t.id)}>+ Blank</button>
-                        <button className="tm-io-btn" title="Duplicate the current canvas's layout for this tournament" onClick={() => duplicateForTournament(t.id)}>⧉ Duplicate</button>
+                        <button className="tm-io-btn" title="Duplicate the current canvas's layout for this tournament" onClick={() => duplicateForTournament(t.id)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Copy size={12} strokeWidth={2} /> Duplicate</button>
                       </span>
                     )}
                   </div>
@@ -92,7 +130,8 @@ export function CanvasTournamentPicker() {
               })}
             </div>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

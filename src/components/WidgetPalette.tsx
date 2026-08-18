@@ -8,7 +8,7 @@ const WIDGET_GROUPS: { label: string; types: WidgetType[] }[] = [
   { label: 'Input',     types: ['input-tally', 'title-field', 'vmix-titles', 'file-path', 'ndi-input'] },
   { label: 'Overlay',   types: ['overlay'] },
   { label: 'Audio',     types: ['volume'] },
-  { label: 'Sports',    types: ['scoreboard', 'score-log', 'score-lower-third', 'sin-bin-lower-third', 'player-lower-third', 'card-lower-third', 'timer', 'timeline', 'player-list', 'substitution', 'card-display', 'rugby-lineup', 'recent-matches', 'match-schedule', 'standings', 'bracket', 'team-form', 'player-h2h', 'player-stats'] },
+  { label: 'Sports',    types: ['scoreboard', 'score-log', 'score-lower-third', 'sin-bin-lower-third', 'player-lower-third', 'card-lower-third', 'placement-lower-third', 'timer', 'timeline', 'player-list', 'player-list-next', 'substitution', 'card-display', 'rugby-lineup', 'rugby-lineup-next', 'recent-matches', 'match-schedule', 'rundown', 'standings', 'bracket', 'team-form', 'player-h2h', 'player-stats', 'player-highlight', 'group-standings'] },
   { label: 'Display',   types: ['label', 'image-display'] },
   { label: 'Utility',   types: ['pomodoro'] },
 ];

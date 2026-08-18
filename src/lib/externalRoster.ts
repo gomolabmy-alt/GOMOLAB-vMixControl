@@ -206,9 +206,22 @@ export function rankExternalTeams(teams: ExternalTeamSummary[], localName: strin
 // instead of going stale the moment the manual pull button is clicked once.
 const STAT_KEYS = ['tries', 'conversions', 'penalties', 'dropGoals', 'yellowCards', 'redCards', 'appearances'] as const;
 
+// Stats the app can compute/track itself once a team is switched to
+// statsSource:'local' — tries/conversions/penalties/dropGoals are recomputed
+// from this team's saved match history (see localPlayerStats.ts), and
+// yellowCards/redCards are incremented live the moment a card is given in
+// the Player List widget (see giveCard in PlayerListWidget.tsx). Only
+// appearances has no local source yet, so it's still API/manual-only.
+const LOCAL_TRACKABLE_STAT_KEYS = ['tries', 'conversions', 'penalties', 'dropGoals', 'yellowCards', 'redCards'] as const;
+
 function mergeExternalPlayersIntoTeam(teamId: string, externalPlayers: ExternalPlayerInfo[]) {
   const team = useTeamDbStore.getState().teams.find(t => t.id === teamId);
   if (!team) return;
+  // Once local, the API sync must never overwrite the stats the app is now
+  // responsible for — otherwise the next periodic sync would immediately
+  // stomp a live-counted card or recomputed try tally back to whatever (or
+  // however stale) the external source has.
+  const skipStats = team.statsSource === 'local';
   const byName = new Map(team.players.map(p => [p.name.trim().toLowerCase(), p]));
   for (const ext of externalPlayers) {
     const existing = byName.get(ext.name.trim().toLowerCase());
@@ -219,15 +232,20 @@ function mergeExternalPlayersIntoTeam(teamId: string, externalPlayers: ExternalP
       const patch: Partial<Omit<Player, 'id'>> = {};
       if (ext.jerseyNumber !== undefined) patch.jerseyNo = String(ext.jerseyNumber);
       if (ext.position) patch.position = ext.position;
-      for (const k of STAT_KEYS) if (ext[k] !== undefined) patch[k] = ext[k];
+      for (const k of STAT_KEYS) {
+        if (skipStats && (LOCAL_TRACKABLE_STAT_KEYS as readonly string[]).includes(k)) continue;
+        if (ext[k] !== undefined) patch[k] = ext[k];
+      }
       if (Object.keys(patch).length > 0) useTeamDbStore.getState().updatePlayer(teamId, existing.id, patch);
     } else {
       useTeamDbStore.getState().addPlayer(teamId, {
         name: ext.name,
         jerseyNo: ext.jerseyNumber !== undefined ? String(ext.jerseyNumber) : '',
         position: ext.position ?? '',
-        tries: ext.tries, conversions: ext.conversions, penalties: ext.penalties, dropGoals: ext.dropGoals,
-        yellowCards: ext.yellowCards, redCards: ext.redCards, appearances: ext.appearances,
+        tries: skipStats ? undefined : ext.tries, conversions: skipStats ? undefined : ext.conversions,
+        penalties: skipStats ? undefined : ext.penalties, dropGoals: skipStats ? undefined : ext.dropGoals,
+        yellowCards: skipStats ? undefined : ext.yellowCards, redCards: skipStats ? undefined : ext.redCards,
+        appearances: ext.appearances,
       });
     }
   }

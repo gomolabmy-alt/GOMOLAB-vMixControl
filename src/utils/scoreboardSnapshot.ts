@@ -32,6 +32,18 @@ export function parseScheduledDateTime(date: string | undefined, time?: string):
   return new Date(Number(y), Number(mo) - 1, Number(d), hours, minutes, 0, 0).getTime();
 }
 
+// "37m" / "2h 14m" / "1d 3h" — how far past its scheduled time something
+// is. Shared between MatchScheduleWidget and RundownWidget's late badges.
+export function formatLate(ms: number): string {
+  const totalMin = Math.max(0, Math.floor(ms / 60000));
+  if (totalMin < 60) return `${totalMin}m`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h < 24) return `${h}h ${m}m`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
+}
+
 // Shared between ScoreboardWidget (its own "Save Result"/"Load Match") and
 // MatchScheduleWidget ("Send to Scoreboard") so both paths protect against
 // silently overwriting a match that hasn't been saved yet.
@@ -50,7 +62,52 @@ export function hasScoreboardContent(cfg: Record<string, any>): boolean {
   return !!(cfg.teamAName || cfg.teamBName);
 }
 
-export function buildResultFromConfig(cfg: Record<string, any>): Omit<SavedMatchResult, 'id' | 'savedAt'> {
+// Best-effort "how much game time was actually played" summary from a
+// linked Timer widget's raw config at save time — mirrors the same fields
+// TimerWidget.tsx's own accumulatedMs calc reads, but converts a countdown
+// clock's *remaining* time into *elapsed* time (accumulatedMs returns the
+// remaining value as-is for countdown, since that's what the on-screen
+// display shows — not useful for "how long was played" after the fact).
+// Deliberately simplified: doesn't replicate every overrun/continue-mode
+// edge case TimerWidget's display logic handles, just regular periods +
+// extra time + after-ET added together.
+function computeTimerSummary(timerCfg: Record<string, any> | undefined): SavedMatchResult['timerSummary'] {
+  if (!timerCfg) return undefined;
+  const isCountdown = (timerCfg.mode ?? 'countdown') === 'countdown';
+  const periods = timerCfg.periods ?? 1;
+  const currentPeriod = Math.min(timerCfg.currentPeriod ?? 1, periods);
+  const durationMs = timerCfg.durationMs ?? 0;
+
+  const regularElapsedMs = isCountdown
+    ? (currentPeriod - 1) * durationMs + Math.max(0, durationMs - (timerCfg.currentMs ?? 0))
+    : (currentPeriod - 1) * durationMs + (timerCfg.currentMs ?? 0);
+
+  const wentToExtraTime = !!timerCfg.inExtraTime || (timerCfg.etCurrentMs ?? 0) > 0;
+  const wentToAfterEt = !!timerCfg.inAfterEt || (timerCfg.afterEtMode ?? 'none') !== 'none';
+  const etElapsedMs = wentToExtraTime ? (timerCfg.etCurrentMs ?? 0) : 0;
+  const afterEtElapsedMs = wentToAfterEt ? (timerCfg.afterEtCurrentMs ?? 0) : 0;
+
+  return {
+    elapsedMs: Math.max(0, regularElapsedMs) + etElapsedMs + afterEtElapsedMs,
+    periodsPlayed: currentPeriod,
+    wentToExtraTime,
+    wentToAfterEt,
+  };
+}
+
+// Resolves the SavedTeam behind a Player List widget's own roster — reuses
+// the same `resolvedTeamId` cache that widget already writes back onto its
+// own config for every OTHER consumer needing its roster (Card Display,
+// Timeline highlight, etc. — see PlayerListWidget.tsx's own comment on
+// resolvedAId/resolvedBId) instead of re-deriving team resolution here too.
+// Falls back to a directly-picked team (linkedTeamId) for a widget in that
+// simpler mode, where no scoreboard-follow resolution ever ran.
+function resolveRosterTeam(plwCfg: Record<string, any>) {
+  const teamId = plwCfg.resolvedTeamId || plwCfg.linkedTeamId;
+  return teamId ? useTeamDbStore.getState().teams.find(t => t.id === teamId) : undefined;
+}
+
+export function buildResultFromConfig(cfg: Record<string, any>, timerCfg?: Record<string, any>): Omit<SavedMatchResult, 'id' | 'savedAt'> {
   const today = new Date();
   const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
   // Prefer the explicit tournament link, set when a scheduled fixture was
@@ -74,6 +131,8 @@ export function buildResultFromConfig(cfg: Record<string, any>): Omit<SavedMatch
     tournamentId,
     competition: cfg.competition || undefined,
     round: cfg.subtitle || undefined,
+    group: cfg.group || undefined,
+    tier: cfg.tier || undefined,
     category: cfg.category || undefined,
     teamAId: cfg.teamAId || undefined,
     teamAName: cfg.teamAName || 'Team A',
@@ -94,6 +153,7 @@ export function buildResultFromConfig(cfg: Record<string, any>): Omit<SavedMatch
       ? (cfg.scoreLog as any[]).map(e => ({
           team: e.team, action: e.action, points: e.points,
           scorer: e.scorer || undefined, jerseyNo: e.jerseyNo || undefined, timeStr: e.timeStr,
+          period: e.period ?? undefined,
         }))
       : undefined,
     shootout: (() => {
@@ -106,12 +166,49 @@ export function buildResultFromConfig(cfg: Record<string, any>): Omit<SavedMatch
       const allWidgets = [...useCanvasStore.getState().pages, ...useCanvasStore.getState().commentatorPages].flatMap(p => p.widgets);
       const cardsFor = (linkedId: string | undefined, side: 'A' | 'B') => {
         const plw = linkedId ? allWidgets.find(w => w.id === linkedId && w.type === 'player-list') : undefined;
-        const playerCards: Record<string, ('yellow' | 'orange' | 'red')[]> = plw?.config?.playerCards ?? {};
-        return Object.values(playerCards).flat().map(type => ({ team: side, type }));
+        if (!plw) return [];
+        const pc = plw.config as Record<string, any>;
+        const playerCards: Record<string, ('yellow' | 'orange' | 'red')[]> = pc.playerCards ?? {};
+        const team = resolveRosterTeam(pc);
+        const playerById = new Map((team?.players ?? []).map((p: any) => [p.id, p]));
+        return Object.entries(playerCards).flatMap(([playerId, types]) => {
+          const p: any = playerById.get(playerId);
+          return types.map(type => ({
+            team: side, type, playerId,
+            jerseyNo: p?.jerseyNo || undefined, playerName: p?.name || undefined,
+          }));
+        });
       };
       const cards = [...cardsFor(cfg.linkedPlayerListA, 'A'), ...cardsFor(cfg.linkedPlayerListB, 'B')];
       return cards.length > 0 ? cards : undefined;
     })(),
+    lineup: (() => {
+      const allWidgets = [...useCanvasStore.getState().pages, ...useCanvasStore.getState().commentatorPages].flatMap(p => p.widgets);
+      const lineupFor = (linkedId: string | undefined, side: 'A' | 'B') => {
+        const plw = linkedId ? allWidgets.find(w => w.id === linkedId && w.type === 'player-list') : undefined;
+        if (!plw) return [];
+        const pc = plw.config as Record<string, any>;
+        const team = resolveRosterTeam(pc);
+        if (!team) return [];
+        const playerById = new Map((team.players ?? []).map((p: any) => [p.id, p]));
+        const subbedOnPlayers: string[] = pc.subbedOnPlayers ?? [];
+        const seen = new Set<string>();
+        const out: NonNullable<SavedMatchResult['lineup']> = [];
+        const add = (id: string, section: 'starter' | 'sub') => {
+          if (!id || seen.has(id)) return;
+          const p: any = playerById.get(id);
+          if (!p) return;
+          seen.add(id);
+          out.push({ team: side, playerId: id, jerseyNo: p.jerseyNo || '', name: p.name || '', section, subbedOn: section === 'sub' && subbedOnPlayers.includes(id) });
+        };
+        (pc.starters ?? []).forEach((id: string) => add(id, 'starter'));
+        (pc.subs ?? []).forEach((id: string) => add(id, 'sub'));
+        return out;
+      };
+      const lineup = [...lineupFor(cfg.linkedPlayerListA, 'A'), ...lineupFor(cfg.linkedPlayerListB, 'B')];
+      return lineup.length > 0 ? lineup : undefined;
+    })(),
+    timerSummary: computeTimerSummary(timerCfg),
   };
 }
 
@@ -192,6 +289,7 @@ export function buildLoadMatchPatch(m: ScheduledMatch): Record<string, any> {
 export function guardScoreboardOverwrite(
   cfg: Record<string, any>,
   addResult: (r: Omit<SavedMatchResult, 'id' | 'savedAt'>) => void,
+  timerCfg?: Record<string, any>,
 ): boolean {
   if (!hasScoreboardContent(cfg)) return true;
   const currentSig = computeMatchSignature(cfg);
@@ -202,7 +300,7 @@ export function guardScoreboardOverwrite(
       : undefined;
     if (!fixture?.completedAt) return true; // unconfirmed bye/walkover — let it go, don't auto-complete it
   }
-  addResult(buildResultFromConfig(cfg));
+  addResult(buildResultFromConfig(cfg, timerCfg));
   // The outgoing match is being replaced — if it came from the Schedule tab,
   // mark that fixture completed now that its result has been captured.
   if (cfg.linkedScheduleMatchId) {
@@ -212,21 +310,23 @@ export function guardScoreboardOverwrite(
 }
 
 /**
- * The set of fixture ids currently loaded live on some scoreboard widget
- * right now (not yet saved/completed) — scans every scoreboard on both the
- * main canvas and the commentator canvas, resolving mirrored boards
- * (`linkedScoreboardSourceId`) back to their source's config so a
- * commentator-side mirror still counts. Used to highlight a fixture as
- * "on air" in the Schedule tab / Upcoming Matches widget.
+ * Every scoreboard widget currently loaded live for a not-yet-completed
+ * fixture, keyed by fixture id — scans both the main canvas and the
+ * commentator canvas, resolving mirrored boards (`linkedScoreboardSourceId`)
+ * back to their source's config so a commentator-side mirror still counts.
+ * Shared base for useLiveFixtureIds (Schedule tab / Upcoming Matches "on
+ * air" highlight) and useLiveScoreboardConfigs (Rundown widget's live
+ * score display for a linked segment — a fixture's score lives on whatever
+ * scoreboard has it loaded, not on the fixture itself).
  */
-export function useLiveFixtureIds(): Set<string> {
+function useLiveScoreboardConfigMap(): Map<string, Record<string, any>> {
   const pages = useCanvasStore(s => s.pages);
   const commentatorPages = useCanvasStore(s => s.commentatorPages);
   const matches = useMatchScheduleStore(s => s.matches);
   return useMemo(() => {
     const allWidgets = [...pages, ...commentatorPages].flatMap(p => p.widgets);
     const completedIds = new Set(matches.filter(m => m.completedAt).map(m => m.id));
-    const ids = new Set<string>();
+    const map = new Map<string, Record<string, any>>();
     for (const w of allWidgets) {
       if (w.type !== 'scoreboard') continue;
       const cfg = w.config;
@@ -234,8 +334,20 @@ export function useLiveFixtureIds(): Set<string> {
         ? allWidgets.find(x => x.id === cfg.linkedScoreboardSourceId && x.type === 'scoreboard')?.config ?? cfg
         : cfg;
       const fixtureId = dc.linkedScheduleMatchId;
-      if (fixtureId && !completedIds.has(fixtureId)) ids.add(fixtureId);
+      if (fixtureId && !completedIds.has(fixtureId)) map.set(fixtureId, dc);
     }
-    return ids;
+    return map;
   }, [pages, commentatorPages, matches]);
+}
+
+export function useLiveFixtureIds(): Set<string> {
+  return new Set(useLiveScoreboardConfigMap().keys());
+}
+
+/** Fixture id -> the live scoreboard config currently showing it — lets a
+ *  linked Rundown segment display the actual live score while a match is
+ *  in progress (score itself is never stored on the fixture, only on
+ *  whichever scoreboard widget currently has it loaded). */
+export function useLiveScoreboardConfigs(): Map<string, Record<string, any>> {
+  return useLiveScoreboardConfigMap();
 }

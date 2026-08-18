@@ -1,10 +1,15 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
+import { Check, Pencil, X, LayoutGrid, Keyboard } from 'lucide-react';
 import { useCanvasStore } from '../stores/canvasStore';
 import { useAppSettings, nearestScalePreset } from '../stores/appSettingsStore';
 import { WidgetRenderer } from './widgets/index';
 import { WidgetPalette } from './WidgetPalette';
 import { WidgetConfigPanel } from './WidgetConfigPanel';
 import { NotificationOverlay } from './NotificationOverlay';
+import { ConfirmModal } from './ConfirmModal';
+import { HotkeyRecorder } from './HotkeyRecorder';
+import { collectHotkeyBindings } from '../lib/hotkeyBindings';
 import { syncClient } from '../lib/syncClient';
 import { CanvasActionContext } from '../lib/canvasContext';
 
@@ -13,12 +18,14 @@ export function Canvas({ mode = 'main' }: { mode?: 'main' | 'commentator' }) {
     pages: mainPages, activePageId: mainActivePageId,
     editMode, selectedWidgetId: mainSelectedWidgetId,
     addPage: addMainPage, deletePage: deleteMainPage,
+    reorderPages: reorderMainPages, setPageHotkey,
     renamePage: renameMainPage, setActivePage: setMainActivePage,
     setEditMode, selectWidget: selectMainWidget, syncReady,
 
     commentatorPages, commentatorActivePageId,
     commentatorSelectedWidgetId,
     addCommentatorPage, deleteCommentatorPage,
+    reorderCommentatorPages,
     renameCommentatorPage, setCommentatorActivePage,
     selectCommentatorWidget,
     addCommentatorWidget, deleteCommentatorWidget,
@@ -36,6 +43,7 @@ export function Canvas({ mode = 'main' }: { mode?: 'main' | 'commentator' }) {
   const selectedWidgetId = isCommentatorMode ? commentatorSelectedWidgetId : mainSelectedWidgetId;
   const addPage = isCommentatorMode ? addCommentatorPage : addMainPage;
   const deletePage = isCommentatorMode ? deleteCommentatorPage : deleteMainPage;
+  const reorderPages = isCommentatorMode ? reorderCommentatorPages : reorderMainPages;
   const renamePage = isCommentatorMode ? renameCommentatorPage : renameMainPage;
   const setActivePage = isCommentatorMode ? setCommentatorActivePage : setMainActivePage;
   const selectWidget = isCommentatorMode ? selectCommentatorWidget : selectMainWidget;
@@ -47,6 +55,76 @@ export function Canvas({ mode = 'main' }: { mode?: 'main' | 'commentator' }) {
   const [renameValue, setRenameValue] = useState('');
   const [syncStatus, setSyncStatus] = useState(syncClient.status);
   const canvasRef = useRef<HTMLDivElement>(null);
+
+  // ── Tab drag-to-reorder ── plain mouse-event tracking (native HTML5
+  // drag-and-drop doesn't fire reliably in this app's WebView — same
+  // reasoning/pattern as TournamentManager.tsx's fixture/segment dragging).
+  const [draggedPageId, setDraggedPageId] = useState<string | null>(null);
+  const [dragOverPageId, setDragOverPageId] = useState<string | null>(null);
+  const tabDragStateRef = useRef<{ id: string; startX: number; startY: number; active: boolean } | null>(null);
+  const startTabDrag = (pageId: string) => (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('button, input')) return;
+    const startX = e.clientX, startY = e.clientY;
+    tabDragStateRef.current = { id: pageId, startX, startY, active: false };
+    const onMove = (ev: MouseEvent) => {
+      const st = tabDragStateRef.current;
+      if (!st) return;
+      if (!st.active) {
+        if (Math.hypot(ev.clientX - st.startX, ev.clientY - st.startY) < 6) return;
+        st.active = true;
+        setDraggedPageId(st.id);
+        document.body.style.userSelect = 'none';
+      }
+      const under = document.elementFromPoint(ev.clientX, ev.clientY);
+      const tabEl = under?.closest('[data-page-tab]') as HTMLElement | null;
+      const overId = tabEl?.getAttribute('data-page-tab') ?? null;
+      setDragOverPageId(overId && overId !== st.id ? overId : null);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+      const st = tabDragStateRef.current;
+      if (st?.active) {
+        setDragOverPageId(overId => {
+          if (overId) reorderPages(st.id, overId);
+          return null;
+        });
+      }
+      tabDragStateRef.current = null;
+      setDraggedPageId(null);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  // ── Close confirmation (never a silent/native confirm() — already known
+  // unreliable in this app's packaged WebView, see ConfirmModal) ──────────
+  const [confirmDeletePageId, setConfirmDeletePageId] = useState<string | null>(null);
+
+  // ── Per-tab hotkey (main canvas only — App.GoToPage only resolves
+  // store.pages, not commentatorPages) ────────────────────────────────────
+  const [hotkeyEditPageId, setHotkeyEditPageId] = useState<string | null>(null);
+  // Portal-rendered to document.body (see below) — the tab bar has
+  // overflow-x: auto, which per the CSS spec forces overflow-y to auto too,
+  // clipping any absolutely-positioned popover that stays a normal in-flow
+  // child of a tab. Position is measured from the trigger button at open
+  // time and the popover opens upward (bottom-anchored) so it isn't clipped
+  // by whatever sits below the tab bar either.
+  const [hotkeyPopoverPos, setHotkeyPopoverPos] = useState<{ top: number; left: number } | null>(null);
+  const allHotkeyBindings = useMemo(() => collectHotkeyBindings(mainPages), [mainPages]);
+
+  useEffect(() => {
+    if (!hotkeyEditPageId) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if ((e.target as HTMLElement).closest('.canvas-tab-hotkey-popover, .canvas-tab-hotkey')) return;
+      setHotkeyEditPageId(null);
+      setHotkeyPopoverPos(null);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [hotkeyEditPageId]);
 
   const isDesktopHost = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   const isClientMode = !isDesktopHost;
@@ -143,9 +221,11 @@ export function Canvas({ mode = 'main' }: { mode?: 'main' | 'commentator' }) {
         {pages.map((page) => (
           <div
             key={page.id}
-            className={`canvas-tab ${page.id === activePageId ? 'canvas-tab--active' : ''}`}
+            data-page-tab={page.id}
+            className={`canvas-tab ${page.id === activePageId ? 'canvas-tab--active' : ''}${draggedPageId === page.id ? ' canvas-tab--dragging' : ''}${dragOverPageId === page.id ? ' canvas-tab--drag-over' : ''}`}
             onClick={() => setActivePage(page.id)}
             onDoubleClick={() => startRename(page.id, page.name)}
+            onMouseDown={canEdit ? startTabDrag(page.id) : undefined}
           >
             {renamingId === page.id ? (
               <input
@@ -164,15 +244,47 @@ export function Canvas({ mode = 'main' }: { mode?: 'main' | 'commentator' }) {
             ) : (
               page.name
             )}
+            {!isCommentatorMode && canEdit && (
+              <button
+                className="canvas-tab-hotkey"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (hotkeyEditPageId === page.id) {
+                    setHotkeyEditPageId(null);
+                    setHotkeyPopoverPos(null);
+                    return;
+                  }
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setHotkeyPopoverPos({ top: rect.top, left: rect.left });
+                  setHotkeyEditPageId(page.id);
+                }}
+                title={page.hotkey ? `Hotkey: ${page.hotkey}` : 'Set a hotkey to jump to this page'}
+              ><Keyboard size={11} /></button>
+            )}
             {canEdit && pages.length > 1 && (
               <button
                 className="canvas-tab-del"
-                onClick={(e) => { e.stopPropagation(); deletePage(page.id); }}
+                onClick={(e) => { e.stopPropagation(); setConfirmDeletePageId(page.id); }}
                 title="Delete page"
-              >×</button>
+              ><X size={12} /></button>
             )}
           </div>
         ))}
+
+        {hotkeyEditPageId && hotkeyPopoverPos && createPortal(
+          <div
+            className="canvas-tab-hotkey-popover"
+            style={{ position: 'fixed', left: hotkeyPopoverPos.left, bottom: window.innerHeight - hotkeyPopoverPos.top + 6 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <HotkeyRecorder
+              value={pages.find(p => p.id === hotkeyEditPageId)?.hotkey ?? ''}
+              onChange={(v) => setPageHotkey(hotkeyEditPageId, v || undefined)}
+              allBindings={allHotkeyBindings}
+            />
+          </div>,
+          document.body
+        )}
 
         {canEdit && (
           <button className="canvas-tab canvas-tab--add" onClick={addPage} title="Add page">+</button>
@@ -184,7 +296,9 @@ export function Canvas({ mode = 'main' }: { mode?: 'main' | 'commentator' }) {
             className={`status-btn status-btn--edit ${editMode ? 'status-btn--edit-active' : ''}`}
             style={{ marginLeft: 'auto', marginRight: 8, alignSelf: 'center' }}
             onClick={() => setEditMode(!editMode)}
-          >{editMode ? '✓ Done' : '✏ Edit'}</button>
+          >{editMode
+            ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Check size={14} /> Done</span>
+            : <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Pencil size={14} /> Edit</span>}</button>
         )}
 
         {/* ── Zoom controls ────────────────────────────────────────── */}
@@ -207,6 +321,17 @@ export function Canvas({ mode = 'main' }: { mode?: 'main' | 'commentator' }) {
         </div>
 
       </div>
+
+      {confirmDeletePageId && (
+        <ConfirmModal
+          title="Delete page?"
+          message={`Delete "${pages.find(p => p.id === confirmDeletePageId)?.name ?? 'this page'}"? This removes every widget on it.`}
+          confirmLabel="Delete"
+          danger
+          onConfirm={() => { deletePage(confirmDeletePageId); setConfirmDeletePageId(null); }}
+          onCancel={() => setConfirmDeletePageId(null)}
+        />
+      )}
 
       {/* ── Canvas Area ───────────────────────────────────────────────── */}
       <div
@@ -243,7 +368,7 @@ export function Canvas({ mode = 'main' }: { mode?: 'main' | 'commentator' }) {
                 {isClientMode ? (
                   <>
                     <div className={`canvas-empty-icon canvas-sync-dot canvas-sync-dot--${syncStatus}`}>
-                      {syncStatus === 'connected' ? '✓' : syncStatus === 'connecting' ? '…' : '✗'}
+                      {syncStatus === 'connected' ? <Check size={16} /> : syncStatus === 'connecting' ? '…' : <X size={16} />}
                     </div>
                     <div className="canvas-empty-text">
                       {syncStatus === 'connected' ? 'Connected — waiting for layout' : syncStatus === 'connecting' ? 'Connecting to host…' : 'Disconnected — retrying…'}
@@ -256,9 +381,9 @@ export function Canvas({ mode = 'main' }: { mode?: 'main' | 'commentator' }) {
                   </>
                 ) : (
                   <>
-                    <div className="canvas-empty-icon">⬡</div>
+                    <div className="canvas-empty-icon"><LayoutGrid size={24} /></div>
                     <div className="canvas-empty-text">No widgets yet</div>
-                    <div className="canvas-empty-sub">Tap <strong>✏ Edit</strong> then <strong>+ Add Widget</strong> to get started</div>
+                    <div className="canvas-empty-sub">Tap <strong>Edit</strong> then <strong>+ Add Widget</strong> to get started</div>
                   </>
                 )}
               </div>

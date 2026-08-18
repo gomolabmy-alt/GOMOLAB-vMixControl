@@ -1,4 +1,6 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { Save, Cloud, Download, Upload } from 'lucide-react';
 import { useCanvasStore } from '../stores/canvasStore';
 import { useVmixStore } from '../stores/vmixStore';
 import { useTournamentStore } from '../stores/tournamentStore';
@@ -11,7 +13,6 @@ export function ProjectMenu() {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<{ msg: string; ok: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
 
   const { pages, activePageId, restoreCanvas } = useCanvasStore();
   const { savedConnections, shortcuts, scoreboards, timers, dataBindings, globalVariables, restoreVmix } = useVmixStore();
@@ -19,14 +20,6 @@ export function ProjectMenu() {
   const { teams, restoreTeams } = useTeamDbStore();
   const { matches, restoreMatches } = useMatchScheduleStore();
   const { results, restoreResults } = useMatchResultsStore();
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
 
   useEffect(() => {
     if (!status) return;
@@ -77,7 +70,7 @@ export function ProjectMenu() {
   };
 
   return (
-    <div className="project-menu" ref={ref}>
+    <div className="project-menu">
       <button
         className={`status-btn project-menu-btn ${open ? 'status-btn--active' : ''}`}
         onClick={() => setOpen(v => !v)}
@@ -87,34 +80,40 @@ export function ProjectMenu() {
           <span className="project-status--busy">…</span>
         ) : status ? (
           <span className={status.ok ? 'project-status--ok' : 'project-status--err'}>{status.msg}</span>
-        ) : '💾'}
+        ) : <Save size={16} strokeWidth={1.75} />}
       </button>
 
-      {open && (
-        <div className="project-dropdown">
-          <div className="project-dropdown-title">Project</div>
+      {/* Centered modal, same .modal-overlay/.modal pattern as ConfirmModal —
+          this used to be an anchored dropdown but .app-sidebar's
+          overflow: hidden clipped it (it sits right above the footer). */}
+      {open && createPortal(
+        <div className="modal-overlay" onClick={() => setOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="modal-title">Project</h3>
 
-          <div className="project-autosave-row">
-            <span className="project-autosave-dot" />
-            Auto-saved locally
+            <div className="project-autosave-row">
+              <span className="project-autosave-dot" />
+              Auto-saved locally
+            </div>
+
+            <p className="app-settings-hint" style={{ margin: 0 }}>
+              Includes canvas, vMix settings, tournaments, teams, schedule, results, and the logo library.
+            </p>
+
+            <button className="project-action-btn" onClick={handleExport} disabled={busy}>
+              <span><Download size={14} strokeWidth={2} /></span> Export to file
+            </button>
+            <button className="project-action-btn" onClick={handleImport} disabled={busy}>
+              <span><Upload size={14} strokeWidth={2} /></span> Import from file
+            </button>
+
+            <div className="project-cloud-row">
+              <span className="project-cloud-label" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Cloud size={13} strokeWidth={2} /> Cloud sync</span>
+              <span className="project-cloud-soon">coming soon</span>
+            </div>
           </div>
-
-          <p className="app-settings-hint" style={{ margin: '0 0 6px' }}>
-            Includes canvas, vMix settings, tournaments, teams, schedule, results, and the logo library.
-          </p>
-
-          <button className="project-action-btn" onClick={handleExport} disabled={busy}>
-            <span>↓</span> Export to file
-          </button>
-          <button className="project-action-btn" onClick={handleImport} disabled={busy}>
-            <span>↑</span> Import from file
-          </button>
-
-          <div className="project-cloud-row">
-            <span className="project-cloud-label">☁ Cloud sync</span>
-            <span className="project-cloud-soon">coming soon</span>
-          </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

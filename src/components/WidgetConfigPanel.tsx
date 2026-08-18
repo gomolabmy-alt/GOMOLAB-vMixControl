@@ -1,18 +1,21 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { useCanvasStore } from '../stores/canvasStore';
+import { useCanvasStore, formatTime } from '../stores/canvasStore';
 import { useVmixStore } from '../stores/vmixStore';
 import { useTournamentStore } from '../stores/tournamentStore';
 import { useTeamDbStore } from '../stores/teamDbStore';
 import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
 import { extractKnockoutStage } from './TournamentManager';
-import { WIDGET_TYPE_ICONS, WIDGET_TYPE_LABELS } from '../types/canvas';
+import { WIDGET_TYPE_LABELS } from '../types/canvas';
 import type { CanvasWidget } from '../types/canvas';
+import { WidgetIcon } from './widgets/WidgetIcon';
+import { ChevronDown, ChevronUp, ChevronRight, X, Terminal, SquareStack, RotateCcw, ArrowUp, ArrowDown, Copy, Zap } from 'lucide-react';
 import { INPUT_TYPE_LABELS } from '../types/vmix';
 import type { VmixInput } from '../types/vmix';
 import { LogoUrlPicker } from './LogoUrlPicker';
 import { resolveImageUrl } from '../lib/imageUrl';
 import { ActionListEditor } from './ActionListEditor';
+import { MergeFieldComposer, type MergePart } from './MergeFieldComposer';
 import type { ActionItem } from '../lib/buttonActions';
 import { HotkeyRecorder } from './HotkeyRecorder';
 import { collectHotkeyBindings } from '../lib/hotkeyBindings';
@@ -53,14 +56,28 @@ const TRANS_KEYS = ['cut','fade','auto','t2','t3','t4','stinger1','stinger2','ft
 // Player type's own field name capitalized, so it can't drift from what the
 // widgets themselves read.
 const PLAYER_STAT_FIELD_DEFS = [
+  { key: 'appearances', cap: 'Appearances', label: 'Appearances' },
   { key: 'tries', cap: 'Tries', label: 'Tries' },
   { key: 'conversions', cap: 'Conversions', label: 'Conversions' },
   { key: 'penalties', cap: 'Penalties', label: 'Penalties' },
   { key: 'dropGoals', cap: 'DropGoals', label: 'Drop Goals' },
   { key: 'yellowCards', cap: 'YellowCards', label: 'Yellow Cards' },
   { key: 'redCards', cap: 'RedCards', label: 'Red Cards' },
-  { key: 'appearances', cap: 'Appearances', label: 'Appearances' },
 ] as const;
+const PLAYER_STAT_SAMPLES: Record<string, string> = {
+  appearances: '12', tries: '3', conversions: '5', penalties: '2', dropGoals: '1', yellowCards: '1', redCards: '0',
+};
+// Shared by 'player-h2h' (×2, one per side) and 'player-stats' (×1) — a
+// player's own name/jersey/position plus every stat field, as a mergeable
+// parts catalog.
+function playerMergeParts(sampleName: string, sampleJersey: string, samplePosition: string): MergePart[] {
+  return [
+    { key: 'name', label: 'Name', sample: sampleName },
+    { key: 'jersey', label: 'Jersey', sample: sampleJersey },
+    { key: 'position', label: 'Position', sample: samplePosition },
+    ...PLAYER_STAT_FIELD_DEFS.map(f => ({ key: f.key, label: f.label, sample: PLAYER_STAT_SAMPLES[f.key] })),
+  ];
+}
 const RUGBY_UNION_INCS = [
   { label: 'Try',  value: 5 },
   { label: 'Conv', value: 2 },
@@ -288,6 +305,65 @@ const SCORE_STYLES = [
   { value: 'rugby-league',  label: 'Rugby League',        increments: RUGBY_LEAGUE_INCS },
 ];
 
+// Match Schedule's vMix "merge into one field" composer (see the
+// 'match-schedule' case's FixtureVmixTarget.mergedParts) — the same six
+// pieces of fixture data already available as individual prefix fields,
+// just concatenable into one string instead, in whatever order the
+// operator drags them (see MergeFieldComposer.tsx).
+export type FixturePart = 'teamA' | 'teamB' | 'date' | 'time' | 'round' | 'venue';
+const FIXTURE_MERGE_PARTS: MergePart[] = [
+  { key: 'teamA', label: 'Team A', sample: 'Chelsea' },
+  { key: 'teamB', label: 'Team B', sample: 'Arsenal' },
+  { key: 'fullTeamA', label: 'Full Name A', sample: 'Chelsea FC' },
+  { key: 'fullTeamB', label: 'Full Name B', sample: 'Arsenal FC' },
+  { key: 'date',  label: 'Date',   sample: '2026-08-20' },
+  { key: 'time',  label: 'Time',   sample: '19:00' },
+  { key: 'round', label: 'Round',  sample: 'Round 3' },
+  { key: 'venue', label: 'Venue',  sample: 'Wembley' },
+  { key: 'group', label: 'Group/Stage', sample: 'Group A' },
+  { key: 'matchId', label: 'Match ID', sample: 'MB1' },
+];
+
+// Scoreboard's own vMix merge composers (see the 'scoreboard' case) — one
+// per team (its own name/short-name/custom-text/score) plus one for the
+// shared match info that isn't per-team.
+const SCORE_MERGE_PARTS_A: MergePart[] = [
+  { key: 'shortA', label: 'Short Name A', sample: 'CHE' },
+  { key: 'textA',  label: 'Text A',       sample: 'Custom text' },
+  { key: 'teamA',  label: 'Team A Name',  sample: 'Chelsea' },
+  { key: 'scoreA', label: 'Score A',      sample: '3' },
+];
+const SCORE_MERGE_PARTS_B: MergePart[] = [
+  { key: 'shortB', label: 'Short Name B', sample: 'ARS' },
+  { key: 'textB',  label: 'Text B',       sample: 'Custom text' },
+  { key: 'teamB',  label: 'Team B Name',  sample: 'Arsenal' },
+  { key: 'scoreB', label: 'Score B',      sample: '1' },
+];
+const SCORE_MERGE_PARTS_INFO: MergePart[] = [
+  { key: 'competition',   label: 'Competition',    sample: 'Premier League' },
+  { key: 'category',      label: 'Category',       sample: 'Men' },
+  { key: 'group',         label: 'Group',          sample: 'Group A' },
+  { key: 'round',         label: 'Round',          sample: 'Round 3' },
+  { key: 'scheduledTime', label: 'Scheduled Time', sample: '19:00' },
+  { key: 'matchId',       label: 'Match ID',       sample: 'MB1' },
+];
+
+// Group Standings widget's per-row vMix merge composer (see the
+// 'group-standings' case) — one row per team in the auto-detected group.
+const GROUP_STANDINGS_MERGE_PARTS: MergePart[] = [
+  { key: 'rank',      label: 'Rank',        sample: '1' },
+  { key: 'team',      label: 'Team',        sample: 'Chelsea' },
+  { key: 'shortTeam', label: 'Short Name',  sample: 'CHE' },
+  { key: 'played', label: 'Played',         sample: '3' },
+  { key: 'won',    label: 'Won',            sample: '2' },
+  { key: 'drawn',  label: 'Drawn',          sample: '0' },
+  { key: 'lost',   label: 'Lost',           sample: '1' },
+  { key: 'pf',     label: 'Points For',     sample: '45' },
+  { key: 'pa',     label: 'Points Against', sample: '30' },
+  { key: 'diff',   label: 'Diff',           sample: '+15' },
+  { key: 'pts',    label: 'Points',         sample: '6' },
+];
+
 export function InputPickerDropdown({ currentKey, currentTitle, allInputs, onSelect, filter }: {
   currentKey: string;
   currentTitle: string | undefined;
@@ -343,7 +419,7 @@ export function InputPickerDropdown({ currentKey, currentTitle, allInputs, onSel
         ) : (
           <span className="cfg-inp-picker-placeholder">— select input —</span>
         )}
-        <span className="cfg-inp-picker-chevron">{open ? '▲' : '▼'}</span>
+        <span className="cfg-inp-picker-chevron">{open ? <ChevronUp size={11} /> : <ChevronDown size={11} />}</span>
         {currentKey && (
           <span className="cfg-inp-picker-clear" onClick={e => { e.stopPropagation(); onSelect('', ''); setOpen(false); }}>×</span>
         )}
@@ -423,15 +499,19 @@ function FieldPickerDropdown({ inputKey, value, onChange, placeholder = 'Title.T
       <div className={`cfg-inp-picker-display ${open ? 'cfg-inp-picker-display--open' : ''}`}
         onClick={toggle}>
         {value
-          ? <span className="cfg-inp-picker-display-title">{value}</span>
+          ? (
+            <>
+              {currentVal !== undefined && currentVal !== '' && (
+                <span className="cfg-inp-picker-value-ref" title="Current value in vMix — shown for reference only">{currentVal}</span>
+              )}
+              <span className="cfg-inp-picker-display-title">{value}</span>
+            </>
+          )
           : <span className="cfg-inp-picker-placeholder">{placeholder}</span>
         }
-        <span className="cfg-inp-picker-chevron">{open ? '▲' : '▼'}</span>
+        <span className="cfg-inp-picker-chevron">{open ? <ChevronUp size={11} /> : <ChevronDown size={11} />}</span>
         {value && <span className="cfg-inp-picker-clear" onClick={e => { e.stopPropagation(); onChange(''); setOpen(false); }}>×</span>}
       </div>
-      {currentVal !== undefined && currentVal !== '' && !open && (
-        <div className="field-picker-annotation">{currentVal}</div>
-      )}
       {open && pos && createPortal(
         <div className="cfg-inp-picker-dropdown" ref={dropdownRef}
           style={{ position: 'fixed', top: pos.top, left: pos.left, width: pos.width }}>
@@ -453,8 +533,8 @@ function FieldPickerDropdown({ inputKey, value, onChange, placeholder = 'Title.T
               <li key={f.name}
                 className={`cfg-inp-picker-item${f.name === value ? ' cfg-inp-picker-item--selected' : ''}`}
                 onClick={() => { onChange(f.name); setOpen(false); setSearch(''); }}>
+                {f.value !== '' && <span className="cfg-inp-picker-field-val" title="Current value in vMix — shown for reference only">{f.value}</span>}
                 <span className="cfg-inp-picker-item-title">{f.name}</span>
-                {f.value !== '' && <span className="cfg-inp-picker-field-val">{f.value}</span>}
               </li>
             ))}
           </ul>
@@ -484,7 +564,7 @@ function CollapsibleSection({ label, children, defaultOpen = true }: { label: st
     <>
       <div className="config-section-label config-section-label--toggle" onClick={() => setOpen(o => !o)}>
         <span>{label}</span>
-        <span className="config-section-chevron">{open ? '▼' : '▶'}</span>
+        <span className="config-section-chevron">{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
       </div>
       {open && <>{children}</>}
     </>
@@ -523,6 +603,13 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
   const cfg = widget.config;
   const up = (patch: Record<string, any>) => updateWidgetConfig(widget.id, patch);
   const [panelExpandedId, setPanelExpandedId] = useState<string | null>(null);
+  const [idError, setIdError] = useState<string | null>(null);
+  useEffect(() => setIdError(null), [widget.id]);
+  const commitIdChange = (value: string) => {
+    if (value === widget.id) return;
+    const result = store.renameWidgetId(widget.id, value);
+    setIdError(result.ok ? null : (result.error ?? 'Could not rename'));
+  };
   const [durationText, setDurationText] = useState(() =>
     msToFormatStr(cfg.durationMs ?? 0, cfg.format ?? 'mm:ss')
   );
@@ -582,7 +669,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
   };
   const onResizeXMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!panelResizeXRef.current) return;
-    updatePos({ w: Math.max(240, Math.min(700, panelResizeXRef.current.ow + e.clientX - panelResizeXRef.current.sx)) });
+    updatePos({ w: Math.max(240, Math.min(window.innerWidth - 40, panelResizeXRef.current.ow + e.clientX - panelResizeXRef.current.sx)) });
   };
   const onResizeXUp = () => { panelResizeXRef.current = null; };
   const onResizeBRDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -592,7 +679,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
   };
   const onResizeBRMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!panelResizeBRRef.current) return;
-    const w = Math.max(240, Math.min(700, panelResizeBRRef.current.ow + e.clientX - panelResizeBRRef.current.sx));
+    const w = Math.max(240, Math.min(window.innerWidth - 40, panelResizeBRRef.current.ow + e.clientX - panelResizeBRRef.current.sx));
     const h = Math.max(120, Math.min(window.innerHeight - 40, panelResizeBRRef.current.oh + e.clientY - panelResizeBRRef.current.sy));
     updatePos({ w, h });
   };
@@ -680,7 +767,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                           <div className="vil-cfg-header">
                             <button className="btn btn--ghost btn--small tf-collapse-btn"
                               onClick={() => setVilCollapsed(p => ({ ...p, [`sb-${sb.id}`]: !p[`sb-${sb.id}`] }))}>
-                              {isCollapsed ? '▶' : '▼'}
+                              {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                             </button>
                             <span className="vil-cfg-label">{sb.label || `Button ${i + 1}`}</span>
                             <button className="btn btn--ghost btn--small"
@@ -830,7 +917,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                       className="btn btn--ghost btn--small tf-collapse-btn"
                       onClick={() => setTFCollapsed(prev => ({ ...prev, [gi]: !prev[gi] }))}
                       title={isCollapsed ? 'Expand' : 'Collapse'}>
-                      {isCollapsed ? '▶' : '▼'}
+                      {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                     </button>
                     <input
                       className="tf-group-name-input"
@@ -977,13 +1064,13 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               </select>
             </Field>
             <p className="app-settings-hint" style={{ margin: '4px 0 0' }}>
-              Tags "💾 Save Result" with this tournament so it shows up in its Results tab. Loading a fixture from the Schedule tab sets this automatically, and it otherwise falls back to this canvas's bound tournament (see the 🖥 Canvas picker in the status bar) — only pick one here to override that.
+              Tags "Save Result" with this tournament so it shows up in its Results tab. Loading a fixture from the Schedule tab sets this automatically, and it otherwise falls back to this canvas's bound tournament (see the Canvas picker in the status bar) — only pick one here to override that.
             </p>
           </CollapsibleSection>
 
           <CollapsibleSection label="Teams">
             <p className="app-settings-hint" style={{ margin: '0 0 6px' }}>
-              Use the 👥 team picker on the scoreboard itself to pull from the Team DB, or edit directly here.
+              Use the team picker on the scoreboard itself to pull from the Team DB, or edit directly here.
             </p>
               <Field label="Team A Name">
                 <input className="field-input" value={cfg.teamAName ?? 'Team A'} onChange={e => up({ teamAName: e.target.value })} />
@@ -1074,36 +1161,77 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
           </Field>
           {/* ── Increment editor ── */}
           {(() => {
-            type Inc = { label: string; value: number };
-            const incs: Inc[] = (cfg.increments ?? [1]).map((i: number | { label?: string; value: number }) =>
-              typeof i === 'number' ? { label: '', value: i } : { label: i.label ?? '', value: i.value }
+            type Inc = { label: string; value: number; actions?: ActionItem[]; manualTrigger?: boolean; manualTriggerConfirm?: boolean };
+            const incs: Inc[] = (cfg.increments ?? [1]).map((i: any) =>
+              typeof i === 'number'
+                ? { label: '', value: i }
+                : { label: i.label ?? '', value: i.value, actions: i.actions, manualTrigger: i.manualTrigger, manualTriggerConfirm: i.manualTriggerConfirm }
             );
             const setIncs = (next: Inc[]) => up({ increments: next });
             const updateInc = (idx: number, patch: Partial<Inc>) =>
               setIncs(incs.map((inc, i) => i === idx ? { ...inc, ...patch } : inc));
+            const incTimerWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'timer'));
+            const incScoreboardWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard'));
             return (
               <div className="sb-incs">
                 <div className="sb-incs-hdr">
                   <span className="sb-incs-col-lbl">Label</span>
                   <span className="sb-incs-col-val">Pts</span>
                 </div>
-                {incs.map((inc, idx) => (
-                  <div key={idx} className="sb-inc-row">
-                    <input
-                      className="field-input sb-inc-label"
-                      value={inc.label}
-                      placeholder={`+${inc.value}`}
-                      onChange={e => updateInc(idx, { label: e.target.value })}
-                    />
-                    <input
-                      className="field-input sb-inc-value"
-                      type="number"
-                      value={inc.value}
-                      onChange={e => updateInc(idx, { value: Number(e.target.value) })}
-                    />
-                    <button className="btn btn--ghost btn--small sb-inc-del" onClick={() => setIncs(incs.filter((_, i) => i !== idx))}>×</button>
-                  </div>
-                ))}
+                {incs.map((inc, idx) => {
+                  const trigKey = `inc-trigger-${widget.id}-${idx}`;
+                  const trigOpen = vilCollapsed[trigKey] ?? false;
+                  const hasActions = (inc.actions?.length ?? 0) > 0;
+                  return (
+                    <div key={idx} className="sb-inc-block">
+                      <div className="sb-inc-row">
+                        <input
+                          className="field-input sb-inc-label"
+                          value={inc.label}
+                          placeholder={`+${inc.value}`}
+                          onChange={e => updateInc(idx, { label: e.target.value })}
+                        />
+                        <input
+                          className="field-input sb-inc-value"
+                          type="number"
+                          value={inc.value}
+                          onChange={e => updateInc(idx, { value: Number(e.target.value) })}
+                        />
+                        <button
+                          className={`btn btn--ghost btn--small sb-inc-trigger-btn${hasActions ? ' sb-inc-trigger-btn--active' : ''}`}
+                          title="Trigger actions when scored (optional, same as a Button widget)"
+                          onClick={() => setVilCollapsed(p => ({ ...p, [trigKey]: !trigOpen }))}
+                        ><Zap size={12} strokeWidth={2} /></button>
+                        <button className="btn btn--ghost btn--small sb-inc-del" onClick={() => setIncs(incs.filter((_, i) => i !== idx))}>×</button>
+                      </div>
+                      {trigOpen && (
+                        <div className="sb-inc-trigger-panel">
+                          <p className="timer-db-hint" style={{ margin: '0 0 4px' }}>
+                            Runs whenever "{inc.label || `+${inc.value}`}" is actually scored (after any player picker resolves) — optional, leave empty for no change in behavior.
+                          </p>
+                          <ActionListEditor
+                            actions={inc.actions ?? []}
+                            onChange={next => updateInc(idx, { actions: next })}
+                            sectionKey={trigKey}
+                            pages={pages}
+                            timerWidgets={incTimerWidgets}
+                            scoreboardWidgets={incScoreboardWidgets}
+                            globalVariables={globalVariables}
+                            allInputs={allInputs}
+                          />
+                          <Field label="Manual trigger button">
+                            <input type="checkbox" checked={inc.manualTrigger ?? false} onChange={e => updateInc(idx, { manualTrigger: e.target.checked })} />
+                          </Field>
+                          {inc.manualTrigger && (
+                            <Field label="Confirm before firing">
+                              <input type="checkbox" checked={inc.manualTriggerConfirm ?? true} onChange={e => updateInc(idx, { manualTriggerConfirm: e.target.checked })} />
+                            </Field>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
                 <button className="btn btn--ghost btn--small" style={{ marginTop: 2 }} onClick={() => setIncs([...incs, { label: '', value: 1 }])}>+ Add</button>
               </div>
             );
@@ -1140,7 +1268,12 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
           {/* ── Multiple vMix Title Inputs ── */}
           {(() => {
-            type SbInput = { id: string; inputKey: string; inputTitle?: string; fieldScoreA: string; fieldScoreB: string; fieldTeamA: string; fieldTeamB: string; fieldShortA: string; fieldShortB: string; fieldTextA: string; fieldTextB: string; fieldLogoA: string; fieldLogoB: string; fieldCompetition: string; fieldCategory: string; fieldGroup: string; fieldRound: string; fieldScheduledTime: string };
+            type SbInput = {
+              id: string; inputKey: string; inputTitle?: string; fieldScoreA: string; fieldScoreB: string; fieldTeamA: string; fieldTeamB: string; fieldShortA: string; fieldShortB: string; fieldTextA: string; fieldTextB: string; fieldLogoA: string; fieldLogoB: string; fieldCompetition: string; fieldCategory: string; fieldGroup: string; fieldRound: string; fieldScheduledTime: string; fieldMatchId?: string;
+              mergedAPrefix?: string; mergedAParts?: string[]; mergedASeparator?: string;
+              mergedBPrefix?: string; mergedBParts?: string[]; mergedBSeparator?: string;
+              mergedInfoPrefix?: string; mergedInfoParts?: string[]; mergedInfoSeparator?: string;
+            };
             // Migrate legacy single-input config on first open
             const sbInputs: SbInput[] = cfg.vmixInputs?.length
               ? cfg.vmixInputs
@@ -1152,8 +1285,98 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               setSbInputs(sbInputs.map((s, i) => i === idx ? { ...s, ...patch } : s));
             const addSbInput = () => setSbInputs([...sbInputs, { id: crypto.randomUUID(), inputKey: '', fieldScoreA: 'ScoreA.Text', fieldScoreB: 'ScoreB.Text', fieldTeamA: 'TeamA.Text', fieldTeamB: 'TeamB.Text', fieldShortA: '', fieldShortB: '', fieldTextA: '', fieldTextB: '', fieldLogoA: '', fieldLogoB: '', fieldCompetition: '', fieldCategory: '', fieldGroup: '', fieldRound: '', fieldScheduledTime: '' }]);
 
+            // One independent list per field group — each target picks its
+            // own vMix input via the normal picker (not a checkbox) and its
+            // own field name(s), since different templates never share
+            // field naming. Kept as separate lists per group (rather than
+            // one combined list with every field) so, e.g., a pure logo bug
+            // and a pure scorebug don't clutter each other's setup.
+            const renderExtraTargetGroup = (configKey: string, label: string, description: string, renderFields: (t: any, update: (patch: any) => void) => React.ReactNode) => {
+              const targets: any[] = cfg[configKey] ?? [];
+              const setTargets = (next: any[]) => up({ [configKey]: next });
+              const updateTarget = (idx: number, patch: any) => setTargets(targets.map((t: any, i: number) => i === idx ? { ...t, ...patch } : t));
+              const addTarget = () => setTargets([...targets, { id: crypto.randomUUID(), inputKey: '' }]);
+              return (
+                <CollapsibleSection label={label}>
+                  <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px', lineHeight: 1.4 }}>{description}</p>
+                  {targets.map((t: any, idx: number) => {
+                    const targetKey = `${configKey}_${t.id}`;
+                    const isCollapsed = vilCollapsed[targetKey] ?? false;
+                    return (
+                      <div key={t.id} className="vil-cfg-block">
+                        <div className="vil-cfg-header">
+                          <button className="btn btn--ghost btn--small tf-collapse-btn"
+                            onClick={() => setVilCollapsed(p => ({ ...p, [targetKey]: !p[targetKey] }))}
+                            title={isCollapsed ? 'Expand' : 'Collapse'}>
+                            {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                          </button>
+                          <span className="vil-cfg-label">{t.inputTitle || t.inputKey || `Target ${idx + 1}`}</span>
+                          <button className="btn btn--ghost btn--small" onClick={() => setTargets(targets.filter((_: any, i: number) => i !== idx))}>×</button>
+                        </div>
+                        {!isCollapsed && (
+                          <>
+                            {renderInputPicker('vMix Input', t.inputKey, t.inputTitle,
+                              (key, title) => updateTarget(idx, { inputKey: key, inputTitle: title }),
+                              undefined, allInputs,
+                            )}
+                            {t.inputKey && renderFields(t, (patch: any) => updateTarget(idx, patch))}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <button className="btn btn--ghost btn--small" onClick={addTarget}>+ Add Input</button>
+                </CollapsibleSection>
+              );
+            };
             return (
               <>
+                {renderExtraTargetGroup('extraLogoTargets', 'Extra Logo Targets',
+                  'Push the team logos to other vMix inputs (a scorebug, corner bug, etc.).',
+                  (t, update) => (
+                    <>
+                      <Field label="Logo A Field">{renderFieldPicker(t.inputKey, t.fieldLogoA ?? '', v => update({ fieldLogoA: v }), 'LogoA.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
+                      <Field label="Logo B Field">{renderFieldPicker(t.inputKey, t.fieldLogoB ?? '', v => update({ fieldLogoB: v }), 'LogoB.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
+                    </>
+                  ))}
+                {renderExtraTargetGroup('extraScoreTargets', 'Extra Score Targets',
+                  'Push the live score to other vMix inputs.',
+                  (t, update) => (
+                    <>
+                      <Field label="Score A Field">{renderFieldPicker(t.inputKey, t.fieldScoreA ?? '', v => update({ fieldScoreA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                      <Field label="Score B Field">{renderFieldPicker(t.inputKey, t.fieldScoreB ?? '', v => update({ fieldScoreB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                    </>
+                  ))}
+                {renderExtraTargetGroup('extraTeamTargets', 'Extra Team Name Targets',
+                  'Push team/short names to other vMix inputs.',
+                  (t, update) => (
+                    <>
+                      <Field label="Team A Field">{renderFieldPicker(t.inputKey, t.fieldTeamA ?? '', v => update({ fieldTeamA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                      <Field label="Team B Field">{renderFieldPicker(t.inputKey, t.fieldTeamB ?? '', v => update({ fieldTeamB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                      <Field label="Short Name A Field">{renderFieldPicker(t.inputKey, t.fieldShortA ?? '', v => update({ fieldShortA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                      <Field label="Short Name B Field">{renderFieldPicker(t.inputKey, t.fieldShortB ?? '', v => update({ fieldShortB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                    </>
+                  ))}
+                {renderExtraTargetGroup('extraTextTargets', 'Extra Text Targets',
+                  'Push the custom Text A/B fields to other vMix inputs.',
+                  (t, update) => (
+                    <>
+                      <Field label="Text A Field">{renderFieldPicker(t.inputKey, t.fieldTextA ?? '', v => update({ fieldTextA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                      <Field label="Text B Field">{renderFieldPicker(t.inputKey, t.fieldTextB ?? '', v => update({ fieldTextB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                    </>
+                  ))}
+                {renderExtraTargetGroup('extraMatchDetailsTargets', 'Extra Match Details Targets',
+                  'Push competition/category/group/round/scheduled time/match ID to other vMix inputs.',
+                  (t, update) => (
+                    <>
+                      <Field label="Competition Field">{renderFieldPicker(t.inputKey, t.fieldCompetition ?? '', v => update({ fieldCompetition: v }), 'Title.Text', undefined, allInputs)}</Field>
+                      <Field label="Category Field">{renderFieldPicker(t.inputKey, t.fieldCategory ?? '', v => update({ fieldCategory: v }), 'Title.Text', undefined, allInputs)}</Field>
+                      <Field label="Group Field">{renderFieldPicker(t.inputKey, t.fieldGroup ?? '', v => update({ fieldGroup: v }), 'Title.Text', undefined, allInputs)}</Field>
+                      <Field label="Round Field">{renderFieldPicker(t.inputKey, t.fieldRound ?? '', v => update({ fieldRound: v }), 'Title.Text', undefined, allInputs)}</Field>
+                      <Field label="Scheduled Time Field">{renderFieldPicker(t.inputKey, t.fieldScheduledTime ?? '', v => update({ fieldScheduledTime: v }), 'Title.Text', undefined, allInputs)}</Field>
+                      <Field label="Match ID Field">{renderFieldPicker(t.inputKey, t.fieldMatchId ?? '', v => update({ fieldMatchId: v }), 'Title.Text', undefined, allInputs)}</Field>
+                    </>
+                  ))}
                 {sbInputs.map((inp, idx) => {
                   const isVilCollapsed = vilCollapsed[inp.id] ?? false;
                   return (
@@ -1162,7 +1385,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                         <button className="btn btn--ghost btn--small tf-collapse-btn"
                           onClick={() => setVilCollapsed(p => ({ ...p, [inp.id]: !p[inp.id] }))}
                           title={isVilCollapsed ? 'Expand' : 'Collapse'}>
-                          {isVilCollapsed ? '▶' : '▼'}
+                          {isVilCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                         </button>
                         <span className="vil-cfg-label">vMix Title Input {idx + 1}</span>
                         {sbInputs.length > 1 && (
@@ -1188,6 +1411,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                             <Field label="Group Field">{renderFieldPicker(inp.inputKey, inp.fieldGroup ?? '', v => updateSb(idx, { fieldGroup: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Round Field (Tier + Round, e.g. &quot;Semifinal 1 Cup&quot;)">{renderFieldPicker(inp.inputKey, inp.fieldRound ?? '', v => updateSb(idx, { fieldRound: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Scheduled Time Field">{renderFieldPicker(inp.inputKey, inp.fieldScheduledTime ?? '', v => updateSb(idx, { fieldScheduledTime: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Match ID Field">{renderFieldPicker(inp.inputKey, inp.fieldMatchId ?? '', v => updateSb(idx, { fieldMatchId: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Logo A Field">{renderFieldPicker(inp.inputKey, inp.fieldLogoA ?? '', v => {
                               updateSb(idx, { fieldLogoA: v });
                               if (v && cfg.teamALogo) {
@@ -1232,6 +1456,52 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                                 </div>
                               </Field>
                             )}
+
+                            <MergeFieldComposer
+                              parts={SCORE_MERGE_PARTS_A}
+                              mergedParts={inp.mergedAParts ?? []}
+                              mergedPrefix={inp.mergedAPrefix ?? ''}
+                              mergedSeparator={inp.mergedASeparator ?? ' '}
+                              onChange={patch => updateSb(idx, {
+                                ...(patch.mergedParts !== undefined ? { mergedAParts: patch.mergedParts } : {}),
+                                ...(patch.mergedPrefix !== undefined ? { mergedAPrefix: patch.mergedPrefix } : {}),
+                                ...(patch.mergedSeparator !== undefined ? { mergedASeparator: patch.mergedSeparator } : {}),
+                              })}
+                              inputKey={inp.inputKey}
+                              allInputs={allInputs}
+                              dragKey={`sb_${inp.id}_a`}
+                              fieldLabel="Team A merged field"
+                            />
+                            <MergeFieldComposer
+                              parts={SCORE_MERGE_PARTS_B}
+                              mergedParts={inp.mergedBParts ?? []}
+                              mergedPrefix={inp.mergedBPrefix ?? ''}
+                              mergedSeparator={inp.mergedBSeparator ?? ' '}
+                              onChange={patch => updateSb(idx, {
+                                ...(patch.mergedParts !== undefined ? { mergedBParts: patch.mergedParts } : {}),
+                                ...(patch.mergedPrefix !== undefined ? { mergedBPrefix: patch.mergedPrefix } : {}),
+                                ...(patch.mergedSeparator !== undefined ? { mergedBSeparator: patch.mergedSeparator } : {}),
+                              })}
+                              inputKey={inp.inputKey}
+                              allInputs={allInputs}
+                              dragKey={`sb_${inp.id}_b`}
+                              fieldLabel="Team B merged field"
+                            />
+                            <MergeFieldComposer
+                              parts={SCORE_MERGE_PARTS_INFO}
+                              mergedParts={inp.mergedInfoParts ?? []}
+                              mergedPrefix={inp.mergedInfoPrefix ?? ''}
+                              mergedSeparator={inp.mergedInfoSeparator ?? ' '}
+                              onChange={patch => updateSb(idx, {
+                                ...(patch.mergedParts !== undefined ? { mergedInfoParts: patch.mergedParts } : {}),
+                                ...(patch.mergedPrefix !== undefined ? { mergedInfoPrefix: patch.mergedPrefix } : {}),
+                                ...(patch.mergedSeparator !== undefined ? { mergedInfoSeparator: patch.mergedSeparator } : {}),
+                              })}
+                              inputKey={inp.inputKey}
+                              allInputs={allInputs}
+                              dragKey={`sb_${inp.id}_info`}
+                              fieldLabel="Match info merged field"
+                            />
                           </>
                         )}
                       </>)}
@@ -1285,7 +1555,11 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
       case 'score-lower-third': {
         const scoreboards = pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard'));
-        type SltInput = { id: string; actionLabel: string; vmixInputKey: string; vmixInputTitle?: string; fieldTeam: string; fieldScorer: string; fieldJersey: string; fieldAction: string };
+        type SltInput = {
+          id: string; actionLabel: string; vmixInputKey: string; vmixInputTitle?: string; fieldTeam: string; fieldScorer: string; fieldJersey: string; fieldAction: string;
+          fieldTeamLogo?: string;
+          mergedPrefix?: string; mergedParts?: string[]; mergedSeparator?: string;
+        };
         const sltInputs: SltInput[] = cfg.vmixInputs?.length
           ? cfg.vmixInputs
           : [{ id: 'default', actionLabel: '', vmixInputKey: '', fieldTeam: 'Team.Text', fieldScorer: 'Scorer.Text', fieldJersey: 'Jersey.Text', fieldAction: 'Action.Text' }];
@@ -1335,7 +1609,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                       <button className="btn btn--ghost btn--small tf-collapse-btn"
                         onClick={() => setVilCollapsed(p => ({ ...p, [inp.id]: !p[inp.id] }))}
                         title={isVilCollapsed ? 'Expand' : 'Collapse'}>
-                        {isVilCollapsed ? '▶' : '▼'}
+                        {isVilCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                       </button>
                       <span className="vil-cfg-label">
                         {inp.actionLabel ? `"${inp.actionLabel}"` : 'Default (fallback)'}
@@ -1366,6 +1640,24 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                           <Field label="Score Action Field">
                             {renderFieldPicker(inp.vmixInputKey, inp.fieldAction, v => updateSlt(idx, { fieldAction: v }), 'Title.Text', undefined, allInputs)}
                           </Field>
+                          <Field label="Team Logo Field">
+                            {renderFieldPicker(inp.vmixInputKey, inp.fieldTeamLogo ?? '', v => updateSlt(idx, { fieldTeamLogo: v }), 'Team.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}
+                          </Field>
+                          <MergeFieldComposer
+                            parts={[
+                              { key: 'team', label: 'Team', sample: 'Chelsea' },
+                              { key: 'scorer', label: 'Scorer', sample: 'John Smith' },
+                              { key: 'jersey', label: 'Jersey', sample: '9' },
+                              { key: 'action', label: 'Action', sample: 'Try' },
+                            ]}
+                            mergedParts={inp.mergedParts ?? []}
+                            mergedPrefix={inp.mergedPrefix ?? ''}
+                            mergedSeparator={inp.mergedSeparator ?? ' '}
+                            onChange={patch => updateSlt(idx, patch as Partial<SltInput>)}
+                            inputKey={inp.vmixInputKey}
+                            allInputs={allInputs}
+                            dragKey={`${widget.id}_slt_${inp.id}`}
+                          />
                         </>
                       )}
                     </>)}
@@ -1430,6 +1722,23 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   <Field label="Position field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? 'Position.Text', v => up({ fieldPosition: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Score summary field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldScoreSummary ?? '', v => up({ fieldScoreSummary: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Team Logo field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeamLogo ?? '', v => up({ fieldTeamLogo: v }), 'Team.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
+                  <MergeFieldComposer
+                    parts={[
+                      { key: 'name', label: 'Name', sample: 'John Smith' },
+                      { key: 'jersey', label: 'Jersey', sample: '9' },
+                      { key: 'position', label: 'Position', sample: 'Scrum Half' },
+                      { key: 'team', label: 'Team', sample: 'Chelsea' },
+                      { key: 'scoreSummary', label: 'Score Summary', sample: '2 Tries' },
+                    ]}
+                    mergedParts={cfg.mergedParts ?? []}
+                    mergedPrefix={cfg.mergedPrefix ?? ''}
+                    mergedSeparator={cfg.mergedSeparator ?? ' '}
+                    onChange={patch => up(patch)}
+                    inputKey={cfg.vmixInputKey}
+                    allInputs={allInputs}
+                    dragKey={`${widget.id}_plt`}
+                  />
                 </>
               )}
             </CollapsibleSection>
@@ -1480,6 +1789,22 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   <Field label="Name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Timer field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTimer ?? 'Timer.Text', v => up({ fieldTimer: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Team Logo field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeamLogo ?? '', v => up({ fieldTeamLogo: v }), 'Team.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
+                  <MergeFieldComposer
+                    parts={[
+                      { key: 'jersey', label: 'Jersey', sample: '9' },
+                      { key: 'name', label: 'Name', sample: 'John Smith' },
+                      { key: 'timer', label: 'Timer', sample: '08:32' },
+                      { key: 'team', label: 'Team', sample: 'Chelsea' },
+                    ]}
+                    mergedParts={cfg.mergedParts ?? []}
+                    mergedPrefix={cfg.mergedPrefix ?? ''}
+                    mergedSeparator={cfg.mergedSeparator ?? ' '}
+                    onChange={patch => up(patch)}
+                    inputKey={cfg.vmixInputKey}
+                    allInputs={allInputs}
+                    dragKey={`${widget.id}_sinbin`}
+                  />
                 </>
               )}
             </CollapsibleSection>
@@ -1539,7 +1864,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                 <div className="timer-db-row">
                   <span>Half-time / Break</span><strong>{fmtMs(timerTournSettings.halfTimeDurationMs)}</strong>
                 </div>
-                <p className="timer-db-hint">Settings auto-apply when timer is not running. Edit in 🏆 DB.</p>
+                <p className="timer-db-hint">Settings auto-apply when timer is not running. Edit in DB.</p>
               </div>
             )}
           </CollapsibleSection>
@@ -1560,6 +1885,62 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               <option value="mm:ss">mm:ss</option>
               <option value="ss">seconds only</option>
             </select>
+          </Field>
+          <Field label="Time format options">
+            <label className="tf-autosend-label">
+              <input type="checkbox" checked={cfg.showMs ?? false} onChange={e => up({ showMs: e.target.checked })} />
+              Show milliseconds (adds a :FF hundredths segment)
+            </label>
+            <label className="tf-autosend-label" style={{ marginTop: 4 }}>
+              <input type="checkbox" checked={cfg.noLeadingZero ?? false} onChange={e => up({ noLeadingZero: e.target.checked })} />
+              Remove leading zero (e.g. "07:00" → "7:00")
+            </label>
+            <label className="tf-autosend-label" style={{ marginTop: 4 }}>
+              <input type="checkbox" checked={cfg.subMinuteMs ?? false} onChange={e => up({ subMinuteMs: e.target.checked })} />
+              Below 1 minute, show seconds:milliseconds (e.g. "58:58")
+            </label>
+            <p className="app-settings-hint" style={{ margin: '6px 0 0' }}>
+              Preview: {formatTime(425580, cfg.format ?? 'mm:ss', cfg)} · under 1 min: {formatTime(58580, cfg.format ?? 'mm:ss', cfg)}
+            </p>
+          </Field>
+          <Field label="vMix text format">
+            <label className="tf-autosend-label">
+              <input type="checkbox" checked={cfg.vmixFollowsFormat ?? true} onChange={e => up({ vmixFollowsFormat: e.target.checked })} />
+              Match the on-screen display format above
+            </label>
+            <p className="app-settings-hint" style={{ margin: '4px 0 0' }}>
+              {cfg.vmixFollowsFormat === false
+                ? 'Off — the vMix text field uses its own format below, independent of what the widget shows on screen.'
+                : 'On (default) — the vMix text field always shows exactly what the widget itself displays.'}
+            </p>
+            {cfg.vmixFollowsFormat === false && (
+              <div style={{ marginTop: 8, paddingLeft: 8, borderLeft: '2px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <label className="tf-autosend-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  Format:
+                  <select className="field-input" style={{ width: 'auto' }} value={cfg.vmixFormat ?? 'mm:ss'} onChange={e => up({ vmixFormat: e.target.value })}>
+                    <option value="hh:mm:ss">hh:mm:ss</option>
+                    <option value="h:mm:ss">h:mm:ss</option>
+                    <option value="mm:ss">mm:ss</option>
+                    <option value="ss">seconds only</option>
+                  </select>
+                </label>
+                <label className="tf-autosend-label">
+                  <input type="checkbox" checked={cfg.vmixShowMs ?? false} onChange={e => up({ vmixShowMs: e.target.checked })} />
+                  Show milliseconds
+                </label>
+                <label className="tf-autosend-label">
+                  <input type="checkbox" checked={cfg.vmixNoLeadingZero ?? false} onChange={e => up({ vmixNoLeadingZero: e.target.checked })} />
+                  Remove leading zero
+                </label>
+                <label className="tf-autosend-label">
+                  <input type="checkbox" checked={cfg.vmixSubMinuteMs ?? false} onChange={e => up({ vmixSubMinuteMs: e.target.checked })} />
+                  Below 1 minute, show seconds:milliseconds
+                </label>
+                <p className="app-settings-hint" style={{ margin: 0 }}>
+                  vMix preview: {formatTime(425580, cfg.vmixFormat ?? 'mm:ss', { showMs: cfg.vmixShowMs, noLeadingZero: cfg.vmixNoLeadingZero, subMinuteMs: cfg.vmixSubMinuteMs })}
+                </p>
+              </div>
+            )}
           </Field>
           <Field label="Timer font size (px)">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1723,7 +2104,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                       const buttons = (cfg.adjustButtons ?? []).filter((_: unknown, j: number) => j !== i);
                       up({ adjustButtons: buttons });
                     }}
-                  >✕</button>
+                  ><X size={14} /></button>
                 </div>
               ))}
               <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginTop: 2 }}>
@@ -2056,8 +2437,8 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             const etPeriods = cfg.extraTimePeriods ?? 0;
             const afterEtMode = cfg.afterEtMode ?? 'none';
             const hasEtBreak = etPeriods === 2 && (cfg.etBreakDurationMs ?? 0) > 0;
-            const overrides: Record<string, { customText?: string; imagePath?: string }> = cfg.periodOverrides ?? {};
-            const patchOverride = (key: string, patch: { customText?: string; imagePath?: string }) =>
+            const overrides: Record<string, { customText?: string; customText2?: string; imagePath?: string }> = cfg.periodOverrides ?? {};
+            const patchOverride = (key: string, patch: { customText?: string; customText2?: string; imagePath?: string }) =>
               up({ periodOverrides: { ...overrides, [key]: { ...(overrides[key] ?? {}), ...patch } } });
 
             const states: { key: string; label: string }[] = [];
@@ -2084,6 +2465,12 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             return (
               <>
                 <CollapsibleSection label="Period Labels">
+                <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px', lineHeight: 1.4 }}>
+                  The auto-generated label always goes to its own Default Label field. Custom text and Custom text 2
+                  are both optional, independent labels (their own vMix fields) — only sent when you actually type
+                  something into them. Image is sent to the separate Period Image field. Any of the three can be
+                  filled in at once.
+                </p>
                 <div className="timer-period-overrides">
                   {states.map(s => (
                     <div key={s.key + s.label} className="timer-period-override-row">
@@ -2095,10 +2482,15 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                         onChange={e => patchOverride(s.key, { customText: e.target.value })}
                       />
                       <input
-                        className="field-input timer-period-override-img"
+                        className="field-input timer-period-override-text"
+                        value={overrides[s.key]?.customText2 ?? ''}
+                        placeholder="Custom text 2…"
+                        onChange={e => patchOverride(s.key, { customText2: e.target.value })}
+                      />
+                      <LogoUrlPicker
                         value={overrides[s.key]?.imagePath ?? ''}
-                        placeholder="Image path…"
-                        onChange={e => patchOverride(s.key, { imagePath: e.target.value })}
+                        onChange={url => patchOverride(s.key, { imagePath: url })}
+                        placeholder="Period image"
                       />
                     </div>
                   ))}
@@ -2109,7 +2501,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
           })()}
           {/* ── Multiple vMix Timer Inputs ── */}
           {(() => {
-            type TiInput = { id: string; inputKey: string; inputTitle?: string; fieldName: string; fieldTimerName?: string; fieldPeriodLabel?: string; fieldPeriodImage?: string };
+            type TiInput = { id: string; inputKey: string; inputTitle?: string; fieldName: string; fieldTimerName?: string; fieldDefaultLabel?: string; fieldPeriodLabel?: string; fieldPeriodLabel2?: string; fieldPeriodImage?: string };
             const tiInputs: TiInput[] = cfg.vmixInputs?.length
               ? cfg.vmixInputs
               : cfg.vmixInputKey
@@ -2127,7 +2519,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                         <button className="btn btn--ghost btn--small tf-collapse-btn"
                           onClick={() => setVilCollapsed(p => ({ ...p, [inp.id]: !p[inp.id] }))}
                           title={isVilCollapsed ? 'Expand' : 'Collapse'}>
-                          {isVilCollapsed ? '▶' : '▼'}
+                          {isVilCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                         </button>
                         <span className="vil-cfg-label">vMix Title Input {idx + 1}</span>
                         {tiInputs.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setTiInputs(tiInputs.filter((_, i) => i !== idx))}>×</button>}
@@ -2142,7 +2534,9 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                           <>
                             <Field label="Timer Value Field">{renderFieldPicker(inp.inputKey, inp.fieldName, v => updateTi(idx, { fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Timer Name Field">{renderFieldPicker(inp.inputKey, inp.fieldTimerName ?? '', v => updateTi(idx, { fieldTimerName: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Default Label Field">{renderFieldPicker(inp.inputKey, inp.fieldDefaultLabel ?? '', v => updateTi(idx, { fieldDefaultLabel: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Period Label Field">{renderFieldPicker(inp.inputKey, inp.fieldPeriodLabel ?? '', v => updateTi(idx, { fieldPeriodLabel: v }), 'Title.Text', undefined, allInputs)}</Field>
+                            <Field label="Period Label 2 Field">{renderFieldPicker(inp.inputKey, inp.fieldPeriodLabel2 ?? '', v => updateTi(idx, { fieldPeriodLabel2: v }), 'Title.Text', undefined, allInputs)}</Field>
                             <Field label="Period Image Field">{renderFieldPicker(inp.inputKey, inp.fieldPeriodImage ?? '', v => updateTi(idx, { fieldPeriodImage: v }), 'PeriodImg.Source', undefined, allInputs)}</Field>
                           </>
                         )}
@@ -2328,53 +2722,318 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         </>
       );
 
-      case 'recent-matches': return (
-        <>
-          <Field label="Title">
-            <input className="field-input" value={cfg.title ?? ''} placeholder="Latest Results"
-              onChange={e => up({ title: e.target.value })} />
+      case 'recent-matches': {
+        type ResultVmixTarget = {
+          id: string; mode?: 'standalone' | 'linked';
+          inputKey?: string; inputTitle?: string;
+          teamAPrefix?: string; teamBPrefix?: string;
+          shortTeamAPrefix?: string; shortTeamBPrefix?: string;
+          datePrefix?: string; timePrefix?: string; roundPrefix?: string;
+          linkedWidgetId?: string; linkedListKey?: 'scheduleVmixInputs' | 'nextVmixInputs';
+          scoreAPrefix?: string; scoreBPrefix?: string;
+          statusFieldPrefix?: string; statusFieldType?: 'text' | 'image'; statusText?: string; statusImage?: string;
+          mergedPrefix?: string; mergedParts?: string[]; mergedSeparator?: string;
+          autoSync?: boolean;
+        };
+        const resultTargets: ResultVmixTarget[] = cfg.resultVmixInputs ?? [];
+        const setResultTargets = (next: ResultVmixTarget[]) => up({ resultVmixInputs: next });
+        const updateResultTarget = (idx: number, patch: Partial<ResultVmixTarget>) =>
+          setResultTargets(resultTargets.map((t, i) => i === idx ? { ...t, ...patch } : t));
+        const scheduleWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'match-schedule'));
+        const resultPrefixField = (target: ResultVmixTarget, idx: number, key: keyof ResultVmixTarget, fieldLabel: string, placeholder: string, effectiveInputKey: string) => (
+          <Field label={fieldLabel}>
+            {renderFieldPicker(
+              effectiveInputKey,
+              target[key] ? `${target[key]}1.Text` : '',
+              v => updateResultTarget(idx, { [key]: v.replace(/\.Text$/i, '').replace(/\d+$/, '') } as Partial<ResultVmixTarget>),
+              placeholder,
+            )}
           </Field>
-          <Field label="Max results shown">
-            <input type="number" className="field-input" min={1} max={50} value={cfg.maxResults ?? 8}
-              onChange={e => up({ maxResults: Math.max(1, parseInt(e.target.value) || 8) })} />
-          </Field>
-          <Field label="Group by competition">
-            <input type="checkbox" checked={cfg.groupByCompetition ?? true}
-              onChange={e => up({ groupByCompetition: e.target.checked })} />
-          </Field>
-          <Field label="Show date">
-            <input type="checkbox" checked={cfg.showDate ?? true}
-              onChange={e => up({ showDate: e.target.checked })} />
-          </Field>
-          <Field label="Team name">
-            <select className="field-input" value={cfg.nameDisplay ?? 'short'} onChange={e => up({ nameDisplay: e.target.value })}>
-              <option value="short">Short name (falls back to full)</option>
-              <option value="full">Full name</option>
-            </select>
-          </Field>
-          <Field label="Widget size">
-            <select className="field-input" value={cfg.compactSize ? 'compact' : 'normal'} onChange={e => up({ compactSize: e.target.value === 'compact' })}>
-              <option value="normal">Bigger (default)</option>
-              <option value="compact">Compact</option>
-            </select>
-          </Field>
-          <Field label="Tournament">
-            <select className="field-input" value={cfg.filterTournamentId ?? ''} onChange={e => up({ filterTournamentId: e.target.value })}>
-              <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— all tournaments —'}</option>
-              {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-          </Field>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
-            Results are added from a scoreboard widget's "💾 Save Result" button.
-          </div>
-        </>
-      );
+        );
+
+        return (
+          <>
+            <Field label="Title">
+              <input className="field-input" value={cfg.title ?? ''} placeholder="Latest Results"
+                onChange={e => up({ title: e.target.value })} />
+            </Field>
+            <Field label="Max results shown">
+              <input type="number" className="field-input" min={1} max={50} value={cfg.maxResults ?? 8}
+                onChange={e => up({ maxResults: Math.max(1, parseInt(e.target.value) || 8) })} />
+            </Field>
+            <Field label="Group by competition">
+              <input type="checkbox" checked={cfg.groupByCompetition ?? true}
+                onChange={e => up({ groupByCompetition: e.target.checked })} />
+            </Field>
+            <Field label="Show date">
+              <input type="checkbox" checked={cfg.showDate ?? true}
+                onChange={e => up({ showDate: e.target.checked })} />
+            </Field>
+            <Field label="Team name">
+              <select className="field-input" value={cfg.nameDisplay ?? 'short'} onChange={e => up({ nameDisplay: e.target.value })}>
+                <option value="short">Short name (falls back to full)</option>
+                <option value="full">Full name</option>
+              </select>
+            </Field>
+            <Field label="Widget size">
+              <select className="field-input" value={cfg.compactSize ? 'compact' : 'normal'} onChange={e => up({ compactSize: e.target.value === 'compact' })}>
+                <option value="normal">Bigger (default)</option>
+                <option value="compact">Compact</option>
+              </select>
+            </Field>
+            <Field label="Tournament">
+              <select className="field-input" value={cfg.filterTournamentId ?? ''} onChange={e => up({ filterTournamentId: e.target.value })}>
+                <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— all tournaments —'}</option>
+                {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </Field>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+              Results are added from a scoreboard widget's "Save Result" button.
+            </div>
+
+            <CollapsibleSection label="vMix Output">
+              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px', lineHeight: 1.4 }}>
+                Same one-input/several-numbered-slots push Match Schedule uses, plus Score A/B and a "finished" status field
+                (text like "FT", or an image badge — whichever the field you pick is). "Reuse a Schedule widget" points this at
+                that widget's own vMix input and team/date/time/round field mapping, so the same graphic slot just gets
+                overwritten with the final result — no need to duplicate that mapping by hand. "Own vMix input" is fully standalone.
+              </p>
+              {resultTargets.map((t, idx) => {
+                const collapseKey = `result_vmix_${t.id}`;
+                const isCollapsed = vilCollapsed[collapseKey] ?? false;
+                const mode = t.mode ?? 'standalone';
+                const linkedWidget = scheduleWidgets.find(w => w.id === t.linkedWidgetId);
+                const effectiveInputKey = mode === 'linked'
+                  ? ((linkedWidget?.config?.[t.linkedListKey ?? 'scheduleVmixInputs'] ?? [])[0]?.inputKey ?? '')
+                  : (t.inputKey ?? '');
+                return (
+                  <div key={t.id} className="vil-cfg-block">
+                    <div className="vil-cfg-header">
+                      <button className="btn btn--ghost btn--small tf-collapse-btn"
+                        onClick={() => setVilCollapsed(p => ({ ...p, [collapseKey]: !p[collapseKey] }))}
+                        title={isCollapsed ? 'Expand' : 'Collapse'}>
+                        {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                      </button>
+                      <span className="vil-cfg-label">vMix Target {idx + 1}</span>
+                      {resultTargets.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setResultTargets(resultTargets.filter((_, i) => i !== idx))}>×</button>}
+                    </div>
+                    {!isCollapsed && (
+                      <>
+                        <Field label="Source">
+                          <select className="field-input" value={mode} onChange={e => updateResultTarget(idx, { mode: e.target.value as 'standalone' | 'linked' })}>
+                            <option value="standalone">Own vMix input</option>
+                            <option value="linked">Reuse a Schedule widget's input</option>
+                          </select>
+                        </Field>
+
+                        {mode === 'linked' ? (
+                          <>
+                            <Field label="Match Schedule widget">
+                              <select className="field-input" value={t.linkedWidgetId ?? ''} onChange={e => updateResultTarget(idx, { linkedWidgetId: e.target.value })}>
+                                <option value="">— select —</option>
+                                {scheduleWidgets.map(w => <option key={w.id} value={w.id}>{w.label || w.config?.title || 'Match Schedule'}</option>)}
+                              </select>
+                            </Field>
+                            {t.linkedWidgetId && (
+                              <Field label="Its target list">
+                                <select className="field-input" value={t.linkedListKey ?? 'scheduleVmixInputs'} onChange={e => updateResultTarget(idx, { linkedListKey: e.target.value as 'scheduleVmixInputs' | 'nextVmixInputs' })}>
+                                  <option value="scheduleVmixInputs">Full Schedule</option>
+                                  <option value="nextVmixInputs">Next Fixture(s)</option>
+                                </select>
+                              </Field>
+                            )}
+                            {linkedWidget && (
+                              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 4px' }}>
+                                {(linkedWidget.config?.[t.linkedListKey ?? 'scheduleVmixInputs'] ?? [])[0]?.inputKey
+                                  ? 'Using that target\'s vMix input and Team A/B, Date, Time, Round field prefixes.'
+                                  : 'That widget/list has no vMix input configured yet — set one there first.'}
+                              </p>
+                            )}
+                          </>
+                        ) : (
+                          renderInputPicker('vMix Input', t.inputKey ?? '', t.inputTitle,
+                            (key, title) => updateResultTarget(idx, { inputKey: key, inputTitle: title }),
+                          )
+                        )}
+
+                        {(mode === 'linked' ? !!t.linkedWidgetId : !!t.inputKey) && (
+                          <>
+                            {mode === 'standalone' && (
+                              <>
+                                {resultPrefixField(t, idx, 'teamAPrefix', 'Team A prefix', 'Pick TeamA1.Text → auto-prefix', effectiveInputKey)}
+                                {resultPrefixField(t, idx, 'teamBPrefix', 'Team B prefix', 'Pick TeamB1.Text → auto-prefix', effectiveInputKey)}
+                                {resultPrefixField(t, idx, 'shortTeamAPrefix', 'Short Name A prefix', 'Pick ShortA1.Text → auto-prefix', effectiveInputKey)}
+                                {resultPrefixField(t, idx, 'shortTeamBPrefix', 'Short Name B prefix', 'Pick ShortB1.Text → auto-prefix', effectiveInputKey)}
+                                {resultPrefixField(t, idx, 'datePrefix', 'Date prefix', 'Pick Date1.Text → auto-prefix', effectiveInputKey)}
+                                {resultPrefixField(t, idx, 'timePrefix', 'Time prefix', 'Pick Time1.Text → auto-prefix', effectiveInputKey)}
+                                {resultPrefixField(t, idx, 'roundPrefix', 'Round prefix', 'Pick Round1.Text → auto-prefix', effectiveInputKey)}
+                              </>
+                            )}
+                            {resultPrefixField(t, idx, 'scoreAPrefix', 'Score A prefix', 'Pick ScoreA1.Text → auto-prefix', effectiveInputKey)}
+                            {resultPrefixField(t, idx, 'scoreBPrefix', 'Score B prefix', 'Pick ScoreB1.Text → auto-prefix', effectiveInputKey)}
+
+                            <Field label="Status field type">
+                              <select className="field-input" value={t.statusFieldType ?? 'text'} onChange={e => updateResultTarget(idx, { statusFieldType: e.target.value as 'text' | 'image' })}>
+                                <option value="text">Text (e.g. "FT")</option>
+                                <option value="image">Image (e.g. checkmark badge)</option>
+                              </select>
+                            </Field>
+                            {resultPrefixField(t, idx, 'statusFieldPrefix', 'Status field prefix', 'Pick Status1.Text/.Source → auto-prefix', effectiveInputKey)}
+                            {t.statusFieldType === 'image' ? (
+                              <Field label="Status image">
+                                <LogoUrlPicker value={t.statusImage ?? ''} onChange={url => updateResultTarget(idx, { statusImage: url })} placeholder="Finished badge image URL" />
+                              </Field>
+                            ) : (
+                              <Field label="Status text">
+                                <input className="field-input" value={t.statusText ?? 'FT'} placeholder="FT"
+                                  onChange={e => updateResultTarget(idx, { statusText: e.target.value })} />
+                              </Field>
+                            )}
+
+                            <MergeFieldComposer
+                              parts={[
+                                { key: 'teamA', label: 'Team A', sample: 'Chelsea' },
+                                { key: 'teamB', label: 'Team B', sample: 'Arsenal' },
+                                { key: 'shortTeamA', label: 'Short Name A', sample: 'CHE' },
+                                { key: 'shortTeamB', label: 'Short Name B', sample: 'ARS' },
+                                { key: 'scoreA', label: 'Score A', sample: '3' },
+                                { key: 'scoreB', label: 'Score B', sample: '1' },
+                                { key: 'date', label: 'Date', sample: '2026-08-20' },
+                                { key: 'time', label: 'Time', sample: '19:00' },
+                                { key: 'round', label: 'Round', sample: 'Round 3' },
+                                { key: 'competition', label: 'Competition', sample: 'Premier League' },
+                              ]}
+                              mergedParts={t.mergedParts ?? []}
+                              mergedPrefix={t.mergedPrefix ?? ''}
+                              mergedSeparator={t.mergedSeparator ?? ' '}
+                              onChange={patch => updateResultTarget(idx, patch as Partial<ResultVmixTarget>)}
+                              inputKey={effectiveInputKey}
+                              allInputs={allInputs}
+                              dragKey={`${widget.id}_result_${t.id}`}
+                              indexed
+                            />
+
+                            <Field label="Auto-sync on change">
+                              <input type="checkbox" checked={t.autoSync ?? false} onChange={e => updateResultTarget(idx, { autoSync: e.target.checked })} />
+                            </Field>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+              <button className="btn btn--ghost btn--small" onClick={() => setResultTargets([...resultTargets, { id: crypto.randomUUID(), mode: 'standalone', inputKey: '' }])}>+ Add vMix Target</button>
+            </CollapsibleSection>
+          </>
+        );
+      }
 
       case 'match-schedule': {
         const filterTournament = tournaments.find(t => t.id === (cfg.filterTournamentId || pageTournamentId));
         const filterVenues: string[] = filterTournament?.venues ?? [];
         const filterCategories: string[] = filterTournament?.categories ?? [];
         const filterGroups: string[] = (filterTournament?.groups ?? []).map((g: any) => typeof g === 'string' ? g : g.name);
+
+        // Two independent vMix sync targets — "Full Schedule" pushes every
+        // currently-filtered fixture, "Next Fixture(s)" pushes just the next
+        // N not-yet-sent ones (N configurable, see the count field below).
+        // Each target gets its own set of optional field prefixes (blank =
+        // don't push that field), same auto-prefix-from-picked-field trick
+        // as the Player List widget's vMix Name Sync section.
+        type FixtureVmixTarget = {
+          id: string; inputKey: string; inputTitle?: string;
+          teamAPrefix?: string; teamBPrefix?: string;
+          fullTeamAPrefix?: string; fullTeamBPrefix?: string;
+          datePrefix?: string;
+          timePrefix?: string; roundPrefix?: string; venuePrefix?: string;
+          groupPrefix?: string;
+          matchIdPrefix?: string;
+          logoAPrefix?: string; logoBPrefix?: string;
+          autoSync?: boolean;
+          /** Combines any of the fields above into ONE string on a single
+           *  field instead of separate ones — order is whatever the operator
+           *  dragged mergedParts into. Logos aren't mergeable text. */
+          mergedPrefix?: string;
+          mergedParts?: FixturePart[];
+          mergedSeparator?: string;
+        };
+        const renderFixtureVmixSection = (configKey: 'scheduleVmixInputs' | 'nextVmixInputs', label: string, extra?: React.ReactNode) => {
+          const targets: FixtureVmixTarget[] = cfg[configKey] ?? [];
+          const setTargets = (next: FixtureVmixTarget[]) => up({ [configKey]: next });
+          const updateTarget = (idx: number, patch: Partial<FixtureVmixTarget>) => setTargets(targets.map((t, i) => i === idx ? { ...t, ...patch } : t));
+          const prefixField = (target: FixtureVmixTarget, idx: number, key: keyof FixtureVmixTarget, fieldLabel: string, placeholder: string, suffix: 'Text' | 'Source' = 'Text') => (
+            <Field label={fieldLabel}>
+              {renderFieldPicker(
+                target.inputKey,
+                target[key] ? `${target[key]}1.${suffix}` : '',
+                v => updateTarget(idx, { [key]: v.replace(new RegExp(`\\.${suffix}$`, 'i'), '').replace(/\d+$/, '') } as Partial<FixtureVmixTarget>),
+                placeholder,
+                suffix === 'Source' ? (n: string) => n.toLowerCase().endsWith('.source') : undefined,
+              )}
+            </Field>
+          );
+          return (
+            <CollapsibleSection label={label}>
+              {extra}
+              {targets.map((t, idx) => {
+                const collapseKey = `${configKey}_${t.id}`;
+                const isCollapsed = vilCollapsed[collapseKey] ?? false;
+                return (
+                  <div key={t.id} className="vil-cfg-block">
+                    <div className="vil-cfg-header">
+                      <button className="btn btn--ghost btn--small tf-collapse-btn"
+                        onClick={() => setVilCollapsed(p => ({ ...p, [collapseKey]: !p[collapseKey] }))}
+                        title={isCollapsed ? 'Expand' : 'Collapse'}>
+                        {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                      </button>
+                      <span className="vil-cfg-label">vMix Input {idx + 1}</span>
+                      {targets.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setTargets(targets.filter((_, i) => i !== idx))}>×</button>}
+                    </div>
+                    {!isCollapsed && renderInputPicker('vMix Input', t.inputKey, t.inputTitle,
+                      (key, title) => updateTarget(idx, { inputKey: key, inputTitle: title }),
+                    )}
+                    {t.inputKey && (
+                      <>
+                        {prefixField(t, idx, 'teamAPrefix', 'Team A prefix', 'Pick TeamA1.Text → auto-prefix')}
+                        {prefixField(t, idx, 'teamBPrefix', 'Team B prefix', 'Pick TeamB1.Text → auto-prefix')}
+                        {prefixField(t, idx, 'fullTeamAPrefix', 'Full Name A prefix', 'Pick FullA1.Text → auto-prefix')}
+                        {prefixField(t, idx, 'fullTeamBPrefix', 'Full Name B prefix', 'Pick FullB1.Text → auto-prefix')}
+                        {prefixField(t, idx, 'datePrefix', 'Date prefix', 'Pick Date1.Text → auto-prefix')}
+                        {prefixField(t, idx, 'timePrefix', 'Time prefix', 'Pick Time1.Text → auto-prefix')}
+                        {prefixField(t, idx, 'roundPrefix', 'Round prefix', 'Pick Round1.Text → auto-prefix')}
+                        {prefixField(t, idx, 'venuePrefix', 'Venue prefix', 'Pick Venue1.Text → auto-prefix')}
+                        {prefixField(t, idx, 'groupPrefix', 'Group/Stage prefix', 'Pick Group1.Text → auto-prefix')}
+                        {prefixField(t, idx, 'matchIdPrefix', 'Match ID prefix', 'Pick MatchId1.Text → auto-prefix')}
+                        {prefixField(t, idx, 'logoAPrefix', 'Logo A prefix', 'Pick LogoA1.Source → auto-prefix', 'Source')}
+                        {prefixField(t, idx, 'logoBPrefix', 'Logo B prefix', 'Pick LogoB1.Source → auto-prefix', 'Source')}
+
+                        <MergeFieldComposer
+                          parts={FIXTURE_MERGE_PARTS}
+                          mergedParts={t.mergedParts ?? []}
+                          mergedPrefix={t.mergedPrefix ?? ''}
+                          mergedSeparator={t.mergedSeparator ?? ' '}
+                          onChange={patch => updateTarget(idx, patch as Partial<FixtureVmixTarget>)}
+                          inputKey={t.inputKey}
+                          allInputs={allInputs}
+                          dragKey={`${configKey}_${t.id}`}
+                          fieldLabel="Merged field prefix"
+                          indexed
+                        />
+
+                        <Field label="Auto-sync on change">
+                          <input type="checkbox" checked={t.autoSync ?? false} onChange={e => updateTarget(idx, { autoSync: e.target.checked })} />
+                        </Field>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+              <button className="btn btn--ghost btn--small" onClick={() => setTargets([...targets, { id: crypto.randomUUID(), inputKey: '' }])}>+ Add vMix Input</button>
+            </CollapsibleSection>
+          );
+        };
+
         return (
         <>
           <Field label="Title">
@@ -2392,7 +3051,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
           <Field label="Tournament">
             <select className="field-input" value={cfg.filterTournamentId ?? ''}
               onChange={e => up({ filterTournamentId: e.target.value, filterVenue: '', filterCategory: '', filterGroup: '' })}>
-              <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— Follow title bar 🏟 picker —'}</option>
+              <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— Follow title bar picker —'}</option>
               {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
           </Field>
@@ -2419,8 +3078,47 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             </>
           )}
           <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
-            Manage fixtures in 🏆 DB → Schedule. Sent matches grey out here automatically.
-            {!filterTournament && ' Leave Tournament blank to follow the title bar’s 🏟 tournament/venue picker instead.'}
+            Manage fixtures in DB → Schedule. Sent matches grey out here automatically.
+            {!filterTournament && ' Leave Tournament blank to follow the title bar’s tournament/venue picker instead.'}
+          </div>
+
+          {renderFixtureVmixSection('scheduleVmixInputs', 'vMix Full Schedule Sync',
+            <>
+              <Field label="Fixtures per page (0 = no limit)">
+                <input type="number" min={0} max={50} className="field-input" style={{ width: 60 }}
+                  value={cfg.scheduleFixturesPerPage ?? 0}
+                  onChange={e => up({ scheduleFixturesPerPage: Math.max(0, parseInt(e.target.value) || 0) })} />
+              </Field>
+              {(cfg.scheduleFixturesPerPage ?? 0) > 0 && (
+                <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px', lineHeight: 1.4 }}>
+                  With more than one vMix Input below, fixtures split across them in order — Input 1 gets rows 1-{cfg.scheduleFixturesPerPage},
+                  Input 2 gets the next {cfg.scheduleFixturesPerPage}, and so on, each restarting at row 1 as its own "page."
+                </p>
+              )}
+            </>
+          )}
+          {renderFixtureVmixSection('nextVmixInputs', 'vMix Next Fixture(s) Sync',
+            <Field label="How many fixtures">
+              <input type="number" min={1} max={20} className="field-input" style={{ width: 60 }}
+                value={cfg.nextFixtureCount ?? 1}
+                onChange={e => up({ nextFixtureCount: Math.max(1, parseInt(e.target.value) || 1) })} />
+            </Field>
+          )}
+        </>
+      );
+      }
+
+      case 'rundown': {
+        return (
+        <>
+          <Field label="Title">
+            <input className="field-input" value={cfg.title ?? ''} placeholder="Rundown"
+              onChange={e => up({ title: e.target.value })} />
+          </Field>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+            Manage segments in DB → Rundown. A Rundown spans the whole event
+            day, not just this canvas's tournament — every Rundown widget
+            shows the same shared list.
           </div>
         </>
       );
@@ -2451,7 +3149,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             </Field>
           )}
           <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
-            Read-only — manage groups/teams in 🏆 DB → Standings.
+            Read-only — manage groups/teams in DB → Standings.
           </div>
         </>
       );
@@ -2504,7 +3202,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             </Field>
           )}
           <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
-            Read-only — edit bracket arrangement in 🏆 DB → Bracket. A category must be picked once the tournament has any; same for tier on a Cup/Plate/Bowl/Shield tournament.
+            Read-only — edit bracket arrangement in DB → Bracket. A category must be picked once the tournament has any; same for tier on a Cup/Plate/Bowl/Shield tournament.
           </div>
         </>
       );
@@ -2611,22 +3309,61 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldNameA ?? '', v => up({ fieldNameA: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJerseyA ?? '', v => up({ fieldJerseyA: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPositionA ?? '', v => up({ fieldPositionA: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Team Logo Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeamLogoA ?? '', v => up({ fieldTeamLogoA: v }), 'TeamA.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
                   {PLAYER_STAT_FIELD_DEFS.map(f => (
                     <Field key={f.key} label={`${f.label} Field`}>
                       {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}A`] ?? '', v => up({ [`field${f.cap}A`]: v }), 'Title.Text', undefined, allInputs)}
                     </Field>
                   ))}
+                  <MergeFieldComposer
+                    parts={playerMergeParts('John Smith', '9', 'Scrum Half')}
+                    mergedParts={cfg.mergedAParts ?? []}
+                    mergedPrefix={cfg.mergedAPrefix ?? ''}
+                    mergedSeparator={cfg.mergedASeparator ?? ' '}
+                    onChange={patch => up({
+                      ...(patch.mergedParts !== undefined ? { mergedAParts: patch.mergedParts } : {}),
+                      ...(patch.mergedPrefix !== undefined ? { mergedAPrefix: patch.mergedPrefix } : {}),
+                      ...(patch.mergedSeparator !== undefined ? { mergedASeparator: patch.mergedSeparator } : {}),
+                    })}
+                    inputKey={cfg.vmixInputKey}
+                    allInputs={allInputs}
+                    dragKey={`${widget.id}_h2h_a`}
+                    fieldLabel={`${teamAName} merged field`}
+                  />
                   <div className="wgt-cfg-subheading">{teamBName}</div>
                   <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldNameB ?? '', v => up({ fieldNameB: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJerseyB ?? '', v => up({ fieldJerseyB: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPositionB ?? '', v => up({ fieldPositionB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Team Logo Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeamLogoB ?? '', v => up({ fieldTeamLogoB: v }), 'TeamB.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
                   {PLAYER_STAT_FIELD_DEFS.map(f => (
                     <Field key={f.key} label={`${f.label} Field`}>
                       {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}B`] ?? '', v => up({ [`field${f.cap}B`]: v }), 'Title.Text', undefined, allInputs)}
                     </Field>
                   ))}
+                  <MergeFieldComposer
+                    parts={playerMergeParts('Mike Jones', '10', 'Fly Half')}
+                    mergedParts={cfg.mergedBParts ?? []}
+                    mergedPrefix={cfg.mergedBPrefix ?? ''}
+                    mergedSeparator={cfg.mergedBSeparator ?? ' '}
+                    onChange={patch => up({
+                      ...(patch.mergedParts !== undefined ? { mergedBParts: patch.mergedParts } : {}),
+                      ...(patch.mergedPrefix !== undefined ? { mergedBPrefix: patch.mergedPrefix } : {}),
+                      ...(patch.mergedSeparator !== undefined ? { mergedBSeparator: patch.mergedSeparator } : {}),
+                    })}
+                    inputKey={cfg.vmixInputKey}
+                    allInputs={allInputs}
+                    dragKey={`${widget.id}_h2h_b`}
+                    fieldLabel={`${teamBName} merged field`}
+                  />
                 </>
               )}
+            </CollapsibleSection>
+            <CollapsibleSection label="Overlay">
+              <Field label="Overlay Channel">
+                <select className="field-input" value={cfg.overlayChannel ?? 1} onChange={e => up({ overlayChannel: Number(e.target.value) })}>
+                  {[1, 2, 3, 4].map(n => <option key={n} value={n}>Overlay {n}</option>)}
+                </select>
+              </Field>
             </CollapsibleSection>
           </>
         );
@@ -2657,6 +3394,9 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               </Field>
               {cfg.vmixInputKey && (
                 <>
+                  <Field label="Auto-sync on change">
+                    <input type="checkbox" checked={cfg.vmixAutoSync === true} onChange={e => up({ vmixAutoSync: e.target.checked })} />
+                  </Field>
                   <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? '', v => up({ fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? '', v => up({ fieldJersey: v }), 'Title.Text', undefined, allInputs)}</Field>
                   <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? '', v => up({ fieldPosition: v }), 'Title.Text', undefined, allInputs)}</Field>
@@ -2669,6 +3409,160 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                       {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}`] ?? '', v => up({ [`field${f.cap}`]: v }), 'Title.Text', undefined, allInputs)}
                     </Field>
                   ))}
+                  <MergeFieldComposer
+                    parts={[...playerMergeParts('John Smith', '9', 'Scrum Half'), { key: 'team', label: 'Team', sample: 'Chelsea' }]}
+                    mergedParts={cfg.mergedParts ?? []}
+                    mergedPrefix={cfg.mergedPrefix ?? ''}
+                    mergedSeparator={cfg.mergedSeparator ?? ' '}
+                    onChange={patch => up(patch)}
+                    inputKey={cfg.vmixInputKey}
+                    allInputs={allInputs}
+                    dragKey={`${widget.id}_pstat`}
+                  />
+                </>
+              )}
+            </CollapsibleSection>
+            <CollapsibleSection label="Overlay">
+              <Field label="Overlay Channel">
+                <select className="field-input" value={cfg.overlayChannel ?? 1} onChange={e => up({ overlayChannel: Number(e.target.value) })}>
+                  {[1, 2, 3, 4].map(n => <option key={n} value={n}>Overlay {n}</option>)}
+                </select>
+              </Field>
+            </CollapsibleSection>
+          </>
+        );
+      }
+
+      case 'player-highlight': {
+        return (
+          <>
+            <Field label="Linked Scoreboard">
+              <select className="field-input" value={cfg.linkedScoreboardId ?? ''}
+                onChange={e => up({ linkedScoreboardId: e.target.value, playerId: '' })}>
+                <option value="">— select scoreboard —</option>
+                {pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard')).map(w => (
+                  <option key={w.id} value={w.id}>{w.config.teamAName ?? 'Team A'} vs {w.config.teamBName ?? 'Team B'}</option>
+                ))}
+              </select>
+            </Field>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+              Title (MVP, Best Player, etc.), Team (Home/Away) and Player are all picked on the widget itself, not here — frequent live choices, not one-time setup steps.
+            </div>
+            <CollapsibleSection label="vMix Output">
+              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
+                One input, one field per data point — sent whenever the highlighted player or title changes.
+              </p>
+              <Field label="vMix Input">
+                {renderInputPicker('phl_input', cfg.vmixInputKey ?? '', cfg.vmixInputTitle,
+                  (key, title) => up({ vmixInputKey: key, vmixInputTitle: title }), undefined, allInputs)}
+              </Field>
+              {cfg.vmixInputKey && (
+                <>
+                  <Field label="Auto-sync on change">
+                    <input type="checkbox" checked={cfg.vmixAutoSync === true} onChange={e => up({ vmixAutoSync: e.target.checked })} />
+                  </Field>
+                  <Field label="Title Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTitle ?? '', v => up({ fieldTitle: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Name Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldName ?? '', v => up({ fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Jersey Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldJersey ?? '', v => up({ fieldJersey: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Position Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldPosition ?? '', v => up({ fieldPosition: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Team Field">{renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeam ?? '', v => up({ fieldTeam: v }), 'Title.Text', undefined, allInputs)}</Field>
+                  <Field label="Team Logo Field">
+                    {renderFieldPicker(cfg.vmixInputKey, cfg.fieldTeamLogo ?? '', v => up({ fieldTeamLogo: v }), 'TeamLogo.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}
+                  </Field>
+                  {PLAYER_STAT_FIELD_DEFS.map(f => (
+                    <Field key={f.key} label={`${f.label} Field`}>
+                      {renderFieldPicker(cfg.vmixInputKey, cfg[`field${f.cap}`] ?? '', v => up({ [`field${f.cap}`]: v }), 'Title.Text', undefined, allInputs)}
+                    </Field>
+                  ))}
+                  <MergeFieldComposer
+                    parts={[
+                      { key: 'title', label: 'Title', sample: cfg.highlightTitle || 'MVP' },
+                      ...playerMergeParts('John Smith', '9', 'Scrum Half'),
+                      { key: 'team', label: 'Team', sample: 'Chelsea' },
+                    ]}
+                    mergedParts={cfg.mergedParts ?? []}
+                    mergedPrefix={cfg.mergedPrefix ?? ''}
+                    mergedSeparator={cfg.mergedSeparator ?? ' '}
+                    onChange={patch => up(patch)}
+                    inputKey={cfg.vmixInputKey}
+                    allInputs={allInputs}
+                    dragKey={`${widget.id}_phl`}
+                  />
+                </>
+              )}
+            </CollapsibleSection>
+          </>
+        );
+      }
+
+      case 'group-standings': {
+        const prefixField = (key: string, fieldLabel: string, placeholder: string, suffix: 'Text' | 'Source' = 'Text') => (
+          <Field label={fieldLabel}>
+            {renderFieldPicker(
+              cfg.vmixInputKey ?? '',
+              cfg[key] ? `${cfg[key]}1.${suffix}` : '',
+              v => up({ [key]: v.replace(new RegExp(`\\.${suffix}$`, 'i'), '').replace(/\d+$/, '') }),
+              placeholder,
+              suffix === 'Source' ? (n: string) => n.toLowerCase().endsWith('.source') : undefined,
+              allInputs,
+            )}
+          </Field>
+        );
+        return (
+          <>
+            <Field label="Linked Scoreboard">
+              <select className="field-input" value={cfg.linkedScoreboardId ?? ''}
+                onChange={e => up({ linkedScoreboardId: e.target.value })}>
+                <option value="">— select scoreboard —</option>
+                {pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard')).map(w => (
+                  <option key={w.id} value={w.id}>{w.config.teamAName ?? 'Team A'} vs {w.config.teamBName ?? 'Team B'}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Title">
+              <input className="field-input" value={cfg.title ?? ''} placeholder="Standings"
+                onChange={e => up({ title: e.target.value })} />
+            </Field>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
+              Which group shows here follows the linked scoreboard's current teams automatically — no separate group picker needed.
+            </div>
+            <CollapsibleSection label="vMix Output">
+              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
+                One input, one row per team (Rank1.Text, Rank2.Text, ...) — sent whenever the group's standings change.
+              </p>
+              <Field label="vMix Input">
+                {renderInputPicker('gs_input', cfg.vmixInputKey ?? '', cfg.vmixInputTitle,
+                  (key, title) => up({ vmixInputKey: key, vmixInputTitle: title }), undefined, allInputs)}
+              </Field>
+              {cfg.vmixInputKey && (
+                <>
+                  <Field label="Auto-sync on change">
+                    <input type="checkbox" checked={cfg.vmixAutoSync === true} onChange={e => up({ vmixAutoSync: e.target.checked })} />
+                  </Field>
+                  {prefixField('rankPrefix', 'Rank prefix', 'Pick Rank1.Text → auto-prefix')}
+                  {prefixField('teamPrefix', 'Team prefix', 'Pick Team1.Text → auto-prefix')}
+                  {prefixField('shortTeamPrefix', 'Short Name prefix', 'Pick Short1.Text → auto-prefix')}
+                  {prefixField('playedPrefix', 'Played prefix', 'Pick Played1.Text → auto-prefix')}
+                  {prefixField('wonPrefix', 'Won prefix', 'Pick Won1.Text → auto-prefix')}
+                  {prefixField('drawnPrefix', 'Drawn prefix', 'Pick Drawn1.Text → auto-prefix')}
+                  {prefixField('lostPrefix', 'Lost prefix', 'Pick Lost1.Text → auto-prefix')}
+                  {prefixField('pfPrefix', 'Points For prefix', 'Pick PF1.Text → auto-prefix')}
+                  {prefixField('paPrefix', 'Points Against prefix', 'Pick PA1.Text → auto-prefix')}
+                  {prefixField('diffPrefix', 'Diff prefix', 'Pick Diff1.Text → auto-prefix')}
+                  {prefixField('ptsPrefix', 'Points prefix', 'Pick Pts1.Text → auto-prefix')}
+                  {prefixField('logoPrefix', 'Logo prefix', 'Pick Logo1.Source → auto-prefix', 'Source')}
+                  <MergeFieldComposer
+                    parts={GROUP_STANDINGS_MERGE_PARTS}
+                    mergedParts={cfg.mergedParts ?? []}
+                    mergedPrefix={cfg.mergedPrefix ?? ''}
+                    mergedSeparator={cfg.mergedSeparator ?? ' '}
+                    onChange={patch => up(patch)}
+                    inputKey={cfg.vmixInputKey}
+                    allInputs={allInputs}
+                    dragKey={`${widget.id}_gs`}
+                    fieldLabel="Merged field prefix"
+                    indexed
+                  />
                 </>
               )}
             </CollapsibleSection>
@@ -2873,14 +3767,193 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         </>
       );
 
-      case 'player-list': {
+      case 'player-list':
+      case 'player-list-next': {
+        const isNextMatch = widget.type === 'player-list-next';
         const timerWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'timer'));
         const timelineWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'timeline'));
-        const hasPlaytime = Object.keys(cfg.accumulated ?? {}).length > 0 || (cfg.onField ?? []).length > 0;
+        const scoreboardWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard'));
         const effLinkedTournamentId = cfg.linkedTournamentId || pageTournamentId;
         const scopedTeams = effLinkedTournamentId
           ? teamDbTeams.filter(t => t.tournamentId === effLinkedTournamentId)
           : teamDbTeams;
+        const nextMatchTournament = tournaments.find(t => t.id === effLinkedTournamentId);
+        const nextMatchVenues: string[] = nextMatchTournament?.venues ?? [];
+        const nextMatchCategories: string[] = nextMatchTournament?.categories ?? [];
+        const dualLayout = isNextMatch || (!!cfg.linkedScoreboardId && cfg.layout === 'side-by-side');
+
+        // Renders the per-side sections (vMix Team Title / Name Sync / Staff
+        // Names / Session Data) reading & writing every field through keyPrefix
+        // — '' for a single-team widget (byte-identical field names to before
+        // this widget supported more than one team), 'a_'/'b_' for side-by-side
+        // or Next Match so each side's squad/vMix targets stay independent.
+        const renderPlayerPanelConfig = (keyPrefix: string, heading?: string) => {
+          const pk = (f: string) => keyPrefix + f;
+          const pup = (patch: Record<string, any>) => {
+            const prefixed: Record<string, any> = {};
+            for (const key of Object.keys(patch)) prefixed[pk(key)] = patch[key];
+            up(prefixed);
+          };
+          const hasPlaytime = Object.keys(cfg[pk('accumulated')] ?? {}).length > 0 || (cfg[pk('onField')] ?? []).length > 0;
+          const body = (
+            <>
+              <CollapsibleSection label="vMix Team Title">
+                {renderInputPicker('vMix Input', cfg[pk('vmixTeamInputKey')] ?? '', cfg[pk('vmixTeamInputTitle')],
+                  (key, title) => pup({ vmixTeamInputKey: key, vmixTeamInputTitle: title }),
+                )}
+                {cfg[pk('vmixTeamInputKey')] && (
+                  <>
+                    <Field label="Team name field">
+                      {renderFieldPicker(cfg[pk('vmixTeamInputKey')] ?? '', cfg[pk('vmixTeamFieldName')] ?? 'TeamName.Text', v => pup({ vmixTeamFieldName: v }), 'Title.Text')}
+                    </Field>
+                    <Field label="Short name field">
+                      {renderFieldPicker(cfg[pk('vmixTeamInputKey')] ?? '', cfg[pk('vmixTeamFieldShort')] ?? '', v => pup({ vmixTeamFieldShort: v }), 'Title.Text')}
+                    </Field>
+                    <MergeFieldComposer
+                      parts={[
+                        { key: 'name', label: 'Team Name', sample: 'Chelsea' },
+                        { key: 'short', label: 'Short Name', sample: 'CHE' },
+                      ]}
+                      mergedParts={cfg[pk('vmixTeamMergedParts')] ?? []}
+                      mergedPrefix={cfg[pk('vmixTeamMergedPrefix')] ?? ''}
+                      mergedSeparator={cfg[pk('vmixTeamMergedSeparator')] ?? ' '}
+                      onChange={patch => pup({
+                        ...(patch.mergedParts !== undefined ? { vmixTeamMergedParts: patch.mergedParts } : {}),
+                        ...(patch.mergedPrefix !== undefined ? { vmixTeamMergedPrefix: patch.mergedPrefix } : {}),
+                        ...(patch.mergedSeparator !== undefined ? { vmixTeamMergedSeparator: patch.mergedSeparator } : {}),
+                      })}
+                      inputKey={cfg[pk('vmixTeamInputKey')] ?? ''}
+                      allInputs={allInputs}
+                      dragKey={`${widget.id}_${keyPrefix}_teamtitle`}
+                    />
+                    <Field label="Auto-sync on change">
+                      <input type="checkbox" checked={cfg[pk('vmixTeamAutoSync')] ?? false} onChange={e => pup({ vmixTeamAutoSync: e.target.checked })} />
+                    </Field>
+                  </>
+                )}
+              </CollapsibleSection>
+              <CollapsibleSection label="vMix Name Sync">
+              {(() => {
+                type PlInput = { id: string; inputKey: string; inputTitle?: string; vmixNamePrefix: string; vmixJerseyPrefix: string; vmixAutoSync: boolean };
+                const plInputs: PlInput[] = cfg[pk('vmixInputs')]?.length
+                  ? cfg[pk('vmixInputs')]
+                  : cfg[pk('vmixInputKey')]
+                    ? [{ id: 'legacy', inputKey: cfg[pk('vmixInputKey')], vmixNamePrefix: cfg[pk('vmixNamePrefix')] ?? 'Name', vmixJerseyPrefix: cfg[pk('vmixJerseyPrefix')] ?? '', vmixAutoSync: cfg[pk('vmixAutoSync')] ?? false }]
+                    : [];
+                const setPlInputs = (next: PlInput[]) => pup({ vmixInputs: next });
+                const updatePl = (idx: number, patch: Partial<PlInput>) => setPlInputs(plInputs.map((p, i) => i === idx ? { ...p, ...patch } : p));
+                return (
+                  <>
+                    {plInputs.map((inp, idx) => {
+                      const vilKey = pk(inp.id);
+                      const isVilCollapsed = vilCollapsed[vilKey] ?? false;
+                      return (
+                      <div key={inp.id} className="vil-cfg-block">
+                        <div className="vil-cfg-header">
+                          <button className="btn btn--ghost btn--small tf-collapse-btn"
+                            onClick={() => setVilCollapsed(p => ({ ...p, [vilKey]: !p[vilKey] }))}
+                            title={isVilCollapsed ? 'Expand' : 'Collapse'}>
+                            {isVilCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                          </button>
+                          <span className="vil-cfg-label">vMix Input {idx + 1}</span>
+                          {plInputs.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setPlInputs(plInputs.filter((_, i) => i !== idx))}>×</button>}
+                        </div>
+                        {!isVilCollapsed && (<>
+                          {renderInputPicker('vMix Input', inp.inputKey, inp.inputTitle,
+                            (key, title) => updatePl(idx, { inputKey: key, inputTitle: title }),
+                            undefined, allInputs,
+                          )}
+                        </>)}
+                        {inp.inputKey && (
+                          <>
+                            <Field label="Name prefix">
+                              {renderFieldPicker(
+                                inp.inputKey,
+                                inp.vmixNamePrefix ? `${inp.vmixNamePrefix}1.Text` : '',
+                                (v) => updatePl(idx, { vmixNamePrefix: v.replace(/\.Text$/i, '').replace(/\d+$/, '') }),
+                                'Pick Name1.Text → auto-prefix',
+                                undefined, allInputs,
+                              )}
+                            </Field>
+                            <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '-4px 0 4px' }}>
+                              Follows App Settings → Simple Names automatically when that's turned on.
+                            </p>
+                            <Field label="Jersey No prefix">
+                              {renderFieldPicker(
+                                inp.inputKey,
+                                inp.vmixJerseyPrefix ? `${inp.vmixJerseyPrefix}1.Text` : '',
+                                (v) => updatePl(idx, { vmixJerseyPrefix: v.replace(/\.Text$/i, '').replace(/\d+$/, '') }),
+                                'Pick Jersey1.Text → auto-prefix',
+                                undefined, allInputs,
+                              )}
+                            </Field>
+                            <Field label="Auto-sync on edit">
+                              <input type="checkbox" checked={inp.vmixAutoSync} onChange={e => updatePl(idx, { vmixAutoSync: e.target.checked })} />
+                            </Field>
+                          </>
+                        )}
+                      </div>
+                      );
+                    })}
+                    <button className="btn btn--ghost btn--small" onClick={() => setPlInputs([...plInputs, { id: crypto.randomUUID(), inputKey: '', vmixNamePrefix: 'Name', vmixJerseyPrefix: '', vmixAutoSync: false }])}>+ Add vMix Input</button>
+                  </>
+                );
+              })()}
+              </CollapsibleSection>
+              <CollapsibleSection label="vMix Staff Names">
+                <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
+                  Sends Manager (MNG) and Head Coach (HC) names to vMix text fields.
+                </p>
+                <Field label="vMix Input">
+                  {renderInputPicker('vmix_staff_input', cfg[pk('vmixStaffInputKey')] ?? '', cfg[pk('vmixStaffInputTitle')],
+                    (key, title) => pup({ vmixStaffInputKey: key, vmixStaffInputTitle: title }))}
+                </Field>
+                {cfg[pk('vmixStaffInputKey')] && (
+                  <>
+                    <Field label="Manager field">
+                      {renderFieldPicker(cfg[pk('vmixStaffInputKey')], cfg[pk('vmixManagerField')] ?? '', v => pup({ vmixManagerField: v }), 'Title.Text')}
+                    </Field>
+                    <Field label="Head Coach field">
+                      {renderFieldPicker(cfg[pk('vmixStaffInputKey')], cfg[pk('vmixHCField')] ?? '', v => pup({ vmixHCField: v }), 'Title.Text')}
+                    </Field>
+                    <MergeFieldComposer
+                      parts={[
+                        { key: 'manager', label: 'Manager', sample: 'Alex Ferguson' },
+                        { key: 'headCoach', label: 'Head Coach', sample: 'Sam Carter' },
+                      ]}
+                      mergedParts={cfg[pk('vmixStaffMergedParts')] ?? []}
+                      mergedPrefix={cfg[pk('vmixStaffMergedPrefix')] ?? ''}
+                      mergedSeparator={cfg[pk('vmixStaffMergedSeparator')] ?? ' '}
+                      onChange={patch => pup({
+                        ...(patch.mergedParts !== undefined ? { vmixStaffMergedParts: patch.mergedParts } : {}),
+                        ...(patch.mergedPrefix !== undefined ? { vmixStaffMergedPrefix: patch.mergedPrefix } : {}),
+                        ...(patch.mergedSeparator !== undefined ? { vmixStaffMergedSeparator: patch.mergedSeparator } : {}),
+                      })}
+                      inputKey={cfg[pk('vmixStaffInputKey')] ?? ''}
+                      allInputs={allInputs}
+                      dragKey={`${widget.id}_${keyPrefix}_staff`}
+                    />
+                    <Field label="Auto-sync on edit">
+                      <input type="checkbox" checked={cfg[pk('vmixStaffAutoSync')] ?? false} onChange={e => pup({ vmixStaffAutoSync: e.target.checked })} />
+                    </Field>
+                  </>
+                )}
+              </CollapsibleSection>
+              {hasPlaytime && (
+                <CollapsibleSection label="Session Data">
+                  <Field label="Reset playtime">
+                    <button className="btn btn--danger btn--small" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                      onClick={() => { if (confirm('Reset all playtime data?')) pup({ onField: [], entries: {}, accumulated: {} }); }}>
+                      <RotateCcw size={12} strokeWidth={2} /> Clear session
+                    </button>
+                  </Field>
+                </CollapsibleSection>
+              )}
+            </>
+          );
+          return heading ? <CollapsibleSection label={heading}>{body}</CollapsibleSection> : body;
+        };
+
         return (
           <>
             <Field label="Tournament">
@@ -2891,14 +3964,62 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                 ))}
               </select>
             </Field>
-            <Field label="Team">
-              <select className="field-input" value={cfg.linkedTeamId ?? ''} onChange={e => up({ linkedTeamId: e.target.value })}>
-                <option value="">— select team —</option>
-                {scopedTeams.map(t => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
-            </Field>
+
+            {isNextMatch ? (
+              <>
+                <Field label="Venue">
+                  <select className="field-input" value={cfg.filterVenue ?? ''} onChange={e => up({ filterVenue: e.target.value })} disabled={nextMatchVenues.length === 0}>
+                    <option value="">All Venues</option>
+                    {nextMatchVenues.map(v => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </Field>
+                <Field label="Category">
+                  <select className="field-input" value={cfg.filterCategory ?? ''} onChange={e => up({ filterCategory: e.target.value })} disabled={nextMatchCategories.length === 0}>
+                    <option value="">All Categories</option>
+                    {nextMatchCategories.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </Field>
+              </>
+            ) : (
+              <>
+                <Field label="Link Scoreboard">
+                  <select className="field-input" value={cfg.linkedScoreboardId ?? ''} onChange={e => up({ linkedScoreboardId: e.target.value })}>
+                    <option value="">— none (pick team directly) —</option>
+                    {scoreboardWidgets.map(w => (
+                      <option key={w.id} value={w.id}>{w.config.name || `Scoreboard (${w.config.teamAName || 'A'} vs ${w.config.teamBName || 'B'})`}</option>
+                    ))}
+                  </select>
+                </Field>
+                {cfg.linkedScoreboardId ? (
+                  <>
+                    <Field label="Layout">
+                      <select className="field-input" value={cfg.layout ?? 'single'} onChange={e => up({ layout: e.target.value })}>
+                        <option value="single">Follow one side</option>
+                        <option value="side-by-side">Both teams side by side</option>
+                      </select>
+                    </Field>
+                    {(cfg.layout ?? 'single') !== 'side-by-side' && (
+                      <Field label="Team Side">
+                        <select className="field-input" value={cfg.teamSide ?? 'A'} onChange={e => up({ teamSide: e.target.value })}>
+                          <option value="A">Team A</option>
+                          <option value="B">Team B</option>
+                        </select>
+                      </Field>
+                    )}
+                  </>
+                ) : (
+                  <Field label="Team">
+                    <select className="field-input" value={cfg.linkedTeamId ?? ''} onChange={e => up({ linkedTeamId: e.target.value })}>
+                      <option value="">— select team —</option>
+                      {scopedTeams.map(t => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                    </select>
+                  </Field>
+                )}
+              </>
+            )}
+
             <Field label="Player Highlight Widget">
               <select className="field-input" value={cfg.linkedPlayerHighlightId ?? ''} onChange={e => up({ linkedPlayerHighlightId: e.target.value })}>
                 <option value="">— none —</option>
@@ -2919,119 +4040,36 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                 {timelineWidgets.map(w => <option key={w.id} value={w.id}>{w.config.title || 'Timeline'}</option>)}
               </select>
             </Field>
-            <CollapsibleSection label="vMix Team Title">
-              {renderInputPicker('vMix Input', cfg.vmixTeamInputKey ?? '', cfg.vmixTeamInputTitle,
-                (key, title) => up({ vmixTeamInputKey: key, vmixTeamInputTitle: title }),
-              )}
-              {cfg.vmixTeamInputKey && (
-                <>
-                  <Field label="Team name field">
-                    {renderFieldPicker(cfg.vmixTeamInputKey ?? '', cfg.vmixTeamFieldName ?? 'TeamName.Text', v => up({ vmixTeamFieldName: v }), 'Title.Text')}
-                  </Field>
-                  <Field label="Short name field">
-                    {renderFieldPicker(cfg.vmixTeamInputKey ?? '', cfg.vmixTeamFieldShort ?? '', v => up({ vmixTeamFieldShort: v }), 'Title.Text')}
-                  </Field>
-                  <Field label="Auto-sync on change">
-                    <input type="checkbox" checked={cfg.vmixTeamAutoSync ?? false} onChange={e => up({ vmixTeamAutoSync: e.target.checked })} />
-                  </Field>
-                </>
-              )}
-            </CollapsibleSection>
-            <CollapsibleSection label="vMix Name Sync">
-            {(() => {
-              type PlInput = { id: string; inputKey: string; inputTitle?: string; vmixNamePrefix: string; vmixJerseyPrefix: string; vmixAutoSync: boolean };
-              const plInputs: PlInput[] = cfg.vmixInputs?.length
-                ? cfg.vmixInputs
-                : cfg.vmixInputKey
-                  ? [{ id: 'legacy', inputKey: cfg.vmixInputKey, vmixNamePrefix: cfg.vmixNamePrefix ?? 'Name', vmixJerseyPrefix: cfg.vmixJerseyPrefix ?? '', vmixAutoSync: cfg.vmixAutoSync ?? false }]
-                  : [];
-              const setPlInputs = (next: PlInput[]) => up({ vmixInputs: next });
-              const updatePl = (idx: number, patch: Partial<PlInput>) => setPlInputs(plInputs.map((p, i) => i === idx ? { ...p, ...patch } : p));
-              return (
-                <>
-                  {plInputs.map((inp, idx) => {
-                    const isVilCollapsed = vilCollapsed[inp.id] ?? false;
-                    return (
-                    <div key={inp.id} className="vil-cfg-block">
-                      <div className="vil-cfg-header">
-                        <button className="btn btn--ghost btn--small tf-collapse-btn"
-                          onClick={() => setVilCollapsed(p => ({ ...p, [inp.id]: !p[inp.id] }))}
-                          title={isVilCollapsed ? 'Expand' : 'Collapse'}>
-                          {isVilCollapsed ? '▶' : '▼'}
-                        </button>
-                        <span className="vil-cfg-label">vMix Input {idx + 1}</span>
-                        {plInputs.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setPlInputs(plInputs.filter((_, i) => i !== idx))}>×</button>}
-                      </div>
-                      {!isVilCollapsed && (<>
-                        {renderInputPicker('vMix Input', inp.inputKey, inp.inputTitle,
-                          (key, title) => updatePl(idx, { inputKey: key, inputTitle: title }),
-                          undefined, allInputs,
-                        )}
-                      </>)}
-                      {inp.inputKey && (
-                        <>
-                          <Field label="Name prefix">
-                            {renderFieldPicker(
-                              inp.inputKey,
-                              inp.vmixNamePrefix ? `${inp.vmixNamePrefix}1.Text` : '',
-                              (v) => updatePl(idx, { vmixNamePrefix: v.replace(/\.Text$/i, '').replace(/\d+$/, '') }),
-                              'Pick Name1.Text → auto-prefix',
-                              undefined, allInputs,
-                            )}
-                          </Field>
-                          <Field label="Jersey No prefix">
-                            {renderFieldPicker(
-                              inp.inputKey,
-                              inp.vmixJerseyPrefix ? `${inp.vmixJerseyPrefix}1.Text` : '',
-                              (v) => updatePl(idx, { vmixJerseyPrefix: v.replace(/\.Text$/i, '').replace(/\d+$/, '') }),
-                              'Pick Jersey1.Text → auto-prefix',
-                              undefined, allInputs,
-                            )}
-                          </Field>
-                          <Field label="Auto-sync on edit">
-                            <input type="checkbox" checked={inp.vmixAutoSync} onChange={e => updatePl(idx, { vmixAutoSync: e.target.checked })} />
-                          </Field>
-                        </>
-                      )}
-                    </div>
-                    );
-                  })}
-                  <button className="btn btn--ghost btn--small" onClick={() => setPlInputs([...plInputs, { id: crypto.randomUUID(), inputKey: '', vmixNamePrefix: 'Name', vmixJerseyPrefix: '', vmixAutoSync: false }])}>+ Add vMix Input</button>
-                </>
-              );
-            })()}
-            </CollapsibleSection>
-            <CollapsibleSection label="vMix Staff Names">
-              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
-                Sends Manager (MNG) and Head Coach (HC) names to vMix text fields.
-              </p>
-              <Field label="vMix Input">
-                {renderInputPicker('vmix_staff_input', cfg.vmixStaffInputKey ?? '', cfg.vmixStaffInputTitle,
-                  (key, title) => up({ vmixStaffInputKey: key, vmixStaffInputTitle: title }))}
-              </Field>
-              {cfg.vmixStaffInputKey && (
-                <>
-                  <Field label="Manager field">
-                    {renderFieldPicker(cfg.vmixStaffInputKey, cfg.vmixManagerField ?? '', v => up({ vmixManagerField: v }), 'Title.Text')}
-                  </Field>
-                  <Field label="Head Coach field">
-                    {renderFieldPicker(cfg.vmixStaffInputKey, cfg.vmixHCField ?? '', v => up({ vmixHCField: v }), 'Title.Text')}
-                  </Field>
-                  <Field label="Auto-sync on edit">
-                    <input type="checkbox" checked={cfg.vmixStaffAutoSync ?? false} onChange={e => up({ vmixStaffAutoSync: e.target.checked })} />
-                  </Field>
-                </>
-              )}
-            </CollapsibleSection>
+
+            {dualLayout ? (
+              <>
+                {renderPlayerPanelConfig('a_', 'Team A')}
+                {renderPlayerPanelConfig('b_', 'Team B')}
+              </>
+            ) : renderPlayerPanelConfig('')}
+
             <CollapsibleSection label="Display">
             <Field label="Show time played">
               <input type="checkbox" checked={cfg.showTime !== false} onChange={e => up({ showTime: e.target.checked })} />
+            </Field>
+            <Field label="Show sin bin timer">
+              <input type="checkbox" checked={cfg.showSinBinTimer !== false} onChange={e => up({ showSinBinTimer: e.target.checked })} />
             </Field>
             <Field label="Show position">
               <input type="checkbox" checked={cfg.showPosition !== false} onChange={e => up({ showPosition: e.target.checked })} />
             </Field>
             <Field label="Show card buttons">
               <input type="checkbox" checked={cfg.showCards !== false} onChange={e => up({ showCards: e.target.checked })} />
+            </Field>
+            <Field label="Show player stats (T/C/P/DG/YC/RC/APP)">
+              <input type="checkbox" checked={cfg.showStats === true} onChange={e => up({ showStats: e.target.checked })} />
+            </Field>
+            <Field label="Widget size">
+              <select className="field-input" value={cfg.viewSize ?? 'normal'} onChange={e => up({ viewSize: e.target.value })}>
+                <option value="compact">Compact</option>
+                <option value="normal">Normal</option>
+                <option value="large">Large</option>
+              </select>
             </Field>
             <Field label="Sin bin duration (min)">
               <input
@@ -3043,16 +4081,6 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               />
             </Field>
             </CollapsibleSection>
-            {hasPlaytime && (
-              <CollapsibleSection label="Session Data">
-                <Field label="Reset playtime">
-                  <button className="btn btn--danger btn--small"
-                    onClick={() => { if (confirm('Reset all playtime data?')) up({ onField: [], entries: {}, accumulated: {} }); }}>
-                    ↺ Clear session
-                  </button>
-                </Field>
-              </CollapsibleSection>
-            )}
           </>
         );
       }
@@ -3106,7 +4134,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             </Field>
             <CollapsibleSection label="vMix Sub Overlay">
             {(() => {
-              type SubInput = { id: string; inputKey: string; inputTitle?: string; vmixFieldOut: string; vmixFieldIn: string };
+              type SubInput = { id: string; inputKey: string; inputTitle?: string; vmixFieldOut: string; vmixFieldIn: string; vmixFieldLogo?: string; mergedPrefix?: string; mergedParts?: string[]; mergedSeparator?: string };
               const subInputs: SubInput[] = cfg.vmixInputs?.length
                 ? cfg.vmixInputs
                 : cfg.vmixInputKey
@@ -3124,7 +4152,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                         <button className="btn btn--ghost btn--small tf-collapse-btn"
                           onClick={() => setVilCollapsed(p => ({ ...p, [inp.id]: !p[inp.id] }))}
                           title={isVilCollapsed ? 'Expand' : 'Collapse'}>
-                          {isVilCollapsed ? '▶' : '▼'}
+                          {isVilCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                         </button>
                         <span className="vil-cfg-label">vMix Input {idx + 1}</span>
                         {subInputs.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setSubInputs(subInputs.filter((_, i) => i !== idx))}>×</button>}
@@ -3142,6 +4170,22 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                           <Field label="Player On field">
                             {renderFieldPicker(inp.inputKey, inp.vmixFieldIn, v => updateSub(idx, { vmixFieldIn: v }), 'Title.Text', undefined, allInputs)}
                           </Field>
+                          <Field label="Team Logo field">
+                            {renderFieldPicker(inp.inputKey, inp.vmixFieldLogo ?? '', v => updateSub(idx, { vmixFieldLogo: v }), 'Team.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}
+                          </Field>
+                          <MergeFieldComposer
+                            parts={[
+                              { key: 'out', label: 'Player Off', sample: 'John Smith' },
+                              { key: 'in', label: 'Player On', sample: 'Mike Jones' },
+                            ]}
+                            mergedParts={inp.mergedParts ?? []}
+                            mergedPrefix={inp.mergedPrefix ?? ''}
+                            mergedSeparator={inp.mergedSeparator ?? ' '}
+                            onChange={patch => updateSub(idx, patch as Partial<SubInput>)}
+                            inputKey={inp.inputKey}
+                            allInputs={allInputs}
+                            dragKey={`${widget.id}_sub_${inp.id}`}
+                          />
                         </>
                       )}
                       </>)}
@@ -3179,11 +4223,15 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             </Field>
             <CollapsibleSection label="vMix Title Sync">
             {(() => {
-              type CdInput = { id: string; inputKey: string; inputTitle?: string; vmixFieldSinBinA: string; vmixFieldSinBinB: string; vmixFieldRedA: string; vmixFieldRedB: string };
+              type CdInput = {
+                id: string; inputKey: string; inputTitle?: string; vmixFieldSinBinA: string; vmixFieldSinBinB: string; vmixFieldRedA: string; vmixFieldRedB: string;
+                vmixFieldLogoA?: string; vmixFieldLogoB?: string;
+                mergedPrefix?: string; mergedParts?: string[]; mergedSeparator?: string;
+              };
               const cdInputs: CdInput[] = cfg.vmixInputs?.length
                 ? cfg.vmixInputs
                 : cfg.vmixInputKey
-                  ? [{ id: 'legacy', inputKey: cfg.vmixInputKey, vmixFieldSinBinA: cfg.vmixFieldSinBinA ?? '', vmixFieldSinBinB: cfg.vmixFieldSinBinB ?? '', vmixFieldRedA: cfg.vmixFieldRedA ?? '', vmixFieldRedB: cfg.vmixFieldRedB ?? '' }]
+                  ? [{ id: 'legacy', inputKey: cfg.vmixInputKey, vmixFieldSinBinA: cfg.vmixFieldSinBinA ?? '', vmixFieldSinBinB: cfg.vmixFieldSinBinB ?? '', vmixFieldRedA: cfg.vmixFieldRedA ?? '', vmixFieldRedB: cfg.vmixFieldRedB ?? '', vmixFieldLogoA: cfg.vmixFieldLogoA ?? '', vmixFieldLogoB: cfg.vmixFieldLogoB ?? '' }]
                   : [];
               const setCdInputs = (next: CdInput[]) => up({ vmixInputs: next });
               const updateCd = (idx: number, patch: Partial<CdInput>) => setCdInputs(cdInputs.map((c, i) => i === idx ? { ...c, ...patch } : c));
@@ -3200,7 +4248,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                         <button className="btn btn--ghost btn--small tf-collapse-btn"
                           onClick={() => setVilCollapsed(p => ({ ...p, [inp.id]: !p[inp.id] }))}
                           title={isVilCollapsed ? 'Expand' : 'Collapse'}>
-                          {isVilCollapsed ? '▶' : '▼'}
+                          {isVilCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                         </button>
                         <span className="vil-cfg-label">vMix Input {idx + 1}</span>
                         {cdInputs.length > 1 && <button className="btn btn--ghost btn--small" onClick={() => setCdInputs(cdInputs.filter((_, i) => i !== idx))}>×</button>}
@@ -3218,6 +4266,24 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                           <div className="config-section-label" style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>Red card fields</div>
                           <Field label="Team A red card">{renderFieldPicker(inp.inputKey, inp.vmixFieldRedA, v => updateCd(idx, { vmixFieldRedA: v }), 'Title.Text', undefined, allInputs)}</Field>
                           <Field label="Team B red card">{renderFieldPicker(inp.inputKey, inp.vmixFieldRedB, v => updateCd(idx, { vmixFieldRedB: v }), 'Title.Text', undefined, allInputs)}</Field>
+                          <div className="config-section-label" style={{ fontSize: 10, opacity: 0.5, marginTop: 4 }}>Team logos</div>
+                          <Field label="Team A logo">{renderFieldPicker(inp.inputKey, inp.vmixFieldLogoA ?? '', v => updateCd(idx, { vmixFieldLogoA: v }), 'TeamA.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
+                          <Field label="Team B logo">{renderFieldPicker(inp.inputKey, inp.vmixFieldLogoB ?? '', v => updateCd(idx, { vmixFieldLogoB: v }), 'TeamB.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
+                          <MergeFieldComposer
+                            parts={[
+                              { key: 'sinbinA', label: 'Sin Bin A', sample: 'John Smith' },
+                              { key: 'sinbinB', label: 'Sin Bin B', sample: 'Mike Jones' },
+                              { key: 'redA', label: 'Red Card A', sample: 'Dave Lee' },
+                              { key: 'redB', label: 'Red Card B', sample: '' },
+                            ]}
+                            mergedParts={inp.mergedParts ?? []}
+                            mergedPrefix={inp.mergedPrefix ?? ''}
+                            mergedSeparator={inp.mergedSeparator ?? ' '}
+                            onChange={patch => updateCd(idx, patch as Partial<CdInput>)}
+                            inputKey={inp.inputKey}
+                            allInputs={allInputs}
+                            dragKey={`${widget.id}_carddisp_${inp.id}`}
+                          />
                         </>
                       )}
                       </>)}
@@ -3286,8 +4352,152 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                 <Field label="Name field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldName ?? 'Name.Text', v => up({ fieldName: v }), 'Title.Text', undefined, allInputs)}</Field>
                 <Field label="Team name field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldTeam ?? 'Team.Text', v => up({ fieldTeam: v }), 'Title.Text', undefined, allInputs)}</Field>
                 <Field label="Card type field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldCardType ?? 'Card.Text', v => up({ fieldCardType: v }), 'Title.Text', undefined, allInputs)}</Field>
+                <Field label="Team Logo field">{renderFieldPicker(cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed, cfg.fieldTeamLogo ?? '', v => up({ fieldTeamLogo: v }), 'Team.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
+                <MergeFieldComposer
+                  parts={[
+                    { key: 'jersey', label: 'Jersey', sample: '9' },
+                    { key: 'name', label: 'Name', sample: 'John Smith' },
+                    { key: 'team', label: 'Team', sample: 'Chelsea' },
+                    { key: 'cardType', label: 'Card Type', sample: 'Yellow Card' },
+                  ]}
+                  mergedParts={cfg.mergedParts ?? []}
+                  mergedPrefix={cfg.mergedPrefix ?? ''}
+                  mergedSeparator={cfg.mergedSeparator ?? ' '}
+                  onChange={patch => up(patch)}
+                  inputKey={cfg.vmixInputKeyYellow ?? cfg.vmixInputKeyOrange ?? cfg.vmixInputKeyRed ?? ''}
+                  allInputs={allInputs}
+                  dragKey={`${widget.id}_cardlt`}
+                />
               </CollapsibleSection>
             )}
+
+            <CollapsibleSection label="Overlay">
+              <Field label="Overlay Channel">
+                <select className="field-input" value={cfg.overlayChannel ?? 1} onChange={e => up({ overlayChannel: Number(e.target.value) })}>
+                  {[1, 2, 3, 4].map(n => <option key={n} value={n}>Overlay {n}</option>)}
+                </select>
+              </Field>
+            </CollapsibleSection>
+          </>
+        );
+      }
+
+      case 'placement-lower-third': {
+        type PlacementSlot = {
+          id: string; rank: number; label: string; manualTeamName?: string; vmixInputKey: string; fieldLabel: string; fieldTeam: string; fieldLogo?: string;
+          mergedPrefix?: string; mergedParts?: string[]; mergedSeparator?: string;
+        };
+        const plSlots: PlacementSlot[] = cfg.slots?.length
+          ? cfg.slots
+          : [{ id: 'p1', rank: 1, label: 'Champion', manualTeamName: '', vmixInputKey: '', fieldLabel: 'Label.Text', fieldTeam: 'Team.Text' }];
+        const setPlSlots = (next: PlacementSlot[]) => up({ slots: next });
+        const updatePlSlot = (idx: number, patch: Partial<PlacementSlot>) =>
+          setPlSlots(plSlots.map((s, i) => i === idx ? { ...s, ...patch } : s));
+
+        const filterTournament = tournaments.find(t => t.id === (cfg.filterTournamentId || pageTournamentId));
+        const filterCategories: string[] = filterTournament?.categories ?? [];
+
+        return (
+          <>
+            <CollapsibleSection label="Tournament">
+              <Field label="Tournament">
+                <select className="field-input" value={cfg.filterTournamentId ?? ''}
+                  onChange={e => up({ filterTournamentId: e.target.value, filterCategory: '' })}>
+                  <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— pick tournament —'}</option>
+                  {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </Field>
+              {filterCategories.length > 0 && (
+                <Field label="Category">
+                  <select className="field-input" value={cfg.filterCategory ?? ''} onChange={e => up({ filterCategory: e.target.value })}>
+                    <option value="">All Categories</option>
+                    {filterCategories.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </Field>
+              )}
+              <Field label="Auto-send once decided">
+                <label className="tf-autosend-label">
+                  <input type="checkbox" checked={cfg.autoSend ?? false} onChange={e => up({ autoSend: e.target.checked })} />
+                  Send automatically once a placement is decided
+                </label>
+              </Field>
+            </CollapsibleSection>
+
+            <CollapsibleSection label="Placements">
+              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px', lineHeight: 1.4 }}>
+                Rank decides which fixture the team auto-fills from (1st/2nd
+                from the Cup Final, 3rd/4th from the Cup's 3rd Place
+                Playoff, 5th+ from a ranked-placement bracket, or overall
+                standings if there's no bracket). Label is shown as-is —
+                name it however this event calls it (Gold, Champion,
+                Winner…). A Manual Team Override always wins over auto-fill.
+              </p>
+              {plSlots.map((slot, idx) => {
+                const isCollapsed = vilCollapsed[slot.id] ?? false;
+                return (
+                  <div key={slot.id} className="vil-cfg-block">
+                    <div className="vil-cfg-header">
+                      <button className="btn btn--ghost btn--small tf-collapse-btn"
+                        onClick={() => setVilCollapsed(p => ({ ...p, [slot.id]: !p[slot.id] }))}
+                        title={isCollapsed ? 'Expand' : 'Collapse'}>
+                        {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                      </button>
+                      <span className="vil-cfg-label">{slot.rank ? `${slot.rank}. ` : ''}{slot.label || 'Placement'}</span>
+                      {plSlots.length > 1 && (
+                        <button className="btn btn--ghost btn--small"
+                          onClick={() => setPlSlots(plSlots.filter((_, i) => i !== idx))}>×</button>
+                      )}
+                    </div>
+                    {!isCollapsed && (<>
+                      <Field label="Rank">
+                        <input className="field-input" type="number" min={1} value={slot.rank}
+                          onChange={e => updatePlSlot(idx, { rank: Math.max(1, parseInt(e.target.value, 10) || 1) })} />
+                      </Field>
+                      <Field label="Label">
+                        <input className="field-input" value={slot.label} placeholder="e.g. Gold, Champion, Winner"
+                          onChange={e => updatePlSlot(idx, { label: e.target.value })} />
+                      </Field>
+                      <Field label="Manual Team Override">
+                        <input className="field-input" value={slot.manualTeamName ?? ''} placeholder="Leave blank to auto-fill"
+                          onChange={e => updatePlSlot(idx, { manualTeamName: e.target.value })} />
+                      </Field>
+                      {renderInputPicker(
+                        'vMix Title Input',
+                        slot.vmixInputKey,
+                        undefined,
+                        (key) => updatePlSlot(idx, { vmixInputKey: key }),
+                        (i: any) => i.type === 'GT',
+                        allInputs,
+                      )}
+                      {slot.vmixInputKey && (
+                        <>
+                          <Field label="Label Field">{renderFieldPicker(slot.vmixInputKey, slot.fieldLabel, v => updatePlSlot(idx, { fieldLabel: v }), 'Title.Text', undefined, allInputs)}</Field>
+                          <Field label="Team Field">{renderFieldPicker(slot.vmixInputKey, slot.fieldTeam, v => updatePlSlot(idx, { fieldTeam: v }), 'Title.Text', undefined, allInputs)}</Field>
+                          <Field label="Team Logo Field">{renderFieldPicker(slot.vmixInputKey, slot.fieldLogo ?? '', v => updatePlSlot(idx, { fieldLogo: v }), 'Team.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}</Field>
+                          <MergeFieldComposer
+                            parts={[
+                              { key: 'label', label: 'Label', sample: slot.label || 'Champion' },
+                              { key: 'team', label: 'Team', sample: 'Chelsea' },
+                            ]}
+                            mergedParts={slot.mergedParts ?? []}
+                            mergedPrefix={slot.mergedPrefix ?? ''}
+                            mergedSeparator={slot.mergedSeparator ?? ' '}
+                            onChange={patch => updatePlSlot(idx, patch as Partial<PlacementSlot>)}
+                            inputKey={slot.vmixInputKey}
+                            allInputs={allInputs}
+                            dragKey={`${widget.id}_placement_${slot.id}`}
+                          />
+                        </>
+                      )}
+                    </>)}
+                  </div>
+                );
+              })}
+              <button className="btn btn--ghost btn--small" onClick={() => {
+                const nextRank = Math.max(0, ...plSlots.map(s => s.rank)) + 1;
+                setPlSlots([...plSlots, { id: crypto.randomUUID(), rank: nextRank, label: '', manualTeamName: '', vmixInputKey: '', fieldLabel: 'Label.Text', fieldTeam: 'Team.Text' }]);
+              }}>+ Add Placement</button>
+            </CollapsibleSection>
 
             <CollapsibleSection label="Overlay">
               <Field label="Overlay Channel">
@@ -3356,7 +4566,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
           [next[idx], next[swap]] = [next[swap], next[idx]];
           upItems(next);
         };
-        const TYPE_ICONS: Record<string, string> = { command: '▶', input: '⬡', text: 'T' };
+        const TYPE_ICONS: Record<string, React.ReactNode> = { command: <Terminal size={12} />, input: <SquareStack size={12} />, text: 'T' };
         const TYPE_LABELS: Record<string, string> = { command: 'Command', input: 'Input', text: 'Text Field' };
         return (
           <>
@@ -3373,8 +4583,8 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                     <span className="wgt-panel-cfg-type">{TYPE_ICONS[item.type]}</span>
                     <span className="wgt-panel-cfg-preview">{TYPE_LABELS[item.type]}: {preview}</span>
                     <div className="wgt-panel-cfg-actions" onClick={e => e.stopPropagation()}>
-                      <button className="wgt-panel-cfg-move" disabled={idx === 0} onClick={() => moveItem(item.id, -1)}>↑</button>
-                      <button className="wgt-panel-cfg-move" disabled={idx === panelItems.length - 1} onClick={() => moveItem(item.id, 1)}>↓</button>
+                      <button className="wgt-panel-cfg-move" disabled={idx === 0} onClick={() => moveItem(item.id, -1)}><ArrowUp size={11} strokeWidth={2} /></button>
+                      <button className="wgt-panel-cfg-move" disabled={idx === panelItems.length - 1} onClick={() => moveItem(item.id, 1)}><ArrowDown size={11} strokeWidth={2} /></button>
                       <button className="wgt-panel-cfg-del" onClick={() => delItem(item.id)}>×</button>
                     </div>
                   </div>
@@ -3475,7 +4685,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                       className="btn btn--ghost btn--small tf-collapse-btn"
                       onClick={() => setVTCollapsed(prev => ({ ...prev, [grp.id]: !prev[grp.id] }))}
                       title={isCollapsed ? 'Expand' : 'Collapse'}>
-                      {isCollapsed ? '▶' : '▼'}
+                      {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                     </button>
                     <input
                       className="tf-group-name-input"
@@ -3559,13 +4769,19 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         );
       }
 
-      case 'rugby-lineup': {
-        const allPlayerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
+      case 'rugby-lineup':
+      case 'rugby-lineup-next': {
+        const isNextMatchLineup = widget.type === 'rugby-lineup-next';
+        const allPlayerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === (isNextMatchLineup ? 'player-list-next' : 'player-list')));
+        const scoreboardWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard'));
         const effLinkedTournamentId3 = cfg.linkedTournamentId || pageTournamentId;
         const scopedTeams3 = effLinkedTournamentId3
           ? teamDbTeams.filter(t => t.tournamentId === effLinkedTournamentId3)
           : teamDbTeams;
         const linkedTeam = teamDbTeams.find(t => t.id === cfg.linkedTeamId);
+        const nextLineupTournament = tournaments.find(t => t.id === effLinkedTournamentId3);
+        const nextLineupVenues: string[] = nextLineupTournament?.venues ?? [];
+        const nextLineupCategories: string[] = nextLineupTournament?.categories ?? [];
         const loadFromTournament = () => {
           if (!linkedTeam) return;
           const currentPlayers: any[] = cfg.players ?? [];
@@ -3577,6 +4793,62 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         };
         return (
           <>
+            {isNextMatchLineup ? (
+              <>
+                <Field label="Tournament">
+                  <select className="field-input" value={cfg.linkedTournamentId ?? ''}
+                    onChange={e => up({ linkedTournamentId: e.target.value })}>
+                    <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— select tournament —'}</option>
+                    {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Venue">
+                  <select className="field-input" value={cfg.filterVenue ?? ''} onChange={e => up({ filterVenue: e.target.value })} disabled={nextLineupVenues.length === 0}>
+                    <option value="">All Venues</option>
+                    {nextLineupVenues.map(v => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </Field>
+                <Field label="Category">
+                  <select className="field-input" value={cfg.filterCategory ?? ''} onChange={e => up({ filterCategory: e.target.value })} disabled={nextLineupCategories.length === 0}>
+                    <option value="">All Categories</option>
+                    {nextLineupCategories.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </Field>
+                <Field label="Team Side">
+                  <select className="field-input" value={cfg.teamSide ?? 'A'} onChange={e => up({ teamSide: e.target.value })}>
+                    <option value="A">Team A</option>
+                    <option value="B">Team B</option>
+                  </select>
+                </Field>
+                <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '-4px 0 4px' }}>
+                  Team and this side's Player List — Next Match both follow the soonest not-yet-sent fixture automatically (scoped by Tournament/Venue/Category above). Drop a second copy of this widget with Team Side set to B for the other side.
+                </p>
+              </>
+            ) : (
+              <>
+                <Field label="Link Scoreboard">
+                  <select className="field-input" value={cfg.linkedScoreboardId ?? ''} onChange={e => up({ linkedScoreboardId: e.target.value })}>
+                    <option value="">— none (pick team/list directly below) —</option>
+                    {scoreboardWidgets.map(w => (
+                      <option key={w.id} value={w.id}>{w.config.name || `Scoreboard (${w.config.teamAName || 'A'} vs ${w.config.teamBName || 'B'})`}</option>
+                    ))}
+                  </select>
+                </Field>
+                {cfg.linkedScoreboardId && (
+                  <Field label="Team Side">
+                    <select className="field-input" value={cfg.teamSide ?? 'A'} onChange={e => up({ teamSide: e.target.value })}>
+                      <option value="A">Team A</option>
+                      <option value="B">Team B</option>
+                    </select>
+                  </Field>
+                )}
+                <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '-4px 0 4px' }}>
+                  {cfg.linkedScoreboardId
+                    ? 'Team, colors, and this side\'s Player List all follow the scoreboard automatically. The fields below only matter as manual overrides.'
+                    : 'No scoreboard linked — pick a Player List and/or Team directly below.'}
+                </p>
+              </>
+            )}
             <Field label="Player List">
               <select
                 className="field-input"
@@ -3586,40 +4858,58 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   up({
                     linkedPlayerListId: e.target.value || undefined,
                     linkedTournamentId: plw?.config.linkedTournamentId ?? cfg.linkedTournamentId,
-                    linkedTeamId: plw?.config.linkedTeamId ?? cfg.linkedTeamId,
+                    ...(isNextMatchLineup ? {} : { linkedTeamId: plw?.config.linkedTeamId ?? cfg.linkedTeamId }),
                   });
                 }}
               >
-                <option value="">— none (manual names) —</option>
+                <option value="">— auto (follow {isNextMatchLineup ? 'Next Match filters' : 'scoreboard'} / page) —</option>
                 {allPlayerListWidgets.map(w => (
                   <option key={w.id} value={w.id}>{plWidgetLabel(w, teamDbTeams)}</option>
                 ))}
               </select>
             </Field>
-            <Field label="Tournament">
-              <select className="field-input" value={cfg.linkedTournamentId ?? ''}
-                onChange={e => up({ linkedTournamentId: e.target.value })}>
-                <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— select tournament —'}</option>
-                {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-            </Field>
-            <Field label="Team">
-              <select className="field-input" value={cfg.linkedTeamId ?? ''}
-                onChange={e => {
-                  const t = teamDbTeams.find(t2 => t2.id === e.target.value);
-                  up({ linkedTeamId: e.target.value, ...(t ? { teamName: t.name } : {}) });
-                }}>
-                <option value="">— select team —</option>
-                {scopedTeams3.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-            </Field>
-            {linkedTeam && !cfg.linkedPlayerListId && (
-              <Field label="Players">
-                <button className="btn btn--secondary btn--small" onClick={loadFromTournament}>
-                  Load names from {linkedTeam.name}
-                </button>
-              </Field>
+            {!isNextMatchLineup && (
+              <>
+                <Field label="Tournament">
+                  <select className="field-input" value={cfg.linkedTournamentId ?? ''}
+                    onChange={e => up({ linkedTournamentId: e.target.value })}>
+                    <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— select tournament —'}</option>
+                    {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Team">
+                  <select className="field-input" value={cfg.linkedTeamId ?? ''}
+                    onChange={e => {
+                      const t = teamDbTeams.find(t2 => t2.id === e.target.value);
+                      up({ linkedTeamId: e.target.value, ...(t ? { teamName: t.name } : {}) });
+                    }}>
+                    <option value="">— auto (follow scoreboard / Player List) —</option>
+                    {scopedTeams3.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </Field>
+                {linkedTeam && !cfg.linkedPlayerListId && (
+                  <Field label="Players">
+                    <button className="btn btn--secondary btn--small" onClick={loadFromTournament}>
+                      Load names from {linkedTeam.name}
+                    </button>
+                  </Field>
+                )}
+              </>
             )}
+            <Field label="Simple Positions">
+              <input type="checkbox" checked={cfg.simplePositions ?? false} onChange={e => up({ simplePositions: e.target.checked })} />
+            </Field>
+            <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '-4px 0 4px' }}>
+              Shows just "Forward" / "Back" under each player instead of the specific position (Prop, Fly Half, etc).
+            </p>
+            <Field label="Truncate Long Names">
+              <input type="checkbox" checked={cfg.truncateNames ?? false} onChange={e => up({ truncateNames: e.target.checked })} />
+            </Field>
+            <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '-4px 0 4px' }}>
+              {cfg.truncateNames
+                ? 'On: every name pill stays the same size — a long name is cut off with "…" instead.'
+                : 'Off: long names shrink to fit instead of being cut off. Turn on for a simpler, more uniform pitch.'}
+            </p>
           </>
         );
       }
@@ -3639,7 +4929,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         onPointerMove={onPanelDragMove}
         onPointerUp={onPanelDragUp}
       >
-        <span className="config-panel-header-icon">{WIDGET_TYPE_ICONS[widget.type]}</span>
+        <span className="config-panel-header-icon"><WidgetIcon type={widget.type} size={16} strokeWidth={1.75} /></span>
         <input
           key={widget.id}
           className="config-panel-title-input"
@@ -3651,7 +4941,7 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         <div style={{ display: 'flex', gap: 6, marginLeft: 'auto', alignItems: 'center' }}>
           <button className="btn btn--ghost btn--small" title={panelCollapsed ? 'Expand' : 'Collapse'}
             onClick={() => setPanelCollapsed(c => !c)}>
-            {panelCollapsed ? '▶' : '▼'}
+            {panelCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
           </button>
           <button className="btn btn--ghost btn--small" title="Duplicate"
             onClick={() => { duplicateWidget(widget.id); onClose(); }}>⧉</button>
@@ -3662,6 +4952,30 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
       </div>
       {!panelCollapsed && (
         <div className="config-panel-body">
+          <Field label="Widget ID">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                key={widget.id}
+                className="field-input"
+                style={{ fontFamily: 'monospace', fontSize: 11 }}
+                defaultValue={widget.id}
+                spellCheck={false}
+                onBlur={e => commitIdChange(e.target.value.trim())}
+                onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+              />
+              <button
+                type="button"
+                className="btn btn--ghost btn--small"
+                title="Copy widget ID"
+                onClick={() => navigator.clipboard.writeText(widget.id).catch(() => {})}
+              ><Copy size={13} /></button>
+            </div>
+            <p className="app-settings-hint" style={{ margin: '4px 0 0' }}>
+              {idError
+                ? <span style={{ color: 'var(--red)' }}>{idError}</span>
+                : "Used to link this widget from others (linked scoreboard/timer, buttons, Companion). Renaming it updates every other widget that already points here — safe to change any time."}
+            </p>
+          </Field>
           {renderConfig()}
           <CollapsibleSection label="Widget Appearance" defaultOpen={false}>
             <Field label="Theme">

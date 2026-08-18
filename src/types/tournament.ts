@@ -207,6 +207,27 @@ export const SPORT_POSITIONS: Record<SportType, string[]> = {
   custom:      [],
 };
 
+/** Rugby's own position sets by format — Sevens/Tens field far fewer
+ *  specialist roles than the standard Fifteens list above, so a team
+ *  playing a shortened format gets its own, non-Fifteens suggestions
+ *  rather than a long list of positions it doesn't use (see the "Format"
+ *  quick-fill buttons in Tournament Settings, which set Starters to
+ *  7/10/15 — getRosterPositions below keys off that same number). */
+export const RUGBY_SEVENS_POSITIONS = ['Prop','Hooker','Scrum-half','Fly-half','Centre','Wing'];
+export const RUGBY_TENS_POSITIONS = ['Prop','Hooker','Flanker','No.8','Scrum-half','Fly-half','Centre','Wing','Fullback'];
+
+/** Position autocomplete list for a team's roster — same as SPORT_POSITIONS
+ *  for every sport, except rugby (union or league), where a 7 or 10
+ *  Starters count (Sevens/Tens format) swaps in that format's own shorter
+ *  position list instead of the full Fifteens/League one. */
+export function getRosterPositions(sport: SportType, maxOnField: number): string[] {
+  if (sport === 'rugby_union' || sport === 'rugby_league') {
+    if (maxOnField === 7) return RUGBY_SEVENS_POSITIONS;
+    if (maxOnField === 10) return RUGBY_TENS_POSITIONS;
+  }
+  return SPORT_POSITIONS[sport] ?? [];
+}
+
 export const SPORT_MAX_ON_FIELD: Record<SportType, number> = {
   football:    11,
   basketball:  5,

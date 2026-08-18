@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { Link2, Cloud, Key, ChevronLeft } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore';
 
 const API_BASE = 'https://event.gomonetwork.com';
@@ -193,7 +194,7 @@ export function EventPicker({ onPick, defaultName, defaultDateRange }: Props) {
   return (
     <>
       <button ref={anchorRef} className="tm-btn" title="Link this tournament to a shared event from event.gomonetwork.com" onClick={toggle}>
-        🔗 Load Shared Event
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Link2 size={14} /> Load Shared Event</span>
       </button>
       {open && pos && createPortal(
         <div ref={popupRef} className="event-picker-popup" style={{ position: 'fixed', left: pos.left, top: pos.top, zIndex: 10000 }}>
@@ -213,8 +214,12 @@ export function EventPicker({ onPick, defaultName, defaultDateRange }: Props) {
                   </span>
                 </button>
               ))}
-              <button className="event-picker-create-btn" onClick={startCreate}>☁ Push This Tournament as a New Event</button>
-              <button className="event-picker-create-btn" onClick={startKeyEntry}>🔑 Enter Sharing Key (another organisation's event)</button>
+              <button className="event-picker-create-btn" onClick={startCreate}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Cloud size={14} /> Push This Tournament as a New Event</span>
+              </button>
+              <button className="event-picker-create-btn" onClick={startKeyEntry}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Key size={14} /> Enter Sharing Key (another organisation's event)</span>
+              </button>
             </>
           ) : mode === 'key' ? (
             <div className="event-picker-form">
@@ -234,7 +239,7 @@ export function EventPicker({ onPick, defaultName, defaultDateRange }: Props) {
                   </label>
                   {keyError && <div className="event-picker-empty">{keyError}</div>}
                   <div className="event-picker-form-actions">
-                    <button className="tm-btn" onClick={() => setMode('list')} disabled={keyLoading}>← Back</button>
+                    <button className="tm-btn" onClick={() => setMode('list')} disabled={keyLoading}><span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><ChevronLeft size={14} /> Back</span></button>
                     <button className="tm-btn tm-btn--cloud-active" onClick={redeemKey} disabled={!keyInput.trim() || keyLoading}>
                       {keyLoading ? 'Checking…' : 'Find Event'}
                     </button>
@@ -249,7 +254,7 @@ export function EventPicker({ onPick, defaultName, defaultDateRange }: Props) {
                     </span>
                   </div>
                   <div className="event-picker-form-actions">
-                    <button className="tm-btn" onClick={() => { setKeyFound(null); setKeyInput(''); }}>← Back</button>
+                    <button className="tm-btn" onClick={() => { setKeyFound(null); setKeyInput(''); }}><span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><ChevronLeft size={14} /> Back</span></button>
                     <button className="tm-btn tm-btn--cloud-active" onClick={() => { onPick(keyFound, keyInput.trim()); setOpen(false); }}>
                       Link This Event
                     </button>
@@ -294,7 +299,7 @@ export function EventPicker({ onPick, defaultName, defaultDateRange }: Props) {
               </label>
               {saveError && <div className="event-picker-empty">{saveError}</div>}
               <div className="event-picker-form-actions">
-                <button className="tm-btn" onClick={() => setMode('list')} disabled={saving}>← Back</button>
+                <button className="tm-btn" onClick={() => setMode('list')} disabled={saving}><span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><ChevronLeft size={14} /> Back</span></button>
                 <button className="tm-btn tm-btn--cloud-active" onClick={submitCreate} disabled={!canSave || saving}>
                   {saving ? 'Creating…' : 'Create & Link'}
                 </button>

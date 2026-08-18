@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { Square, Trash2, Pin, Image as ImageIcon, X, ChevronDown, ChevronLeft, ChevronRight, LayoutGrid, RotateCcw, Upload } from 'lucide-react';
 import { useTeamDbStore } from '../stores/teamDbStore';
 import { resolveImageUrl, transparentLogoUrl } from '../lib/imageUrl';
 import { ConfirmModal } from './ConfirmModal';
@@ -269,32 +270,36 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
         <div style={{ display: 'flex', gap: 4 }}>
           <button className="btn btn--ghost btn--small" title="Use a blank/transparent image — clears any logo instead of leaving one set"
             onClick={() => { onChange(transparentLogoUrl()); setShowLibrary(false); }} style={{ fontSize: 10, padding: '1px 6px' }}>
-            ⬜ Transparent
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Square size={11} /> Transparent</span>
           </button>
           {showScoped ? (
             <button className="btn btn--ghost btn--small" onClick={() => setBrowseAll(true)} style={{ fontSize: 10, padding: '1px 6px' }}>
-              Browse full library →
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>Browse full library <ChevronRight size={11} /></span>
             </button>
           ) : (
             <>
               {tournamentId && teamLogos.length > 0 && (
                 <button className="btn btn--ghost btn--small" onClick={() => setBrowseAll(false)} style={{ fontSize: 10, padding: '1px 6px' }}>
-                  ← Team logos
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><ChevronLeft size={11} /> Team logos</span>
                 </button>
               )}
               {tournamentId && (
                 <button className="btn btn--ghost btn--small"
                   title="Picking or uploading a logo here tags it to this tournament"
                   onClick={() => setLibraryScope(s => s === 'mine' ? 'all' : 'mine')} style={{ fontSize: 10, padding: '1px 6px' }}>
-                  {libraryScope === 'mine' ? 'Show all →' : '← This tournament'}
+                  {libraryScope === 'mine'
+                    ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>Show all <ChevronRight size={11} /></span>
+                    : <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><ChevronLeft size={11} /> This tournament</span>}
                 </button>
               )}
-              <button className="btn btn--ghost btn--small" onClick={handleUploadClick} style={{ fontSize: 10, padding: '1px 6px' }}>↑ Upload</button>
-              <button className="btn btn--ghost btn--small" onClick={loadImages} style={{ fontSize: 10, padding: '1px 5px' }}>↺</button>
+              <button className="btn btn--ghost btn--small" onClick={handleUploadClick} style={{ fontSize: 10, padding: '1px 6px' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Upload size={11} /> Upload</span>
+              </button>
+              <button className="btn btn--ghost btn--small" onClick={loadImages} style={{ fontSize: 10, padding: '1px 5px' }}><RotateCcw size={11} /></button>
               {isTauriApp && visibleImages.length > 0 && (
                 <button className="btn btn--ghost btn--small" title={tournamentId && libraryScope === 'mine' ? 'Delete every image shown here' : 'Delete every image in the library'}
                   onClick={handleClearLibrary} style={{ fontSize: 10, padding: '1px 6px', color: 'var(--red)' }}>
-                  🗑 Clear
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Trash2 size={11} /> Clear</span>
                 </button>
               )}
             </>
@@ -330,10 +335,10 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
                 setShowLibrary(false);
               }}>
               {isTauriApp && (
-                <button className="logo-library-del" title="Delete this image" onClick={e => handleDeleteImage(e, img)}>×</button>
+                <button className="logo-library-del" title="Delete this image" onClick={e => handleDeleteImage(e, img)}><X size={11} /></button>
               )}
               {tournamentId && img.tournamentId === tournamentId && (
-                <span className="logo-library-tag" title="Tagged to this tournament">📌</span>
+                <span className="logo-library-tag" title="Tagged to this tournament"><Pin size={11} /></span>
               )}
               <img src={resolveImageUrl(img.url)} alt={img.name} className="logo-library-thumb" />
               {isTauriApp ? (
@@ -385,11 +390,11 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
         >
           {thumbContent ?? (value
             ? <img src={resolveImageUrl(value)} alt="logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-            : <span style={{ fontSize: 18, opacity: 0.4 }}>🖼</span>
+            : <span style={{ opacity: 0.4, display: 'inline-flex' }}><ImageIcon size={18} /></span>
           )}
         </div>
         {value && !thumbContent && !disabled && (
-          <button className="tm-team-logo-clear" title="Remove logo" onClick={() => onChange('')}>×</button>
+          <button className="tm-team-logo-clear" title="Remove logo" onClick={() => onChange('')}><X size={11} /></button>
         )}
         <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileChange} />
         {showLibrary && library && createPortal(library, document.body)}
@@ -412,9 +417,9 @@ export function LogoUrlPicker({ value, onChange, placeholder, compact, thumbCont
           onChange={e => onChange(e.target.value)}
           style={{ flex: 1, minWidth: 0 }}
         />
-        <button className="btn btn--ghost btn--small" title="Choose from server library" onClick={toggleLibrary}>⊞</button>
+        <button className="btn btn--ghost btn--small" title="Choose from server library" onClick={toggleLibrary}><LayoutGrid size={14} /></button>
         {value && (
-          <button className="btn btn--ghost btn--small" title="Clear" onClick={() => onChange('')} style={{ color: 'var(--text-muted)' }}>✕</button>
+          <button className="btn btn--ghost btn--small" title="Clear" onClick={() => onChange('')} style={{ color: 'var(--text-muted)' }}><X size={14} /></button>
         )}
       </div>
       <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileChange} />
@@ -469,9 +474,9 @@ export function LogoDbPicker({ value, onChange, quickUrls = [] }: DbPickerProps)
         )}
         <input className="input" type="text" placeholder="Pick from teams or type URL"
           value={value} onChange={e => onChange(e.target.value)} style={{ flex: 1, minWidth: 0 }} />
-        <button className="btn btn--ghost btn--small" title="Pick from team logos" onClick={() => setOpen(v => !v)}>▾</button>
+        <button className="btn btn--ghost btn--small" title="Pick from team logos" onClick={() => setOpen(v => !v)}><ChevronDown size={12} /></button>
         {value && (
-          <button className="btn btn--ghost btn--small" title="Clear" onClick={() => onChange('')} style={{ color: 'var(--text-muted)' }}>✕</button>
+          <button className="btn btn--ghost btn--small" title="Clear" onClick={() => onChange('')} style={{ color: 'var(--text-muted)' }}><X size={14} /></button>
         )}
       </div>
       {open && (

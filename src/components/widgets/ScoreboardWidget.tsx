@@ -1,4 +1,8 @@
 import { useState, useMemo, useEffect, useContext, useRef } from 'react';
+import {
+  Check, X, Flag, AlertTriangle, Tag, ClipboardList, Clock, Target, Save,
+  Trophy, RotateCcw, ArrowUpRight, Zap, Hash,
+} from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
@@ -15,10 +19,16 @@ import { useMatchScheduleStore, type ScheduledMatch } from '../../stores/matchSc
 import { useTournamentStore } from '../../stores/tournamentStore';
 import { SPORT_DEFAULTS } from '../../types/tournament';
 import { computeMatchSignature, buildResultFromConfig, buildLoadMatchPatch, guardScoreboardOverwrite, findDuplicateResult } from '../../utils/scoreboardSnapshot';
+import { useMatchNumbers } from '../../utils/matchNumber';
 import { ConfirmModal } from '../ConfirmModal';
+import { runActions, type ActionItem } from '../../lib/buttonActions';
 import { computeHeadToHead } from '../../lib/headToHead';
 import { computeTeamTournamentStats } from '../../lib/teamTournamentStats';
+import { autoLinkedWidget, autoLinkedWidgetPair } from '../../lib/autoLink';
+import { resolvePlayerListRoster } from '../../lib/playerListSquad';
+import type { CanvasWidget } from '../../types/canvas';
 import { HeadToHeadPanel } from './HeadToHeadPanel';
+import { extractKnockoutStage } from '../TournamentManager';
 import { computeShootoutStatus, shootoutRoundsNeeded, type ShootoutRound } from '../../lib/shootout';
 
 interface Props {
@@ -28,11 +38,56 @@ interface Props {
   h: number;
 }
 
-type Increment = number | { label: string; value: number };
+// actions/manualTrigger* are opt-in, same idea as a Button widget's own
+// press actions — most increments have none and behave exactly as before.
+type Increment = number | {
+  label: string; value: number;
+  /** Runs (same App/vMix action list a Button widget uses) whenever this
+   *  increment is actually scored — after any player picker resolves, not
+   *  on the initial press, so cancelling the picker never fires it. */
+  actions?: ActionItem[];
+  /** Shows a small standalone button next to this increment that fires the
+   *  same actions WITHOUT touching the score — for re-firing a graphic. */
+  manualTrigger?: boolean;
+  /** Confirm before the manual trigger actually fires. Defaults on — a
+   *  manual re-fire during a live broadcast is exactly the kind of
+   *  accidental click worth guarding. */
+  manualTriggerConfirm?: boolean;
+};
 
 function resolveInc(inc: Increment): { label: string; value: number } {
   if (typeof inc === 'number') return { label: `+${inc}`, value: inc };
   return { label: inc.label || `+${inc.value}`, value: inc.value };
+}
+
+// vMix merge composers (see WidgetConfigPanel's 'scoreboard' case,
+// SCORE_MERGE_PARTS_A/B/INFO) — resolves one named piece straight off this
+// widget's own config, same values the individual field pushes below use.
+type ScoreMergePart =
+  | 'shortA' | 'textA' | 'teamA' | 'scoreA'
+  | 'shortB' | 'textB' | 'teamB' | 'scoreB'
+  | 'competition' | 'category' | 'group' | 'round' | 'scheduledTime' | 'matchId';
+
+function resolveScorePart(config: Record<string, any>, part: ScoreMergePart, matchId?: string): string {
+  switch (part) {
+    case 'shortA': return config.teamAShortName ?? '';
+    case 'textA': return config.teamATextField ?? '';
+    case 'teamA': return config.teamAName ?? '';
+    case 'scoreA': return String(config.scoreA ?? 0);
+    case 'shortB': return config.teamBShortName ?? '';
+    case 'textB': return config.teamBTextField ?? '';
+    case 'teamB': return config.teamBName ?? '';
+    case 'scoreB': return String(config.scoreB ?? 0);
+    case 'competition': return config.competition ?? '';
+    case 'category': return config.category ?? '';
+    // A group name is meaningless once the fixture is a knockout match —
+    // falls back to the stage/round text instead, same swap as the Group
+    // Field push and on-widget badge.
+    case 'group': return extractKnockoutStage({ group: config.group, round: config.subtitle }) ? (config.subtitle ?? '') : (config.group ?? '');
+    case 'round': return config.subtitle ?? '';
+    case 'scheduledTime': return config.scheduledTime ?? '';
+    case 'matchId': return matchId ?? '';
+  }
 }
 
 const SCORE_ABBREVS: Record<string, string> = {
@@ -55,15 +110,16 @@ function simpleLabel(label: string): string {
   return SCORE_ABBREVS[base.toLowerCase()] ?? base;
 }
 
-interface Pending { team: 'A' | 'B'; value: number; label: string; }
+interface Pending { team: 'A' | 'B'; value: number; label: string; actions?: ActionItem[]; }
 
 const DEC_AMOUNTS = [7, 5, 3, 1];
 
 interface ScoreButtonsProps {
   team: 'A' | 'B';
   increments: Increment[];
-  onScore: (team: 'A' | 'B', value: number, label: string) => void;
+  onScore: (team: 'A' | 'B', value: number, label: string, inc: Increment) => void;
   onDec: (team: 'A' | 'B', amount: number) => void;
+  onManualTrigger: (team: 'A' | 'B', inc: Increment) => void;
   buttonSize?: number;
   teamColor?: string;
   /** Most recent scoreLog entry for this team, if any — drives the Undo
@@ -72,7 +128,7 @@ interface ScoreButtonsProps {
   onUndo?: () => void;
 }
 
-function ScoreButtons({ team, increments, onScore, onDec, buttonSize = 1, teamColor, lastEntry, onUndo }: ScoreButtonsProps) {
+function ScoreButtons({ team, increments, onScore, onDec, onManualTrigger, buttonSize = 1, teamColor, lastEntry, onUndo }: ScoreButtonsProps) {
   const sz = Math.round(34 * buttonSize);
   const dsz = Math.round(22 * buttonSize);
   return (
@@ -80,21 +136,31 @@ function ScoreButtons({ team, increments, onScore, onDec, buttonSize = 1, teamCo
       {increments.map((inc, i) => {
         const { label, value } = resolveInc(inc);
         const word = simpleLabel(label);
+        const canManualTrigger = typeof inc === 'object' && inc.manualTrigger && (inc.actions?.length ?? 0) > 0;
         return (
-          <button
-            key={i}
-            className="wgt-score-inc"
-            style={{
-              fontSize: sz * 0.38,
-              height: sz,
-              ...(teamColor ? { background: teamColor, boxShadow: `0 3px 10px ${teamColor}55` } : {}),
-            }}
-            onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); onScore(team, value, label); }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <span className="wgt-score-inc-circle">{value}</span>
-            <span className="wgt-score-inc-lbl">{word}</span>
-          </button>
+          <div key={i} className="wgt-score-inc-group">
+            <button
+              className="wgt-score-inc"
+              style={{
+                fontSize: sz * 0.38,
+                height: sz,
+                ...(teamColor ? { background: teamColor, boxShadow: `0 3px 10px ${teamColor}55` } : {}),
+              }}
+              onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); onScore(team, value, label, inc); }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <span className="wgt-score-inc-circle">{value}</span>
+              <span className="wgt-score-inc-lbl">{word}</span>
+            </button>
+            {canManualTrigger && (
+              <button
+                className="wgt-score-inc-trigger"
+                title={`Fire "${label}" trigger without scoring`}
+                onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); onManualTrigger(team, inc); }}
+                onClick={(e) => e.stopPropagation()}
+              ><Zap size={dsz * 0.55} strokeWidth={2} /></button>
+            )}
+          </div>
         );
       })}
       <div className="wgt-score-dec-group">
@@ -113,7 +179,7 @@ function ScoreButtons({ team, increments, onScore, onDec, buttonSize = 1, teamCo
             title={`Undo: ${lastEntry.action} (${lastEntry.points >= 0 ? '+' : ''}${lastEntry.points})`}
             onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); onUndo(); }}
             onClick={(e) => e.stopPropagation()}
-          >↺ Undo</button>
+          ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><RotateCcw size={10} strokeWidth={2} /> Undo</span></button>
         )}
       </div>
     </div>
@@ -137,9 +203,13 @@ function WalkoverBar({ matchType, winnerName, done, scoreA, scoreB, onOpen }: {
   return (
     <div className={`wgt-score-walkover-bar${done ? ' wgt-score-walkover-bar--done' : ''}`}>
       <span className="wgt-score-walkover-bar-label">
-        {done
-          ? `✓ ${matchType === 'bye' ? 'Bye' : 'Walkover'} confirmed — ${winnerName} wins ${scoreA ?? 0}-${scoreB ?? 0}`
-          : matchType === 'bye' ? `🏳 Bye — ${winnerName} advances` : `⚠ Walkover — ${winnerName} wins`}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          {done
+            ? <><Check size={12} strokeWidth={2} /> {matchType === 'bye' ? 'Bye' : 'Walkover'} confirmed — {winnerName} wins {scoreA ?? 0}-{scoreB ?? 0}</>
+            : matchType === 'bye'
+              ? <><Flag size={12} strokeWidth={2} /> Bye — {winnerName} advances</>
+              : <><AlertTriangle size={12} strokeWidth={2} /> Walkover — {winnerName} wins</>}
+        </span>
       </span>
       <button
         className="wgt-score-walkover-bar-btn"
@@ -218,17 +288,33 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const isLinked = !!sourceWidget;
   const dc: Record<string, any> = sourceWidget?.config ?? config;
 
-  // A canvas is normally dedicated to one tournament — falls back to that
-  // instead of requiring "which tournament" to be picked on every widget.
-  const pageTournamentId = pages.find(p => p.widgets.some(w => w.id === widgetId))?.tournamentId;
+  // Live match ID/number (e.g. "MB1") — the same code the Schedule/Results
+  // widgets show, resolved from the linked fixture's own id rather than
+  // stored as a static snapshot, so it stays correct if numbering settings
+  // change later.
+  const matchNumbers = useMatchNumbers();
+  const matchId: string = dc.linkedScheduleMatchId ? (matchNumbers.get(dc.linkedScheduleMatchId) ?? '') : '';
+
+  // The "Group" slot shows the pool group while a team's still in group
+  // stage, but a group name is meaningless once the fixture is a knockout
+  // match — swaps to the stage/round text instead (e.g. "Group A" -> "Semifinal 1 Cup").
+  const isKnockoutMatch = !!extractKnockoutStage({ group: dc.group, round: dc.subtitle });
+  const groupOrStage: string = isKnockoutMatch ? (dc.subtitle ?? '') : (dc.group ?? '');
+
+  // A canvas is normally dedicated to one tournament (+ venue) — falls back
+  // to that instead of requiring "which tournament" to be picked on every
+  // widget.
+  const owningPage = pages.find(p => p.widgets.some(w => w.id === widgetId));
+  const pageTournamentId = owningPage?.tournamentId;
+  const pageVenue = owningPage?.venue;
   const effTournamentId: string | undefined = dc.linkedTournamentId || pageTournamentId;
 
   // Live status pill reflects the linked timer's actual state (reusing the
   // same linkedTimerWidgetId already used for score-log timestamps) instead
-  // of always showing a static "LIVE".
-  const linkedTimer = dc.linkedTimerWidgetId
-    ? allWidgets.find(w => w.id === dc.linkedTimerWidgetId && w.type === 'timer')
-    : null;
+  // of always showing a static "LIVE". Falls back to the sole Timer widget
+  // on this page when nothing's been explicitly linked — an explicit pick
+  // always wins.
+  const linkedTimer = autoLinkedWidget(pages, widgetId, dc.linkedTimerWidgetId, 'timer');
   const tCfg = linkedTimer?.config;
   const liveStatus = !tCfg
     ? { label: 'LIVE', color: '#e74c3c', pulse: true }
@@ -256,10 +342,13 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const increments: Increment[] = config.increments ?? [1, 2, 5, 10];
   const [pending, setPending] = useState<Pending | null>(null);
   const [pendingDec, setPendingDec] = useState<{ team: 'A' | 'B'; value: number } | null>(null);
+  // Manual trigger — fires an increment's own actions without touching the
+  // score at all. Confirmed first unless the increment opts out.
+  const [pendingManualTrigger, setPendingManualTrigger] = useState<{ team: 'A' | 'B'; label: string; actions: ActionItem[] } | null>(null);
 
   // Send short name + text field to vMix when values change
   useEffect(() => {
-    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
+    const targets: any[] = [...(config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : []), ...(config.extraTeamTargets ?? [])];
     for (const t of targets) {
       if (!t.inputKey) continue;
       const c = client;
@@ -271,7 +360,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   }, [config.teamAShortName, config.teamBShortName, vmixSyncVersion]);
 
   useEffect(() => {
-    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
+    const targets: any[] = [...(config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : []), ...(config.extraTextTargets ?? [])];
     for (const t of targets) {
       if (!t.inputKey) continue;
       const c = client;
@@ -283,7 +372,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   }, [config.teamATextField, config.teamBTextField, vmixSyncVersion]);
 
   useEffect(() => {
-    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
+    const targets: any[] = [...(config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : []), ...(config.extraTeamTargets ?? [])];
     for (const t of targets) {
       if (!t.inputKey) continue;
       const c = client;
@@ -295,7 +384,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   }, [config.teamAName, config.teamBName, vmixSyncVersion]);
 
   useEffect(() => {
-    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
+    const targets: any[] = [...(config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : []), ...(config.extraLogoTargets ?? [])];
     for (const t of targets) {
       if (!t.inputKey) continue;
       const c = client;
@@ -307,27 +396,28 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   }, [config.teamALogo, config.teamBLogo, vmixSyncVersion]);
 
   useEffect(() => {
-    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
+    const targets: any[] = [...(config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : []), ...(config.extraMatchDetailsTargets ?? [])];
     for (const t of targets) {
       if (!t.inputKey) continue;
       const c = client;
       if (!c) continue;
       if (t.fieldCompetition && config.competition != null) c.setTextField(t.inputKey, t.fieldCompetition, config.competition);
       if (t.fieldCategory && config.category != null) c.setTextField(t.inputKey, t.fieldCategory, config.category);
-      if (t.fieldGroup && config.group != null) c.setTextField(t.inputKey, t.fieldGroup, config.group);
+      if (t.fieldGroup) c.setTextField(t.inputKey, t.fieldGroup, groupOrStage);
       // subtitle already reads "<Round> <Tier>" (e.g. "Semifinal 1 Cup") for a
       // tiered-knockout fixture — see the schedule generator's own round
       // labeling — so this one field is the tier+round merge, no separate
       // tier field/concatenation needed here.
       if (t.fieldRound && config.subtitle != null) c.setTextField(t.inputKey, t.fieldRound, config.subtitle);
       if (t.fieldScheduledTime && config.scheduledTime != null) c.setTextField(t.inputKey, t.fieldScheduledTime, config.scheduledTime);
+      if (t.fieldMatchId && matchId) c.setTextField(t.inputKey, t.fieldMatchId, matchId);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.competition, config.category, config.group, config.subtitle, config.scheduledTime, vmixSyncVersion]);
+  }, [config.competition, config.category, config.group, config.subtitle, config.scheduledTime, matchId, groupOrStage, vmixSyncVersion]);
 
   useEffect(() => {
     if (isLinked) return;
-    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
+    const targets: any[] = [...(config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : []), ...(config.extraScoreTargets ?? [])];
     for (const t of targets) {
       if (!t.inputKey) continue;
       const c = client;
@@ -337,6 +427,36 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config.scoreA, config.scoreB, vmixSyncVersion]);
+
+  // Merged fields (Team A / Team B / Match Info) — separate from the
+  // per-field pushes above since each merge can draw on values from
+  // several of those (e.g. Team A's merge wants short name + score
+  // together), and it's a lot simpler as its own effect than trying to
+  // fold into all four of the source effects at once.
+  useEffect(() => {
+    if (isLinked) return;
+    const targets: any[] = config.vmixInputs?.length ? config.vmixInputs : config.vmixInputKey ? [{ ...config, inputKey: config.vmixInputKey }] : [];
+    for (const t of targets) {
+      if (!t.inputKey) continue;
+      const c = client;
+      if (!c) continue;
+      if (t.mergedAPrefix && t.mergedAParts?.length) {
+        c.setTextField(t.inputKey, t.mergedAPrefix, t.mergedAParts.map((p: ScoreMergePart) => resolveScorePart(config, p, matchId)).join(t.mergedASeparator ?? ' '));
+      }
+      if (t.mergedBPrefix && t.mergedBParts?.length) {
+        c.setTextField(t.inputKey, t.mergedBPrefix, t.mergedBParts.map((p: ScoreMergePart) => resolveScorePart(config, p, matchId)).join(t.mergedBSeparator ?? ' '));
+      }
+      if (t.mergedInfoPrefix && t.mergedInfoParts?.length) {
+        c.setTextField(t.inputKey, t.mergedInfoPrefix, t.mergedInfoParts.map((p: ScoreMergePart) => resolveScorePart(config, p, matchId)).join(t.mergedInfoSeparator ?? ' '));
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    config.teamAShortName, config.teamATextField, config.teamAName, config.scoreA,
+    config.teamBShortName, config.teamBTextField, config.teamBName, config.scoreB,
+    config.competition, config.category, config.group, config.subtitle, config.scheduledTime,
+    matchId, vmixSyncVersion,
+  ]);
 
   const pointCounts = useMemo(() => {
     const log: any[] = dc.scoreLog ?? [];
@@ -360,29 +480,35 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dc.scoreLog, dc.increments]);
 
-  function resolveSquad(linkedId: string) {
-    const plw = allWidgets.find(w => w.id === linkedId);
-    if (!plw) return [];
-    const plCfg = plw.config;
-    const team = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
+  // Handles a single-team Player List widget (one instance per side) and a
+  // side-by-side one (one instance covering both sides at once) the same
+  // way — see playerListSquad.ts.
+  function resolveSquad(plw: CanvasWidget | undefined, side: 'A' | 'B') {
+    const { team, starters, subs } = resolvePlayerListRoster(plw, side, teamDbTeams);
     const players = team?.players ?? [];
-    const assigned = new Set(
-      [...(plCfg.starters ?? []), ...(plCfg.subs ?? [])].filter(Boolean) as string[]
-    );
+    const assigned = new Set([...starters, ...subs].filter(Boolean));
     return players
       .filter(p => assigned.has(p.id))
       .sort((a, b) => (parseInt(a.jerseyNo) || 999) - (parseInt(b.jerseyNo) || 999));
   }
 
+  // Falls back to the two Player List widgets on this page (assigned by
+  // their own teamSide A/B, or left-to-right position) when neither side's
+  // been explicitly linked in settings — an explicit pick always wins. A
+  // lone side-by-side Player List widget covers both sides by itself.
+  const { a: playerListA, b: playerListB } = useMemo(
+    () => autoLinkedWidgetPair(pages, widgetId, config.linkedPlayerListA, config.linkedPlayerListB, 'player-list'),
+    [pages, widgetId, config.linkedPlayerListA, config.linkedPlayerListB]
+  );
   const squadA = useMemo(
-    () => resolveSquad(config.linkedPlayerListA ?? ''),
+    () => resolveSquad(playerListA, 'A'),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [config.linkedPlayerListA, allWidgets, teamDbTeams]
+    [playerListA, teamDbTeams]
   );
   const squadB = useMemo(
-    () => resolveSquad(config.linkedPlayerListB ?? ''),
+    () => resolveSquad(playerListB, 'B'),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [config.linkedPlayerListB, allWidgets, teamDbTeams]
+    [playerListB, teamDbTeams]
   );
 
   const teamAColor = dc.teamAColor ?? '#e74c3c';
@@ -413,7 +539,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const [savedFlash, setSavedFlash] = useState(false);
   const [duplicateResultId, setDuplicateResultId] = useState<string | null>(null);
   const commitSaveResult = (existingId?: string) => {
-    const patch = buildResultFromConfig({ ...dc, linkedTournamentId: effTournamentId });
+    const patch = buildResultFromConfig({ ...dc, linkedTournamentId: effTournamentId }, tCfg);
     if (existingId) updateResult(existingId, patch);
     else addResult(patch);
     updateWidgetConfig(widgetId, { lastSavedSignature: computeMatchSignature(dc) });
@@ -471,19 +597,24 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   // Guards against silently losing the outgoing match: auto-saves it if it
   // was never saved, or confirms before overwriting if it already was.
   const loadScheduledMatch = (m: ScheduledMatch) => {
-    if (!guardScoreboardOverwrite({ ...dc, linkedTournamentId: effTournamentId }, addResult)) return;
+    if (!guardScoreboardOverwrite({ ...dc, linkedTournamentId: effTournamentId }, addResult, tCfg)) return;
     updateWidgetConfig(widgetId, buildLoadMatchPatch(m));
     // A new match starting means the previous one's clock shouldn't carry over.
-    if (dc.linkedTimerWidgetId) resetWidgetTimer(dc.linkedTimerWidgetId);
+    if (linkedTimer) resetWidgetTimer(linkedTimer.id);
     markSent(m.id);
   };
 
-  const handleScore = (team: 'A' | 'B', value: number, label: string) => {
+  const handleScore = (team: 'A' | 'B', value: number, label: string, inc: Increment) => {
+    // Runs only once the score is actually committed (below, and in
+    // confirmWithPlayer) — never on the initial press, so cancelling the
+    // player picker never fires it for a score that didn't happen.
+    const actions = typeof inc === 'object' ? inc.actions : undefined;
     const squad = team === 'A' ? squadA : squadB;
     if (squad.length > 0 && value > 0) {
-      setPending({ team, value, label });
+      setPending({ team, value, label, actions });
     } else {
       scoreWidgetAction(widgetId, team, value, label);
+      if (actions?.length) runActions(actions);
     }
   };
 
@@ -501,7 +632,18 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
   const confirmWithPlayer = (playerName: string, jerseyNo?: string) => {
     if (!pending) return;
     scoreWidgetAction(widgetId, pending.team, pending.value, pending.label, playerName, jerseyNo);
+    if (pending.actions?.length) runActions(pending.actions);
     setPending(null);
+  };
+
+  const handleManualTrigger = (team: 'A' | 'B', inc: Increment) => {
+    if (typeof inc !== 'object' || !inc.actions?.length) return;
+    const { label } = resolveInc(inc);
+    if (inc.manualTriggerConfirm ?? true) {
+      setPendingManualTrigger({ team, label, actions: inc.actions });
+    } else {
+      runActions(inc.actions);
+    }
   };
 
   // scoreLog is stored most-recent-first, so each team's own Undo button
@@ -556,7 +698,9 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
 
       {/* ── Linked badge ─────────────────────────────────────────── */}
       {isLinked && (
-        <div className="wgt-score-linked-badge" title={`Linked to: ${sourceWidget?.label ?? sourceWidget?.id}`}>↗ {sourceWidget?.label ?? 'Linked'}</div>
+        <div className="wgt-score-linked-badge" title={`Linked to: ${sourceWidget?.label ?? sourceWidget?.id}`}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><ArrowUpRight size={10} strokeWidth={2} /> {sourceWidget?.label ?? 'Linked'}</span>
+        </div>
       )}
 
       {/* ── Quick scorer picker ──────────────────────────────────── */}
@@ -566,7 +710,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
             <span className="wgt-score-picker-dot" style={{ background: pendingTeamColor }} />
             <span className="wgt-score-picker-team">{pendingTeamName}</span>
             <span className="wgt-score-picker-type">{pending.label}</span>
-            <button className="wgt-score-picker-close" onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setPending(null); }}>✕</button>
+            <button className="wgt-score-picker-close" onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setPending(null); }}><X size={12} strokeWidth={2} /></button>
           </div>
           <div className="wgt-score-picker-list">
             {pendingSquad.map(p => (
@@ -582,21 +726,15 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
         </div>
       )}
 
-      {/* ── Header: LIVE pill + competition + category/group/time ─── */}
+      {/* ── Header row 1: LIVE pill + competition + action buttons ── */}
       <div className="wgt-score-top">
         <div className="wgt-score-live-pill">
           <span className="wgt-score-live-dot" style={{ background: liveStatus.color, animation: liveStatus.pulse ? undefined : 'none' }} />
           {liveStatus.label}
         </div>
-        {isLinked ? (
-          <>
-            {dc.competition && <span className="wgt-score-comp-name">{dc.competition}</span>}
-            {dc.category && <span className="wgt-score-meta-badge">🏷 {dc.category}</span>}
-            {dc.group && <span className="wgt-score-meta-badge">📋 {dc.group}</span>}
-            {dc.scheduledTime && <span className="wgt-score-meta-badge">🕐 {dc.scheduledTime}</span>}
-          </>
-        ) : (
-          <>
+        {isLinked
+          ? (dc.competition && <span className="wgt-score-comp-name">{dc.competition}</span>)
+          : (
             <input
               className="wgt-score-comp-name"
               value={config.competition ?? ''}
@@ -604,6 +742,47 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
               onChange={e => updateWidgetConfig(widgetId, { competition: e.target.value })}
               onClick={e => e.stopPropagation()}
             />
+          )
+        }
+        {!isLinked && (
+          <div style={{ display: 'flex', gap: 4, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
+            <MatchSchedulePicker onPick={loadScheduledMatch} tournamentId={effTournamentId} venue={pageVenue} />
+            {dc.enableShootout && (
+              <button
+                className={`wgt-score-shootout-btn${dc.shootoutOpen ? ' wgt-score-shootout-btn--active' : ''}`}
+                title="Penalty Shootout / Place-Kick Competition"
+                onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); updateWidgetConfig(widgetId, { shootoutOpen: !dc.shootoutOpen }); }}
+                onClick={e => e.stopPropagation()}
+              ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Target size={10} strokeWidth={2} /> Shootout</span></button>
+            )}
+            <button
+              className={`wgt-score-save-btn${savedFlash ? ' wgt-score-save-btn--flash' : ''}`}
+              title="Save this result to Latest Results"
+              onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); saveResult(); }}
+              onClick={e => e.stopPropagation()}
+            ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>{savedFlash ? <><Check size={10} strokeWidth={2} /> Saved</> : <><Save size={10} strokeWidth={2} /> Save Result</>}</span></button>
+            <button
+              className="wgt-score-reset-teams-btn"
+              title="Clear both teams' name and logo, back to a blank matchup"
+              onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); resetWidgetTeams(widgetId); }}
+              onClick={e => e.stopPropagation()}
+            ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><RotateCcw size={10} strokeWidth={2} /> Reset Teams</span></button>
+          </div>
+        )}
+      </div>
+
+      {/* ── Header row 2: category/group/time/match id — its own line so
+          row 1 (competition name + action buttons) never gets cramped ── */}
+      <div className="wgt-score-meta-row">
+        {isLinked ? (
+          <>
+            {dc.category && <span className="wgt-score-meta-badge"><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Tag size={10} strokeWidth={2} /> {dc.category}</span></span>}
+            {groupOrStage && <span className="wgt-score-meta-badge" title={isKnockoutMatch ? 'Stage' : 'Group'}><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><ClipboardList size={10} strokeWidth={2} /> {groupOrStage}</span></span>}
+            {dc.scheduledTime && <span className="wgt-score-meta-badge"><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Clock size={10} strokeWidth={2} /> {dc.scheduledTime}</span></span>}
+            {matchId && <span className="wgt-score-meta-badge" title="Match ID"><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Hash size={10} strokeWidth={2} /> {matchId}</span></span>}
+          </>
+        ) : (
+          <>
             <input
               className="wgt-score-meta-input"
               value={config.category ?? ''}
@@ -611,13 +790,19 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
               onChange={e => updateWidgetConfig(widgetId, { category: e.target.value })}
               onClick={e => e.stopPropagation()}
             />
-            <input
-              className="wgt-score-meta-input"
-              value={config.group ?? ''}
-              placeholder="Group"
-              onChange={e => updateWidgetConfig(widgetId, { group: e.target.value })}
-              onClick={e => e.stopPropagation()}
-            />
+            {isKnockoutMatch ? (
+              <span className="wgt-score-meta-badge" title="Group is hidden in knockout stage — showing the round instead">
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><ClipboardList size={10} strokeWidth={2} /> {dc.subtitle}</span>
+              </span>
+            ) : (
+              <input
+                className="wgt-score-meta-input"
+                value={config.group ?? ''}
+                placeholder="Group"
+                onChange={e => updateWidgetConfig(widgetId, { group: e.target.value })}
+                onClick={e => e.stopPropagation()}
+              />
+            )}
             <input
               className="wgt-score-meta-input"
               type="time"
@@ -626,32 +811,8 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
               onChange={e => updateWidgetConfig(widgetId, { scheduledTime: e.target.value })}
               onClick={e => e.stopPropagation()}
             />
+            {matchId && <span className="wgt-score-meta-badge" title="Match ID"><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Hash size={10} strokeWidth={2} /> {matchId}</span></span>}
           </>
-        )}
-        {!isLinked && (
-          <div style={{ display: 'flex', gap: 4, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
-            <MatchSchedulePicker onPick={loadScheduledMatch} tournamentId={effTournamentId} />
-            {dc.enableShootout && (
-              <button
-                className={`wgt-score-shootout-btn${dc.shootoutOpen ? ' wgt-score-shootout-btn--active' : ''}`}
-                title="Penalty Shootout / Place-Kick Competition"
-                onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); updateWidgetConfig(widgetId, { shootoutOpen: !dc.shootoutOpen }); }}
-                onClick={e => e.stopPropagation()}
-              >🥅 Shootout</button>
-            )}
-            <button
-              className={`wgt-score-save-btn${savedFlash ? ' wgt-score-save-btn--flash' : ''}`}
-              title="Save this result to Latest Results"
-              onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); saveResult(); }}
-              onClick={e => e.stopPropagation()}
-            >{savedFlash ? '✓ Saved' : '💾 Save Result'}</button>
-            <button
-              className="wgt-score-reset-teams-btn"
-              title="Clear both teams' name and logo, back to a blank matchup"
-              onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); resetWidgetTeams(widgetId); }}
-              onClick={e => e.stopPropagation()}
-            >↺ Reset Teams</button>
-          </div>
         )}
       </div>
 
@@ -816,7 +977,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
       )}
       {!isLinked && !pendingWalkover && !confirmedWalkover && (
         <div className="wgt-score-btns-outer">
-          <ScoreButtons team="A" increments={increments} onScore={handleScore} onDec={handleDec} buttonSize={config.buttonSize ?? 1} teamColor={teamAColor}
+          <ScoreButtons team="A" increments={increments} onScore={handleScore} onDec={handleDec} onManualTrigger={handleManualTrigger} buttonSize={config.buttonSize ?? 1} teamColor={teamAColor}
             lastEntry={lastEntryA} onUndo={() => undoLastScoreEntry(widgetId, 'A')} />
           <div className="wgt-score-mcenter wgt-score-mcenter--btns">
             {pointCounts.length > 0 && (
@@ -842,7 +1003,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
               onClick={(e) => e.stopPropagation()}
             >RST</button>
           </div>
-          <ScoreButtons team="B" increments={increments} onScore={handleScore} onDec={handleDec} buttonSize={config.buttonSize ?? 1} teamColor={teamBColor}
+          <ScoreButtons team="B" increments={increments} onScore={handleScore} onDec={handleDec} onManualTrigger={handleManualTrigger} buttonSize={config.buttonSize ?? 1} teamColor={teamBColor}
             lastEntry={lastEntryB} onUndo={() => undoLastScoreEntry(widgetId, 'B')} />
 
           {pendingDec && (() => {
@@ -859,8 +1020,12 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
                   <span style={{ color: tColor }}>{tName}</span>
                 </div>
                 <div className="wgt-score-dec-confirm-actions">
-                  <button className="wgt-score-dec-confirm-yes" onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); confirmDec(); }}>✓ Confirm</button>
-                  <button className="wgt-score-dec-confirm-no"  onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setPendingDec(null); }}>✕ Cancel</button>
+                  <button className="wgt-score-dec-confirm-yes" onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); confirmDec(); }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><Check size={16} strokeWidth={2} /> Confirm</span>
+                  </button>
+                  <button className="wgt-score-dec-confirm-no"  onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setPendingDec(null); }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><X size={16} strokeWidth={2} /> Cancel</span>
+                  </button>
                 </div>
               </div>
             );
@@ -893,10 +1058,10 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
                       <div className="wgt-shootout-cell wgt-shootout-cell--pick">
                         <button className="wgt-shootout-mark wgt-shootout-mark--yes"
                           onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setKick(i, side, true); }}
-                          onClick={e => e.stopPropagation()}>✓</button>
+                          onClick={e => e.stopPropagation()}><Check size={11} strokeWidth={2} /></button>
                         <button className="wgt-shootout-mark wgt-shootout-mark--no"
                           onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setKick(i, side, false); }}
-                          onClick={e => e.stopPropagation()}>✗</button>
+                          onClick={e => e.stopPropagation()}><X size={11} strokeWidth={2} /></button>
                       </div>
                     ) : (
                       <div className="wgt-shootout-dot wgt-shootout-dot--empty" style={{ borderColor: color }} />
@@ -908,7 +1073,7 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
                       disabled={isLinked}
                       onPointerDown={e => { e.stopPropagation(); if (isLinked) return; e.currentTarget.setPointerCapture(e.pointerId); setKick(i, side, undefined); }}
                       onClick={e => e.stopPropagation()}
-                    >{v ? '✓' : '✗'}</button>
+                    >{v ? <Check size={11} strokeWidth={2} /> : <X size={11} strokeWidth={2} />}</button>
                   );
                 };
                 return (
@@ -926,7 +1091,9 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
               <span style={{ color: teamBColor }}>{status.scoreB}</span>
             </div>
             {status.decided && (
-              <div className="wgt-shootout-winner">🏆 {winnerName} win the shootout {status.scoreA}-{status.scoreB}</div>
+              <div className="wgt-shootout-winner">
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><Trophy size={13} strokeWidth={2} /> {winnerName} win the shootout {status.scoreA}-{status.scoreB}</span>
+              </div>
             )}
             {!isLinked && kicks.length > 0 && (
               <button className="wgt-shootout-reset" onPointerDown={e => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); const before = kicks; updateWidgetConfig(widgetId, { shootoutKicks: [] }); useUndoStore.getState().pushUndo('Reset shootout', () => updateWidgetConfig(widgetId, { shootoutKicks: before })); }} onClick={e => e.stopPropagation()}>Reset</button>
@@ -969,6 +1136,16 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
           danger
           onConfirm={() => { commitSaveResult(duplicateResultId); setDuplicateResultId(null); }}
           onCancel={() => setDuplicateResultId(null)}
+        />
+      )}
+
+      {pendingManualTrigger && (
+        <ConfirmModal
+          title="Fire trigger?"
+          message={`Run "${pendingManualTrigger.label}"'s actions for ${pendingManualTrigger.team === 'A' ? (config.teamAName ?? 'Team A') : (config.teamBName ?? 'Team B')}? This does not change the score.`}
+          confirmLabel="Fire"
+          onConfirm={() => { runActions(pendingManualTrigger.actions); setPendingManualTrigger(null); }}
+          onCancel={() => setPendingManualTrigger(null)}
         />
       )}
 

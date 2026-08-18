@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { Undo2 } from 'lucide-react';
 import { useUndoStore } from '../stores/undoStore';
 
 function timeAgo(ts: number): string {
@@ -11,7 +12,7 @@ function timeAgo(ts: number): string {
   return `${h}h ago`;
 }
 
-// Persistent "↩ Undo (N)" control for the StatusBar — a portal popup
+// Persistent "Undo (N)" control for the StatusBar — a portal popup
 // listing every entry in the shared undo history (deletes, resets, clears),
 // each individually undoable. Stays available until the app closes, unlike
 // the auto-fading UndoToast.
@@ -56,7 +57,8 @@ export function UndoControl() {
         className="status-btn undo-control-btn"
         title="Undo a recent delete/reset/clear"
         onClick={toggle}
-      >↩ Undo ({history.length})</button>
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+      ><Undo2 size={13} strokeWidth={2} /> Undo ({history.length})</button>
       {open && pos && createPortal(
         <div
           ref={popupRef}

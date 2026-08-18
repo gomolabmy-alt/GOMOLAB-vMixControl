@@ -1,5 +1,5 @@
 import type { SavedMatchResult } from '../stores/matchResultsStore';
-import type { ScheduledMatch } from '../stores/matchScheduleStore';
+import { sortMatches, type ScheduledMatch } from '../stores/matchScheduleStore';
 import type { SavedTeam } from '../stores/teamDbStore';
 
 const norm = (s?: string) => (s ?? '').trim().toLowerCase();
@@ -39,6 +39,35 @@ function isThisTeam(
   if (!category) return true;
   const effectiveCat = recCategory ?? (recRound?.includes(' · ') ? recRound.split(' · ')[0] : undefined);
   return !effectiveCat || effectiveCat === category;
+}
+
+/**
+ * Finds the soonest not-yet-sent fixture within scope (same "next up"
+ * convention MatchScheduleWidget uses: first item, in schedule order, whose
+ * sentAt is unset) and resolves both sides' full SavedTeam records — id-based
+ * first (teamAId/teamBId, present on fixtures created after this session's
+ * id-threading work), falling back to name+category matching via
+ * findTeamRecord for older fixtures that never got backfilled an id.
+ */
+export function resolveNextFixtureTeams(
+  matches: ScheduledMatch[],
+  teams: SavedTeam[],
+  opts: { tournamentId?: string; venue?: string; category?: string },
+): { match: ScheduledMatch; teamA?: SavedTeam; teamB?: SavedTeam } | undefined {
+  const scoped = matches
+    .filter(m =>
+      (!opts.tournamentId || m.tournamentId === opts.tournamentId) &&
+      (!opts.venue || norm(m.venue) === norm(opts.venue)) &&
+      (!opts.category || norm(m.category) === norm(opts.category)),
+    )
+    .sort(sortMatches);
+  const match = scoped.find(m => !m.sentAt);
+  if (!match) return undefined;
+  const teamA = (match.teamAId && teams.find(t => t.id === match.teamAId))
+    || findTeamRecord(teams, match.teamAName, match.category ?? opts.category, opts.tournamentId);
+  const teamB = (match.teamBId && teams.find(t => t.id === match.teamBId))
+    || findTeamRecord(teams, match.teamBName, match.category ?? opts.category, opts.tournamentId);
+  return { match, teamA, teamB };
 }
 
 export interface ResultFormRow {

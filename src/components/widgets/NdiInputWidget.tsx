@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useContext } from 'react';
+import { Star, Circle, RotateCw, X } from 'lucide-react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useVmixStore } from '../../stores/vmixStore';
@@ -197,7 +198,7 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
             )
           }
           {!isSaved && (
-            <button className="wgt-ndi-btn wgt-ndi-btn--save" onClick={() => saveSource(name)} title="Save">★</button>
+            <button className="wgt-ndi-btn wgt-ndi-btn--save" onClick={() => saveSource(name)} title="Save"><Star size={12} strokeWidth={2} /></button>
           )}
         </div>
       </div>
@@ -219,7 +220,7 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
                 onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
                 onLoad={e  => { (e.currentTarget as HTMLImageElement).style.display = 'block'; }}
               />
-              <span className="wgt-ndi-live-badge">● LIVE</span>
+              <span className="wgt-ndi-live-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Circle size={8} strokeWidth={0} fill="currentColor" /> LIVE</span>
             </>
           ) : ndiAvailable ? (
             <div className="wgt-ndi-empty">{previewErr ?? 'Connecting…'}</div>
@@ -238,7 +239,7 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
             className="wgt-ndi-preview-close"
             onClick={() => { setPreviewName(null); setSelectedNumber(null); }}
             title="Close preview"
-          >×</button>
+          ><X size={14} strokeWidth={2} /></button>
         </div>
       )}
 
@@ -249,7 +250,7 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
           onClick={scanNetwork}
           disabled={scanning}
         >
-          {scanning ? <><span className="wgt-ndi-spinner" /> Scanning…</> : '⟳ Scan Network'}
+          {scanning ? <><span className="wgt-ndi-spinner" /> Scanning…</> : <><RotateCw size={13} strokeWidth={2} /> Scan Network</>}
         </button>
       )}
 
@@ -307,7 +308,7 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
                     >{busy[src.name] ? '…' : '+ vMix'}</button>
                   )
                 }
-                <button className="wgt-ndi-btn wgt-ndi-btn--del" onClick={() => removeSaved(src.id)}>×</button>
+                <button className="wgt-ndi-btn wgt-ndi-btn--del" onClick={() => removeSaved(src.id)}><X size={12} strokeWidth={2} /></button>
               </div>
             </div>
           );
@@ -338,7 +339,7 @@ export function NdiInputWidget({ widgetId, config: cfg }: Props) {
                   <div className="wgt-ndi-btns" onClick={e => e.stopPropagation()}>
                     <button className={`wgt-ndi-btn wgt-ndi-btn--prv${isPreview ? ' active' : ''}`} onClick={() => c?.setPreview(inp.key)}>PRV</button>
                     <button className={`wgt-ndi-btn wgt-ndi-btn--pgm${isActive  ? ' active' : ''}`} onClick={() => c?.setActive(inp.key)}>PGM</button>
-                    <button className="wgt-ndi-btn wgt-ndi-btn--del" onClick={() => removeFromVmix(inp.key, inp.number)}>×</button>
+                    <button className="wgt-ndi-btn wgt-ndi-btn--del" onClick={() => removeFromVmix(inp.key, inp.number)}><X size={12} strokeWidth={2} /></button>
                   </div>
                 </div>
               );

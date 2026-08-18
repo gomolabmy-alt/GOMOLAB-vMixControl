@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Check } from 'lucide-react';
 import { useVmixStore } from '../../stores/vmixStore';
 
 interface Props {
@@ -48,7 +49,7 @@ export function PanelWidget({ config: cfg }: Props) {
   };
 
   if (items.length === 0) {
-    return <div className="wgt-panel wgt-panel-empty">Add items in ⚙ config</div>;
+    return <div className="wgt-panel wgt-panel-empty">Add items in config</div>;
   }
 
   return (
@@ -110,7 +111,7 @@ export function PanelWidget({ config: cfg }: Props) {
                 disabled={!connected || !item.textInputKey || !item.fieldName}
                 onClick={() => sendText(item)}
                 title="Send to vMix"
-              >✓</button>
+              ><Check size={13} strokeWidth={2} /></button>
             </div>
           );
         }

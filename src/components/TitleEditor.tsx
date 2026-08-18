@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { Circle, LayoutGrid } from 'lucide-react';
 import { useVmixStore } from '../stores/vmixStore';
 import type { VmixTextField } from '../types/vmix';
 
@@ -61,8 +62,8 @@ function TextField({
       <div className="text-field-header">
         <label className="text-field-label">{displayName}</label>
         <div className="text-field-indicators">
-          {isSending && <span className="text-field-sending">●</span>}
-          {isDirty && !isSending && <span className="text-field-dirty">○</span>}
+          {isSending && <span className="text-field-sending"><Circle size={8} fill="currentColor" stroke="none" /></span>}
+          {isDirty && !isSending && <span className="text-field-dirty"><Circle size={8} strokeWidth={2} /></span>}
         </div>
       </div>
       {isMultiLine ? (
@@ -93,7 +94,7 @@ export function TitleEditor() {
     return (
       <main className="detail-panel detail-panel--empty">
         <div className="detail-empty-state">
-          <div className="detail-empty-icon">⬡</div>
+          <div className="detail-empty-icon"><LayoutGrid size={28} strokeWidth={1.75} /></div>
           <p>Select an input to edit</p>
         </div>
       </main>

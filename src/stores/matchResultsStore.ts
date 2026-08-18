@@ -16,6 +16,17 @@ export interface SavedMatchResult {
   time?: string;
   competition?: string;
   round?: string;
+  /** Pool/group name, or a knockout-stage marker ('Final', 'Semifinal',
+   *  'Quarterfinal', 'Round of N', a ranked-placement label, or the literal
+   *  '3rd Place' sentinel) — carried over from the originating fixture's
+   *  ScheduledMatch.group so standings can tell a group-stage result apart
+   *  from a bracket-stage one after it's saved (see isPoolStageResult in
+   *  TournamentManager.tsx). Absent for results saved before this field
+   *  existed or with no linked fixture. */
+  group?: string;
+  /** Bracket tier ('Cup', 'Plate', a combined pair like 'Cup/Plate', etc.),
+   *  carried over from ScheduledMatch.tier — same purpose as `group` above. */
+  tier?: string;
   /** Tournament category (e.g. "Men", "U21") this result belongs to — carried
    *  over from the originating fixture so a same-named team entered in
    *  multiple categories doesn't get its stats/history mixed together. */
@@ -52,7 +63,7 @@ export interface SavedMatchResult {
    *  not just the total. Powers head-to-head breakdowns. Absent for
    *  bye/walkover results (no live match ever ran) and any result saved
    *  before this field existed. */
-  scoreLog?: { team: 'A' | 'B'; action: string; points: number; scorer?: string; jerseyNo?: string; timeStr?: string }[];
+  scoreLog?: { team: 'A' | 'B'; action: string; points: number; scorer?: string; jerseyNo?: string; timeStr?: string; period?: number }[];
   /** Kick-by-kick decider recorded when a match stayed level and a shootout
    *  was used to decide it — soccer penalty shootout, rugby place-kick
    *  competition, or any sport's equivalent. Does NOT change scoreA/scoreB
@@ -65,12 +76,36 @@ export interface SavedMatchResult {
     winner: 'A' | 'B';
   };
   /** Cards given during the match, captured from the linked Player Picker
-   *  lists at save time (mirrors the scoreLog capture above). Absent when no
-   *  Player Picker was linked or no cards were given. */
-  cards?: { team: 'A' | 'B'; type: 'yellow' | 'orange' | 'red' }[];
+   *  lists at save time (mirrors the scoreLog capture above). `playerId`/
+   *  `jerseyNo`/`playerName` are only resolvable when that Player List's
+   *  team was known at save time — older results (and any card given to a
+   *  slot with no team resolved) may have just `team`+`type`. Absent when
+   *  no Player Picker was linked or no cards were given. */
+  cards?: { team: 'A' | 'B'; type: 'yellow' | 'orange' | 'red'; playerId?: string; jerseyNo?: string; playerName?: string }[];
+  /** Full squad snapshot from the linked Player List widget(s) at save time —
+   *  every player who was ever placed in a starter or sub slot (not just
+   *  those still on the pitch at the final whistle), so the scoring page can
+   *  show who actually played. Absent for a side with no Player List linked
+   *  (or no team resolved on it) — a manually-entered result with only a
+   *  scoreline has no lineup data to capture. */
+  lineup?: { team: 'A' | 'B'; playerId: string; jerseyNo: string; name: string; section: 'starter' | 'sub'; subbedOn: boolean }[];
   /** Which physical venue pushed this result, for multi-venue cloud sync
    *  (see src/lib/cloudSync.ts) — same convention as ScheduledMatch.venueLabel. */
   venueLabel?: string;
+  /** Best-effort snapshot of the linked Timer widget's clock at save time —
+   *  absent if no Timer was linked to the scoreboard. `elapsedMs` is total
+   *  game time actually played (regular + extra time + after-ET combined,
+   *  countdown periods converted to time-played rather than time-remaining)
+   *  — a simplified summary, not a frame-perfect replay of every timer
+   *  edge case (see computeTimerSummary in src/utils/scoreboardSnapshot.ts). */
+  timerSummary?: {
+    elapsedMs: number;
+    /** Which regular period the match had reached, capped at that sport's
+     *  period count. */
+    periodsPlayed: number;
+    wentToExtraTime: boolean;
+    wentToAfterEt: boolean;
+  };
   savedAt: number;
 }
 

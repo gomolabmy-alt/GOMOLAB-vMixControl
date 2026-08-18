@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { ArrowRight } from 'lucide-react';
 import { useVmixStore } from '../../stores/vmixStore';
 import { LogoUrlPicker } from '../LogoUrlPicker';
 
@@ -109,7 +110,7 @@ export function VmixTitlesWidget({ config: cfg }: Props) {
   const connected = !!vmixState;
 
   if (inputs.length === 0) {
-    return <div className="wgt-vt wgt-vt-empty">Add inputs in ⚙ config</div>;
+    return <div className="wgt-vt wgt-vt-empty">Add inputs in config</div>;
   }
 
   return (
@@ -180,7 +181,7 @@ export function VmixTitlesWidget({ config: cfg }: Props) {
                           disabled={!grp.inputKey || !connected}
                           onClick={() => send(grp, field, val)}
                           title="Send to vMix"
-                        >→</button>
+                        ><ArrowRight size={13} strokeWidth={2} /></button>
                       )}
                     </>
                   )}

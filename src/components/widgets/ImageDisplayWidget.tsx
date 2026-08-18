@@ -1,3 +1,4 @@
+import { Image } from 'lucide-react';
 import { resolveImageUrl } from '../../lib/imageUrl';
 
 interface Props {
@@ -20,7 +21,9 @@ export function ImageDisplayWidget({ config }: Props) {
           draggable={false}
         />
       ) : (
-        <span className="wgt-imgdisp-placeholder">🖼 Select image in ⚙</span>
+        <span className="wgt-imgdisp-placeholder" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <Image size={14} strokeWidth={2} /> Select image in settings
+        </span>
       )}
       {config.caption && url && (
         <div className="wgt-imgdisp-caption">{config.caption}</div>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { AlertTriangle, ChevronUp, ChevronDown, X } from 'lucide-react';
 import { useVmixStore } from '../stores/vmixStore';
 import type { DataBinding, DataSourceType } from '../types/vmix';
 
@@ -32,7 +33,7 @@ function DataBindCard({ binding }: { binding: DataBinding }) {
             <span className="data-card-value">→ {binding.lastValue}</span>
           )}
           {binding.lastError && (
-            <span className="data-card-error">⚠ {binding.lastError}</span>
+            <span className="data-card-error" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><AlertTriangle size={12} /> {binding.lastError}</span>
           )}
         </div>
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
@@ -44,9 +45,9 @@ function DataBindCard({ binding }: { binding: DataBinding }) {
             {binding.enabled ? 'ON' : 'OFF'}
           </button>
           <button className="btn btn--ghost btn--small" onClick={() => setExpanded((v) => !v)}>
-            {expanded ? '▲' : '▼'}
+            {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           </button>
-          <button className="btn btn--ghost btn--small" onClick={() => deleteDataBinding(binding.id)}>×</button>
+          <button className="btn btn--ghost btn--small" onClick={() => deleteDataBinding(binding.id)}><X size={14} /></button>
         </div>
       </div>
 
@@ -127,7 +128,7 @@ function VariableRow({ id, name, value }: { id: string; name: string; value: str
         value={value}
         onChange={(e) => setVariable(id, e.target.value)}
       />
-      <button className="btn btn--ghost btn--small" onClick={() => deleteVariable(id)}>×</button>
+      <button className="btn btn--ghost btn--small" onClick={() => deleteVariable(id)}><X size={14} /></button>
     </div>
   );
 }

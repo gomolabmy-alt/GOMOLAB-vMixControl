@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef } from 'react';
+import { ArrowUp } from 'lucide-react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { useMatchScheduleStore } from '../../stores/matchScheduleStore';
 import { mergeResultRows, mergeUpcomingRows, type ResultFormRow, type UpcomingFormRow } from '../../lib/teamForm';
+import { autoLinkedWidget } from '../../lib/autoLink';
 import { TeamFormTable } from './TeamFormTable';
 
 interface Props {
@@ -37,14 +39,16 @@ function upcomingText(row: UpcomingFormRow, side: 'a' | 'b'): string | null {
 // data HeadToHeadPanel already shows inline on the Scoreboard widget itself
 // (via TeamFormTable, reused here unchanged), but addable independently and
 // with its own vMix text-field output for a custom title template.
-export function TeamFormWidget({ config }: Props) {
+export function TeamFormWidget({ widgetId, config }: Props) {
   const { pages, commentatorPages } = useCanvasStore();
   const { getClient, vmixSyncVersion } = useVmixStore();
   const { results } = useMatchResultsStore();
   const { matches } = useMatchScheduleStore();
 
-  const allWidgets = useMemo(() => [...pages, ...commentatorPages].flatMap(p => p.widgets), [pages, commentatorPages]);
-  const linkedScoreboard = allWidgets.find(w => w.id === config.linkedScoreboardId);
+  const allPages = useMemo(() => [...pages, ...commentatorPages], [pages, commentatorPages]);
+  // Falls back to the sole Scoreboard widget on this page when nothing's
+  // been explicitly linked in settings — an explicit pick always wins.
+  const linkedScoreboard = autoLinkedWidget(allPages, widgetId, config.linkedScoreboardId, 'scoreboard');
   const dc = linkedScoreboard?.config ?? {};
 
   const teamAName: string = dc.teamAName ?? 'Team A';
@@ -52,7 +56,10 @@ export function TeamFormWidget({ config }: Props) {
   const teamAShortName: string | undefined = dc.teamAShortName;
   const teamBShortName: string | undefined = dc.teamBShortName;
   const category: string | undefined = dc.category;
-  const tournamentId: string | undefined = dc.linkedTournamentId;
+  // Also falls back to the page's own tournament (same convention as
+  // Scoreboard/Timer/Player List) when the linked scoreboard hasn't set one.
+  const pageTournamentId = allPages.find(p => p.widgets.some(w => w.id === widgetId))?.tournamentId;
+  const tournamentId: string | undefined = dc.linkedTournamentId || pageTournamentId;
 
   const resultRows = useMemo(
     () => mergeResultRows(results, { name: teamAName, shortName: teamAShortName }, { name: teamBName, shortName: teamBShortName }, category, tournamentId),
@@ -96,16 +103,16 @@ export function TeamFormWidget({ config }: Props) {
 
   return (
     <div className="wgt-team-form">
-      {(config.linkedScoreboardId || hasAnyTarget) && (
+      {(linkedScoreboard || hasAnyTarget) && (
         <div className="wgt-team-form-header">
           {hasAnyTarget && (
             <button className="wgt-team-form-send-btn" onClick={sendAll} disabled={!getClient()} title="Send all four fields to vMix now">
-              ↑ Send
+              <ArrowUp size={12} strokeWidth={2} /> Send
             </button>
           )}
         </div>
       )}
-      {!config.linkedScoreboardId ? (
+      {!linkedScoreboard ? (
         <div className="wgt-team-form-empty">Link a scoreboard in settings</div>
       ) : (
         <TeamFormTable

@@ -74,14 +74,19 @@ pub fn run() {
                 server::start_servers(server_state).await;
             });
 
-            // 100 ms tick emitter — drives all timer widgets from the Rust side so
+            // 20 ms tick emitter — drives all timer widgets from the Rust side so
             // WKWebView throttling (background, display sleep) can never pause them.
             // The frontend subscribes to this event and uses wall-clock elapsed time
-            // for accuracy even when ticks are delayed.
+            // for accuracy even when ticks are delayed. 20 ms (not the old 100 ms) so
+            // a timer showing milliseconds actually has sub-100ms ticks to advance on —
+            // at 100 ms, the hundredths digit could only ever land on a multiple of 10.
+            // The frontend still down-samples this to whatever cadence each individual
+            // timer widget actually needs (1000 ms normally, 100 ms for "high precision",
+            // this full 20 ms only for widgets showing milliseconds).
             let tick_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 use tokio::time::{interval, Duration, MissedTickBehavior};
-                let mut iv = interval(Duration::from_millis(100));
+                let mut iv = interval(Duration::from_millis(20));
                 iv.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 loop {
                     iv.tick().await;
@@ -103,6 +108,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_build_number,
+            commands::get_pid,
             commands::get_machine_id,
             commands::http_get,
             commands::fetch_public_json,

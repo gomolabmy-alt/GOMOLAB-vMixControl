@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
+import { X, ArrowUp, ArrowUpRight, Eye, EyeOff, Circle } from 'lucide-react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useTeamDbStore } from '../../stores/teamDbStore';
+import { useAppSettings } from '../../stores/appSettingsStore';
+import { autoLinkedWidget, autoLinkedWidgetPair } from '../../lib/autoLink';
+import { resolvePlayerListRoster } from '../../lib/playerListSquad';
+import { simplifyPlayerName } from '../../lib/simpleName';
+import { resolveImageUrl } from '../../lib/imageUrl';
+import type { CanvasWidget } from '../../types/canvas';
 
 interface Props {
   widgetId: string;
@@ -30,6 +37,10 @@ interface VmixInput {
   fieldScorer: string;
   fieldJersey: string;
   fieldAction: string;
+  fieldTeamLogo?: string;
+  mergedPrefix?: string;
+  mergedParts?: string[];
+  mergedSeparator?: string;
 }
 
 function resolveInput(vmixInputs: VmixInput[], actionLabel: string): VmixInput | null {
@@ -41,13 +52,19 @@ function resolveInput(vmixInputs: VmixInput[], actionLabel: string): VmixInput |
 
 interface Player { id: string; name: string; jerseyNo: string; }
 
-export function ScoreLowerThirdWidget({ config }: Props) {
+export function ScoreLowerThirdWidget({ widgetId, config }: Props) {
   const { pages, patchScoreLogEntry } = useCanvasStore();
   const { teams: teamDbTeams } = useTeamDbStore();
   const { getClient, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
+  // Simple Names (App Settings) — display/vMix-push only; scoreLog's own
+  // `scorer` field always stays the real name (it's the actual scoring
+  // record, read elsewhere for stats — see confirmPicker below).
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const disp = (name: string) => simplifyPlayerName(name, { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker });
 
-  const allWidgets = pages.flatMap(p => p.widgets);
-  const linkedScoreboard = allWidgets.find(w => w.id === config.linkedScoreboardId);
+  // Falls back to the sole Scoreboard widget on this page when nothing's
+  // been explicitly linked in settings — an explicit pick always wins.
+  const linkedScoreboard = autoLinkedWidget(pages, widgetId, config.linkedScoreboardId, 'scoreboard');
   const sbCfg = linkedScoreboard?.config ?? {};
   const fullLog: LogEntry[] = sbCfg.scoreLog ?? [];
 
@@ -70,23 +87,25 @@ export function ScoreLowerThirdWidget({ config }: Props) {
   // ── Player picker for unassigned entries ─────────────────────────────────
   const [pickerEntryId, setPickerEntryId] = useState<string | null>(null);
 
-  // Resolve squad from linked player list widgets on the scoreboard
-  function resolveSquad(linkedId: string): Player[] {
-    const plw = allWidgets.find(w => w.id === linkedId);
-    if (!plw) return [];
-    const plCfg = plw.config;
-    const team = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
+  // Resolve squad from linked player list widgets on the scoreboard —
+  // handles a single-team widget (one instance per side) and a side-by-side
+  // one (one instance covering both sides) the same way (playerListSquad.ts).
+  function resolveSquad(plw: CanvasWidget | undefined, side: 'A' | 'B'): Player[] {
+    const { team, starters, subs } = resolvePlayerListRoster(plw, side, teamDbTeams);
     const players = team?.players ?? [];
-    const assigned = new Set(
-      [...(plCfg.starters ?? []), ...(plCfg.subs ?? [])].filter(Boolean) as string[]
-    );
+    const assigned = new Set([...starters, ...subs].filter(Boolean));
     return players
       .filter((p: any) => assigned.has(p.id))
       .sort((a: any, b: any) => (parseInt(a.jerseyNo) || 999) - (parseInt(b.jerseyNo) || 999));
   }
 
-  const squadA: Player[] = resolveSquad(sbCfg.linkedPlayerListA ?? '');
-  const squadB: Player[] = resolveSquad(sbCfg.linkedPlayerListB ?? '');
+  // Resolved the same way the scoreboard itself would (explicit link, or
+  // the two Player List widgets on its page assigned by teamSide/position).
+  const { a: plA, b: plB } = linkedScoreboard
+    ? autoLinkedWidgetPair(pages, linkedScoreboard.id, sbCfg.linkedPlayerListA, sbCfg.linkedPlayerListB, 'player-list')
+    : {};
+  const squadA: Player[] = resolveSquad(plA, 'A');
+  const squadB: Player[] = resolveSquad(plB, 'B');
 
   const pickerEntry = pickerEntryId ? fullLog.find(e => e.id === pickerEntryId) ?? null : null;
   const pickerSquad = pickerEntry ? (pickerEntry.team === 'A' ? squadA : squadB) : [];
@@ -108,9 +127,17 @@ export function ScoreLowerThirdWidget({ config }: Props) {
     if (!c || !activeInput?.vmixInputKey) return;
     const key = activeInput.vmixInputKey;
     if (activeInput.fieldTeam)   c.setTextField(key, activeInput.fieldTeam,   entry.teamName ?? '');
-    if (activeInput.fieldScorer) c.setTextField(key, activeInput.fieldScorer, entry.scorer ?? '');
+    if (activeInput.fieldScorer) c.setTextField(key, activeInput.fieldScorer, entry.scorer ? disp(entry.scorer) : '');
     if (activeInput.fieldJersey) c.setTextField(key, activeInput.fieldJersey, entry.jerseyNo ?? '');
     if (activeInput.fieldAction) c.setTextField(key, activeInput.fieldAction, entry.action ?? '');
+    const teamLogo = entry.team === 'A' ? sbCfg.teamALogo : sbCfg.teamBLogo;
+    if (activeInput.fieldTeamLogo && teamLogo) c.setImageField(key, activeInput.fieldTeamLogo, teamLogo);
+    if (activeInput.mergedPrefix && activeInput.mergedParts?.length) {
+      const src: Record<string, string> = {
+        team: entry.teamName ?? '', scorer: entry.scorer ? disp(entry.scorer) : '', jersey: entry.jerseyNo ?? '', action: entry.action ?? '',
+      };
+      c.setTextField(key, activeInput.mergedPrefix, activeInput.mergedParts.map(k => src[k] ?? '').join(activeInput.mergedSeparator ?? ' '));
+    }
   };
 
   const sendToVmix = () => { if (last) sendToVmixEntry(last); };
@@ -172,7 +199,7 @@ export function ScoreLowerThirdWidget({ config }: Props) {
               className="wgt-slt-picker-close"
               onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setPickerEntryId(null); }}
               onClick={(e) => e.stopPropagation()}
-            >✕</button>
+            ><X size={14} strokeWidth={2} /></button>
           </div>
           <div className="wgt-slt-picker-list">
             {pickerSquad.map(p => (
@@ -183,7 +210,7 @@ export function ScoreLowerThirdWidget({ config }: Props) {
                 onClick={(e) => e.stopPropagation()}
               >
                 {p.jerseyNo && <span className="wgt-slt-picker-no">{p.jerseyNo}</span>}
-                <span className="wgt-slt-picker-name">{p.name}</span>
+                <span className="wgt-slt-picker-name">{disp(p.name)}</span>
               </button>
             ))}
           </div>
@@ -199,10 +226,15 @@ export function ScoreLowerThirdWidget({ config }: Props) {
         {filterDotColor && <span className="wgt-slt-dot" style={{ background: filterDotColor, alignSelf: 'center' }} />}
         {last ? (
           <div className="wgt-slt-info">
-            <div className="wgt-slt-team" style={{ color: teamColor }}>{last.teamName}</div>
+            <div className="wgt-slt-team" style={{ color: teamColor }}>
+              {(last.team === 'A' ? sbCfg.teamALogo : sbCfg.teamBLogo) && (
+                <img className="wgt-slt-team-logo" src={resolveImageUrl(last.team === 'A' ? sbCfg.teamALogo : sbCfg.teamBLogo)} alt="" />
+              )}
+              {last.teamName}
+            </div>
             <div className="wgt-slt-scorer">
               {last.jerseyNo && <span className="wgt-slt-jersey">#{last.jerseyNo}</span>}
-              {last.scorer && <span className="wgt-slt-name">{last.scorer}</span>}
+              {last.scorer && <span className="wgt-slt-name">{disp(last.scorer)}</span>}
               {!last.scorer && !last.jerseyNo && (
                 <button
                   className="wgt-slt-assign-btn"
@@ -215,14 +247,14 @@ export function ScoreLowerThirdWidget({ config }: Props) {
               <span className="wgt-slt-action-tag">{last.action}</span>
               &nbsp;&middot;&nbsp;{last.timeStr}
               {activeInput?.actionLabel && (
-                <span className="wgt-slt-input-badge" title={`Input: ${activeInput.vmixInputKey}`}>
-                  ↗ {activeInput.actionLabel}
+                <span className="wgt-slt-input-badge" title={`Input: ${activeInput.vmixInputKey}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <ArrowUpRight size={11} strokeWidth={2} /> {activeInput.actionLabel}
                 </span>
               )}
             </div>
           </div>
         ) : (
-          <span className="wgt-slt-empty">{config.linkedScoreboardId ? 'No scores yet' : 'Link a scoreboard in settings'}</span>
+          <span className="wgt-slt-empty">{linkedScoreboard ? 'No scores yet' : 'Link a scoreboard in settings'}</span>
         )}
       </div>
 
@@ -237,7 +269,7 @@ export function ScoreLowerThirdWidget({ config }: Props) {
               onPointerDown={(e2) => { e2.stopPropagation(); e2.currentTarget.setPointerCapture(e2.pointerId); setPickerEntryId(e.id); }}
               onClick={(e2) => e2.stopPropagation()}
             >
-              <span style={{ color: e.team === 'A' ? teamAColor : teamBColor }}>●</span>
+              <span style={{ color: e.team === 'A' ? teamAColor : teamBColor, display: 'inline-flex' }}><Circle size={8} strokeWidth={0} fill="currentColor" /></span>
               &nbsp;{e.action}&nbsp;{e.timeStr}
             </button>
           ))}
@@ -251,8 +283,9 @@ export function ScoreLowerThirdWidget({ config }: Props) {
           onClick={(e) => e.stopPropagation()}
           disabled={!getClient() || !hasInput || !last}
           title="Send last score data to vMix title"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, justifyContent: 'center' }}
         >
-          ↑ Send
+          <ArrowUp size={12} strokeWidth={2} /> Send
         </button>
         <button
           className={`wgt-slt-btn wgt-slt-btn--show${overlayActive ? ' wgt-slt-btn--active' : ''}`}
@@ -260,14 +293,16 @@ export function ScoreLowerThirdWidget({ config }: Props) {
           onClick={(e) => e.stopPropagation()}
           disabled={!vmixState || !hasInput}
           title="Show on overlay"
-        >▶ Show</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><Eye size={12} strokeWidth={2} /> Show</button>
         <button
           className={`wgt-slt-btn wgt-slt-btn--hide${!overlayActive ? ' wgt-slt-btn--active' : ''}`}
           onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); overlayOut(ch); }}
           onClick={(e) => e.stopPropagation()}
           disabled={!vmixState || !hasInput}
           title="Hide from overlay"
-        >■ Hide</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><EyeOff size={12} strokeWidth={2} /> Hide</button>
       </div>
     </div>
   );

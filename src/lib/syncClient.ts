@@ -20,6 +20,7 @@ export type SyncFullState = {
   teamDb?: { teams: any[] };
   matchSchedule?: { matches: any[] };
   matchResults?: { results: any[] };
+  rundown?: { segments: any[] };
 };
 
 export type SyncCommentatorFullState = {
@@ -36,6 +37,7 @@ export type SyncPushTournamentData = {
   teamDb: { teams: any[] };
   matchSchedule: { matches: any[] };
   matchResults: { results: any[] };
+  rundown?: { segments: any[] };
   tournament: { tournaments: any[]; activeTournamentId: string };
 };
 
@@ -81,7 +83,214 @@ export type SyncVmixCommand = {
   args: any[];
 };
 
-export type SyncMessage = SyncAction | SyncFullState | SyncCommentatorFullState | SyncRequestState | SyncVmixStatus | SyncClientList | SyncVmixData | SyncVmixCommand | SyncPushTournamentData;
+// ── Companion (Stream Deck) bridge ──────────────────────────────────────────
+// A Companion module connects as a plain read-only (or commentator) sync
+// client — no new port, no auth beyond what those already don't have. It can
+// ask for the current list of triggerable buttons and trigger one by its
+// stable id, reusing the exact same runButtonPress/runButtonRelease path a
+// real OS hotkey uses (see src/lib/companionBridge.ts) — a Stream Deck button
+// behaves identically to clicking the button in the app, including
+// toggle-mode buttons. Every Button widget (and side button) in the app is
+// listed regardless of whether it also has a keyboard shortcut assigned.
+export interface CompanionBindingInfo {
+  /** Stable id for this trigger target — see CompanionButtonTarget in
+   *  hotkeyBindings.ts (a widget id, `${widgetId}:side:${id}`, or
+   *  `${widgetId}:hotkey:${id}`). */
+  id: string;
+  /** Human-friendly label for Companion's own action/feedback pickers. */
+  label: string;
+  mode?: string;
+  /** The keyboard shortcut assigned to this target, if any — informational
+   *  only; not required to trigger it from Companion. */
+  accelerator?: string;
+}
+// A Scoreboard widget's score buttons (Try/Conversion/etc, for either team)
+// are also Companion trigger targets, one per team+increment — see
+// CompanionScoreTarget in companionScoreTargets.ts. Unlike a plain button,
+// triggering one can optionally carry a scorer's jersey number, mirroring
+// the app's own on-screen "quick scorer picker" that appears when you press
+// a score button with a roster loaded.
+export interface CompanionScorerChoice {
+  jerseyNo: string;
+  name: string;
+}
+export interface CompanionScoreTargetInfo {
+  id: string;
+  label: string;
+  /** Carried alongside `id` so the module can regroup targets by board+type
+   *  or by board+team without parsing `id`'s internal format itself — used
+   *  by the "arm score type, then press any player" flow (see the
+   *  module's `Arm score type`/`Score armed type` actions). */
+  widgetId: string;
+  /** The Scoreboard widget's own label (or "Board N") — for labeling a
+   *  score type by which board it belongs to, not which team, since a type
+   *  like "Try" isn't owned by either team. */
+  widgetLabel: string;
+  team: 'A' | 'B';
+  teamName: string;
+  scoreLabel: string;
+  /** The linked team's current roster, for a jersey-number dropdown —
+   *  empty if no Player List widget is linked/auto-paired to this
+   *  Scoreboard, in which case scoring still works, just with no scorer. */
+  scorers: CompanionScorerChoice[];
+  /** Every starter/sub slot of that same linked Player List, in position
+   *  order (including empty ones) — lets Companion target a *position*
+   *  rather than a specific player, so whoever currently holds that slot
+   *  scores, automatically following any substitution. */
+  slots: CompanionScoreSlotInfo[];
+}
+export interface CompanionScoreSlotInfo {
+  section: 'starter' | 'sub';
+  index: number;
+  /** Empty when the slot currently has no player assigned. */
+  jerseyNo: string;
+  name: string;
+}
+// Any widget with its own "pick a player to show" UI (a team-side toggle +
+// player dropdown, or a fixed-team player dropdown — Player Stats, Head to
+// Head, ...) gets the same two-step Companion flow: team (skipped when the
+// slot's team is already fixed), then jersey number — see
+// CompanionPlayerSelectorTarget in companionPlayerSelectors.ts.
+export interface CompanionPlayerChoiceInfo {
+  playerId: string;
+  jerseyNo: string;
+  name: string;
+  side?: 'A' | 'B';
+}
+export interface CompanionPlayerSelectorTargetInfo {
+  id: string;
+  label: string;
+  needsTeamPick: boolean;
+  choices: CompanionPlayerChoiceInfo[];
+}
+// Player List's slot/card/highlight actions — the write side of the
+// Player List / Player Lower Third read-only appText fields — see
+// companionPlayerListActions.ts.
+export interface CompanionRosterChoiceInfo {
+  playerId: string;
+  jerseyNo: string;
+  name: string;
+}
+export interface CompanionSlotTargetInfo {
+  id: string;
+  label: string;
+  roster: CompanionRosterChoiceInfo[];
+}
+export interface CompanionCardTargetInfo {
+  id: string;
+  label: string;
+  roster: CompanionRosterChoiceInfo[];
+}
+export interface CompanionHighlightTargetInfo {
+  id: string;
+  label: string;
+  roster: CompanionRosterChoiceInfo[];
+}
+export type SyncCompanionList = {
+  type: 'COMPANION_LIST';
+  bindings: CompanionBindingInfo[];
+  scoreTargets: CompanionScoreTargetInfo[];
+  playerSelectors: CompanionPlayerSelectorTargetInfo[];
+  slotTargets: CompanionSlotTargetInfo[];
+  cardTargets: CompanionCardTargetInfo[];
+  highlightTargets: CompanionHighlightTargetInfo[];
+};
+export type SyncCompanionRequestList = { type: 'COMPANION_REQUEST_LIST' };
+export type SyncCompanionTrigger = {
+  type: 'COMPANION_TRIGGER';
+  id: string;
+  state: 'press' | 'release';
+  /** Only meaningful when id refers to a score target: the jersey number of
+   *  whoever scored. Omitted/blank scores with no scorer recorded — exactly
+   *  like clicking "Skip" in the app's own scorer picker. */
+  jerseyNo?: string;
+  /** Only meaningful when id refers to a player-selector, slot, card, or
+   *  highlight target: the SavedTeam player id involved. Empty string for a
+   *  slot target means "clear this slot". */
+  playerId?: string;
+  /** Only meaningful when id refers to a card target: which card to give. */
+  cardType?: 'yellow' | 'orange' | 'red';
+};
+export interface CompanionLastScorer {
+  scorer: string;
+  jerseyNo: string;
+  action: string;
+}
+export interface CompanionScoreboardInfo {
+  widgetId: string;
+  teamAName: string;
+  teamBName: string;
+  scoreA: number;
+  scoreB: number;
+  lastA?: CompanionLastScorer;
+  lastB?: CompanionLastScorer;
+  /** Raw stored logo URL, LAN-reachable (same one vMix itself fetches) —
+   *  empty string if no logo is set for that team. */
+  teamALogo: string;
+  teamBLogo: string;
+}
+export interface CompanionAppTextFieldInfo {
+  widgetId: string;
+  widgetType: string;
+  typeIndex: number;
+  widgetLabel: string;
+  fieldName: string;
+  value: string;
+}
+export interface CompanionNextFixture {
+  teamAName: string;
+  teamBName: string;
+  date: string;
+  time: string;
+  venue: string;
+  round: string;
+  competition: string;
+}
+export interface CompanionMatchInfo {
+  tournamentName: string;
+  venue: string;
+  nextFixture?: CompanionNextFixture;
+}
+export interface CompanionTimerStageInfo {
+  widgetId: string;
+  widgetLabel: string;
+  periods: number;
+  currentPeriod: number;
+  inBreak: boolean;
+  inExtraTime: boolean;
+  etCurrentPeriod: number;
+  etPeriods: number;
+  etInBreak: boolean;
+  inAfterEt: boolean;
+  inFinalPlay: boolean;
+  running: boolean;
+}
+export type SyncCompanionFeedback = {
+  type: 'COMPANION_FEEDBACK';
+  recording: boolean;
+  streaming: boolean;
+  fadeToBlack: boolean;
+  /** target id -> current on/off state, for toggle-mode targets only. */
+  toggles: Record<string, boolean>;
+  /** Live score + last-scorer info per Scoreboard widget — feeds Companion
+   *  Variables so a Stream Deck button's text can show who scored without
+   *  Companion needing to poll for it. */
+  scoreboards: CompanionScoreboardInfo[];
+  /** What the controller app itself is currently displaying — Timer
+   *  time/period/status, Label text, File Path, etc (see
+   *  companionAppText.ts) — NOT vMix's own input state. Also feeds
+   *  Companion Variables + a "Show app display text" feedback. */
+  appText: CompanionAppTextFieldInfo[];
+  /** General match-context data from the database, not tied to any one
+   *  widget — current tournament/venue scope and the next unsent fixture
+   *  (see companionMatchInfo.ts). Feeds its own group of Variables. */
+  matchInfo: CompanionMatchInfo;
+  /** Per-Timer-widget stage state (which period, or Extra Time/After ET/
+   *  Final Play) — feeds a "Timer stage active" feedback. */
+  timerStages: CompanionTimerStageInfo[];
+};
+
+export type SyncMessage = SyncAction | SyncFullState | SyncCommentatorFullState | SyncRequestState | SyncVmixStatus | SyncClientList | SyncVmixData | SyncVmixCommand | SyncPushTournamentData | SyncCompanionList | SyncCompanionRequestList | SyncCompanionTrigger | SyncCompanionFeedback;
 
 type MessageListener = (msg: SyncMessage) => void;
 type StatusListener = (status: 'connecting' | 'connected' | 'disconnected') => void;

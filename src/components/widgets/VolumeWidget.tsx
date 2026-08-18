@@ -1,3 +1,4 @@
+import { VolumeX, Volume2 } from 'lucide-react';
 import { useVmixStore } from '../../stores/vmixStore';
 
 interface Props {
@@ -82,7 +83,7 @@ export function VolumeWidget({ config }: Props) {
           onClick={handleMuteToggle}
           disabled={!connVmixState}
         >
-          {muted ? '🔇' : '🔊'}
+          {muted ? <VolumeX size={14} strokeWidth={2} /> : <Volume2 size={14} strokeWidth={2} />}
         </button>
       )}
 

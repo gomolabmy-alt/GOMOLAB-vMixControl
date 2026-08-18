@@ -6,6 +6,7 @@ import { useVmixStore } from './vmixStore';
 import { useUndoStore } from './undoStore';
 import { syncClient } from '../lib/syncClient';
 import { transparentLogoUrl } from '../lib/imageUrl';
+import { remapWidgetIdInConfig } from '../lib/autoLink';
 import TimerWorkerClass from '../workers/timerWorker?worker&inline';
 
 // Web Worker — used only in browser mode (not Tauri).
@@ -25,6 +26,17 @@ timerWorker.onmessage = (e) => {
 // ── Rust-backed timer (Tauri only) ───────────────────────────────────────────
 // True if running inside the Tauri desktop app.
 const _isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+// True if this Tauri webview is a popped-out canvas-page window (see
+// Canvas.tsx/main.tsx) rather than the main window — synchronous, no
+// dependency on syncClient.connect() having run yet (see _isMainDesktopWindow).
+const _isPopoutWindow = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('popoutPage');
+// Used only for the persisted-storage selector below (raw()), which runs
+// synchronously at store-creation time — i.e. at module-import time, before
+// main.tsx's own body has run syncClient.connect(). syncClient.isHost isn't
+// safe there (it's still false until connect() runs), so this mirrors
+// main.tsx's isMainWindow logic using only synchronous, timing-independent
+// checks instead.
+const _isMainDesktopWindow = _isTauriApp && !_isPopoutWindow;
 
 // Per-widget wall-clock anchor for the current running segment.
 // Cleared when the timer stops; set/reset when it starts or crosses a boundary.
@@ -47,7 +59,7 @@ const _breakGameMs: Record<string, number> = {};
 const _tickMsMap: Record<string, number> = {};      // nominal tick interval
 const _lastTickAt: Record<string, number> = {};     // epoch ms of last tick fire
 
-// In Tauri: Rust emits "timer-tick" every 100 ms from a tokio::time::interval.
+// In Tauri: Rust emits "timer-tick" every 20 ms from a tokio::time::interval.
 // This runs on a native thread and cannot be throttled by WKWebView — it is the
 // single reliable tick source for all active timer widgets.
 // In browsers: Web Worker setInterval is kept as the tick source.
@@ -58,9 +70,9 @@ if (_isTauriApp) {
       for (const widgetId of Object.keys(timerTickHandlers)) {
         const tickMs = _tickMsMap[widgetId] ?? 1000;
         const last = _lastTickAt[widgetId] ?? 0;
-        // Down-sample: 1000 ms timers should only fire once per second even
-        // though Rust ticks every 100 ms.
-        if (now - last >= tickMs - 60) {
+        // Down-sample: e.g. 1000 ms timers should only fire once per second
+        // even though Rust ticks every 20 ms.
+        if (now - last >= tickMs - 15) {
           _lastTickAt[widgetId] = now;
           timerTickHandlers[widgetId]?.();
         }
@@ -127,41 +139,51 @@ function computeTimerPeriodLabel(cfg: Record<string, any>): string {
   if (cfg.inAfterEt) return cfg.afterEtMode === 'goldenPoint' ? 'Golden Point' : 'Sudden Death';
   if (periods <= 1) return '';
   if (inBreak) return periods === 2 ? 'Half Time' : 'Break';
-  if (currentPeriod > periods) return 'Done';
+  // Matches the Period Labels settings list's own "done" row label
+  // (WidgetConfigPanel's 'timer' case) — was unconditionally 'Done' here,
+  // so a 2-period match's Default Label never actually said "Full Time"
+  // even though the settings panel showed that as the row for this state.
+  if (currentPeriod > periods) return periods === 2 ? 'Full Time' : 'Done';
   if (periods === 2) return currentPeriod === 1 ? '1st Half' : '2nd Half';
   if (periods === 4) return `Q${currentPeriod}`;
   return `P${currentPeriod}/${periods}`;
 }
 
 function timerSendAll(primaryClient: any, cfg: Record<string, any>, value: string) {
-  const targets: Array<{ inputKey: string; fieldName?: string; fieldTimerName?: string; fieldPeriodLabel?: string; fieldPeriodImage?: string }> = cfg.vmixInputs?.length
+  const targets: Array<{ inputKey: string; fieldName?: string; fieldTimerName?: string; fieldDefaultLabel?: string; fieldPeriodLabel?: string; fieldPeriodLabel2?: string; fieldPeriodImage?: string }> = cfg.vmixInputs?.length
     ? cfg.vmixInputs
     : cfg.vmixInputKey
       ? [{ inputKey: cfg.vmixInputKey, fieldName: cfg.fieldName }]
       : [];
   const stateKey = computeTimerStateKey(cfg);
-  const override = (cfg.periodOverrides ?? {})[stateKey] as { customText?: string; imagePath?: string } | undefined;
+  const override = (cfg.periodOverrides ?? {})[stateKey] as { customText?: string; customText2?: string; imagePath?: string } | undefined;
   const autoLabel = computeTimerPeriodLabel(cfg);
-  const periodText = override?.customText ?? autoLabel;
+  // Custom text 1/2 are both independent, optional-only fields now (blank
+  // if unused, no fallback) — the auto-generated label gets its own always-
+  // on Default Label field instead of Custom 1 silently doubling as it.
+  const periodText = override?.customText ?? '';
+  const periodText2 = override?.customText2 ?? '';
   const periodImage = override?.imagePath ?? '';
   if (!primaryClient) return;
   for (const t of targets) {
     if (!t.inputKey) continue;
     if (t.fieldName) primaryClient.setTextField(t.inputKey, t.fieldName, value);
     if (t.fieldTimerName && cfg.name) primaryClient.setTextField(t.inputKey, t.fieldTimerName, cfg.name);
+    if (t.fieldDefaultLabel && autoLabel) primaryClient.setTextField(t.inputKey, t.fieldDefaultLabel, autoLabel);
     if (t.fieldPeriodLabel && periodText) primaryClient.setTextField(t.inputKey, t.fieldPeriodLabel, periodText);
-    if (t.fieldPeriodImage && periodImage) primaryClient.setTextField(t.inputKey, t.fieldPeriodImage, periodImage);
+    if (t.fieldPeriodLabel2 && periodText2) primaryClient.setTextField(t.inputKey, t.fieldPeriodLabel2, periodText2);
+    if (t.fieldPeriodImage && periodImage) primaryClient.setImageField(t.inputKey, t.fieldPeriodImage, periodImage);
   }
 }
 
 function sendMiniTimer(client: any, cfg: Record<string, any>, ms: number) {
   if (!client || !cfg.miniVmixInputKey || !cfg.miniFieldName) return;
-  client.setTextField(cfg.miniVmixInputKey, cfg.miniFieldName, formatTime(ms, cfg.format));
+  client.setTextField(cfg.miniVmixInputKey, cfg.miniFieldName, formatTimeForVmix(ms, cfg));
 }
 
 function sendFinalPlayTimer(client: any, cfg: Record<string, any>, ms: number) {
   if (!client || !cfg.finalPlayVmixInputKey || !cfg.finalPlayFieldName) return;
-  client.setTextField(cfg.finalPlayVmixInputKey, cfg.finalPlayFieldName, formatTime(ms, cfg.format));
+  client.setTextField(cfg.finalPlayVmixInputKey, cfg.finalPlayFieldName, formatTimeForVmix(ms, cfg));
 }
 
 function firePeriodEndTrigger(cfg: Record<string, any>, client: any) {
@@ -198,20 +220,65 @@ function sendOverrunColor(cfg: Record<string, any>, client: any, active: boolean
   client.fn(fn, { Input: inputKey, SelectedName: field, Value: color }).catch(() => {});
 }
 
-function formatTime(ms: number, fmt: string): string {
+// `opts` fields (all optional — every caller can mix and match, and every
+// caller passes the SAME widget config used to build the vMix text, so the
+// on-screen widget and the vMix output always render identically):
+//  - showMs: appends a trailing :FF (hundredths of a second) segment.
+//  - noLeadingZero: drops a leading zero off the leftmost printed unit
+//    (e.g. "07:00" -> "7:00").
+//  - subMinuteMs: once under a minute, switches to a bare SS:FF display
+//    (e.g. "58:58" for 58.58s) regardless of `fmt` — mirrors how vMix's own
+//    GT timer counts down its final seconds.
+function formatTime(ms: number, fmt: string, opts?: { showMs?: boolean; noLeadingZero?: boolean; subMinuteMs?: boolean }): string {
   const s = Math.floor(ms / 1000);
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);  // minutes within current hour (for hh:mm:ss)
   const totalMin = Math.floor(s / 60);     // total minutes (for mm:ss — never wraps at 60)
   const sec = s % 60;
+  const centis = Math.floor((ms % 1000) / 10); // hundredths of a second, 00-99
   const pad = (n: number) => String(n).padStart(2, '0');
-  switch (fmt) {
-    case 'hh:mm:ss': return `${pad(h)}:${pad(m)}:${pad(sec)}`;
-    case 'h:mm:ss':  return `${h}:${pad(m)}:${pad(sec)}`;
-    case 'mm:ss':    return `${pad(totalMin)}:${pad(sec)}`;
-    case 'ss':       return String(s);
-    default:         return `${pad(totalMin)}:${pad(sec)}`;
+
+  let out: string;
+  if (opts?.subMinuteMs && ms < 60000) {
+    out = `${pad(sec)}:${pad(centis)}`;
+  } else {
+    switch (fmt) {
+      case 'hh:mm:ss': out = `${pad(h)}:${pad(m)}:${pad(sec)}`; break;
+      case 'h:mm:ss':  out = `${h}:${pad(m)}:${pad(sec)}`; break;
+      case 'mm:ss':    out = `${pad(totalMin)}:${pad(sec)}`; break;
+      case 'ss':       out = String(s); break;
+      default:         out = `${pad(totalMin)}:${pad(sec)}`; break;
+    }
+    if (opts?.showMs) out += `:${pad(centis)}`;
   }
+
+  if (opts?.noLeadingZero) out = out.replace(/^0(\d)/, '$1');
+  return out;
+}
+
+// By default (cfg.vmixFollowsFormat !== false) the text pushed to vMix uses
+// the exact same format/options as the widget's own on-screen display —
+// the whole point of `format`/`showMs`/`noLeadingZero`/`subMinuteMs` living
+// on one shared config. Opting out (vmixFollowsFormat: false) lets vMix's
+// text field keep its own separate format instead — e.g. the on-screen
+// clock shows milliseconds for the operator while the vMix output stays a
+// plain mm:ss for broadcast, or the other way around. A plain persistent
+// config field either way — nothing about period-end/reset transitions
+// touches it, so it survives every period change exactly like `format`
+// itself already does.
+function vmixFormatFor(cfg: Record<string, any>): { fmt: string; opts: Record<string, any> } {
+  if (cfg.vmixFollowsFormat === false) {
+    return {
+      fmt: cfg.vmixFormat ?? 'mm:ss',
+      opts: { showMs: cfg.vmixShowMs, noLeadingZero: cfg.vmixNoLeadingZero, subMinuteMs: cfg.vmixSubMinuteMs },
+    };
+  }
+  return { fmt: cfg.format ?? 'mm:ss', opts: cfg };
+}
+
+function formatTimeForVmix(ms: number, cfg: Record<string, any>): string {
+  const { fmt, opts } = vmixFormatFor(cfg);
+  return formatTime(ms, fmt, opts);
 }
 
 function makePage(name = 'Page 1'): CanvasPage {
@@ -236,6 +303,11 @@ interface CanvasStore {
   // Commentator pages
   addCommentatorPage: () => void;
   deleteCommentatorPage: (id: string) => void;
+  /** Undo helper for deleteCommentatorPage — splices a deleted page back in
+   *  at its original index rather than appending it to the end. */
+  restoreCommentatorPageAt: (page: CanvasPage, index: number) => void;
+  /** Drag-to-reorder in the commentator tab bar. */
+  reorderCommentatorPages: (draggedId: string, targetId: string) => void;
   renameCommentatorPage: (id: string, name: string) => void;
   setCommentatorActivePage: (id: string) => void;
 
@@ -258,11 +330,20 @@ interface CanvasStore {
   // Pages
   addPage: () => string;
   deletePage: (id: string) => void;
+  /** Undo helper for deletePage — splices a deleted page back in at its
+   *  original index rather than appending it to the end. */
+  restorePageAt: (page: CanvasPage, index: number) => void;
+  /** Drag-to-reorder in the main tab bar. */
+  reorderPages: (draggedId: string, targetId: string) => void;
   renamePage: (id: string, name: string) => void;
+  /** Sets/clears the OS-global hotkey that jumps straight to this page
+   *  (see collectHotkeyBindings). */
+  setPageHotkey: (id: string, hotkey: string | undefined) => void;
   setActivePage: (id: string) => void;
   /** Binds/unbinds a canvas page to a tournament — widgets on it fall back to
    *  this instead of each needing their own "which tournament" picker. */
   setPageTournament: (id: string, tournamentId: string | undefined) => void;
+  setPageVenue: (id: string, venue: string | undefined) => void;
   /** Clones a page (all its widgets, with fresh ids) as a new page — the
    *  quickest way to stand up a new tournament's canvas from an existing
    *  layout/template instead of rebuilding widgets from scratch. Returns the
@@ -278,6 +359,13 @@ interface CanvasStore {
   deleteWidget: (widgetId: string) => void;
   updateWidget: (widgetId: string, patch: Partial<CanvasWidget>) => void;
   updateWidgetConfig: (widgetId: string, patch: Record<string, any>) => void;
+  /** Changes a widget's own id to a user-chosen string (validated unique,
+   *  non-empty) and rewrites every other widget's config that pointed at
+   *  the old id — across both the main canvas and the commentator canvas —
+   *  so no link (linked scoreboard/timer, a button's target action, etc.)
+   *  silently breaks. Returns an error message instead of applying anything
+   *  if the new id is blank or already taken. */
+  renameWidgetId: (widgetId: string, newId: string) => { ok: boolean; error?: string };
   moveWidget: (widgetId: string, x: number, y: number) => void;
   resizeWidget: (widgetId: string, w: number, h: number) => void;
   duplicateWidget: (widgetId: string) => void;
@@ -333,6 +421,20 @@ interface CanvasStore {
     side: 'A' | 'B',
     oldPlaceholder: string,
     team: { id?: string; name: string; shortName?: string; color: string; logo?: string },
+  ) => void;
+
+  /** Pushes an edited team's identity (name/shortName/color/logo — see
+   *  teamDbStore.updateTeam) into every scoreboard widget currently showing
+   *  that team, matched by teamAId/teamBId rather than name text — unlike
+   *  syncScoreboardTeamForFixture above (which only replaces a still-
+   *  unresolved bracket placeholder), this fires for ANY already-loaded
+   *  real team, on any page, however it got there (Load Match or a direct
+   *  team pick), since otherwise a scoreboard prepared before a logo/color
+   *  edit keeps showing the stale value — including whatever's pushed to
+   *  vMix and the Companion module — until the operator reloads it. */
+  syncScoreboardTeamIdentity: (
+    teamId: string,
+    identity: { name?: string; shortName?: string; color?: string; logo?: string },
   ) => void;
 
   // Scoreboard cards
@@ -434,6 +536,8 @@ export const useCanvasStore = create<CanvasStore>()(
         },
 
         deleteCommentatorPage: (id) => {
+          const index = get().commentatorPages.findIndex((p) => p.id === id);
+          const deleted = get().commentatorPages.find((p) => p.id === id);
           const pages = get().commentatorPages.filter((p) => p.id !== id);
           if (pages.length === 0) {
             const page = makePage('Page 1');
@@ -442,6 +546,32 @@ export const useCanvasStore = create<CanvasStore>()(
             const stillActive = pages.some((p) => p.id === get().commentatorActivePageId);
             set({ commentatorPages: pages, commentatorActivePageId: stillActive ? get().commentatorActivePageId : pages[0].id });
           }
+          sendCommentatorFullState();
+          if (deleted) {
+            useUndoStore.getState().pushUndo(`Deleted page "${deleted.name}"`, () =>
+              get().restoreCommentatorPageAt(deleted, index));
+          }
+        },
+
+        restoreCommentatorPageAt: (page, index) => {
+          set(s => {
+            const pages = [...s.commentatorPages];
+            pages.splice(Math.min(index, pages.length), 0, page);
+            return { commentatorPages: pages };
+          });
+          sendCommentatorFullState();
+        },
+
+        reorderCommentatorPages: (draggedId, targetId) => {
+          if (draggedId === targetId) return;
+          const pages = get().commentatorPages;
+          const fromIdx = pages.findIndex(p => p.id === draggedId);
+          const toIdx = pages.findIndex(p => p.id === targetId);
+          if (fromIdx === -1 || toIdx === -1) return;
+          const reordered = [...pages];
+          const [moved] = reordered.splice(fromIdx, 1);
+          reordered.splice(toIdx, 0, moved);
+          set({ commentatorPages: reordered });
           sendCommentatorFullState();
         },
 
@@ -591,16 +721,44 @@ export const useCanvasStore = create<CanvasStore>()(
         },
 
         deletePage: (id) => {
+          const index = get().pages.findIndex((p) => p.id === id);
+          const deleted = get().pages.find((p) => p.id === id);
           const pages = get().pages.filter((p) => p.id !== id);
           if (pages.length === 0) {
             const page = makePage('Page 1');
             set({ pages: [page], activePageId: page.id });
             syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'deletePage', args: [id] });
-            return;
+          } else {
+            const stillActive = pages.some((p) => p.id === get().activePageId);
+            set({ pages, activePageId: stillActive ? get().activePageId : pages[0].id });
+            syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'deletePage', args: [id] });
           }
-          const stillActive = pages.some((p) => p.id === get().activePageId);
-          set({ pages, activePageId: stillActive ? get().activePageId : pages[0].id });
-          syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'deletePage', args: [id] });
+          if (deleted) {
+            useUndoStore.getState().pushUndo(`Deleted page "${deleted.name}"`, () =>
+              get().restorePageAt(deleted, index));
+          }
+        },
+
+        restorePageAt: (page, index) => {
+          set(s => {
+            const pages = [...s.pages];
+            pages.splice(Math.min(index, pages.length), 0, page);
+            return { pages };
+          });
+          syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'restorePageAt', args: [page, index] });
+        },
+
+        reorderPages: (draggedId, targetId) => {
+          if (draggedId === targetId) return;
+          const pages = get().pages;
+          const fromIdx = pages.findIndex(p => p.id === draggedId);
+          const toIdx = pages.findIndex(p => p.id === targetId);
+          if (fromIdx === -1 || toIdx === -1) return;
+          const reordered = [...pages];
+          const [moved] = reordered.splice(fromIdx, 1);
+          reordered.splice(toIdx, 0, moved);
+          set({ pages: reordered });
+          syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'reorderPages', args: [draggedId, targetId] });
         },
 
         renamePage: (id, name) => {
@@ -608,13 +766,26 @@ export const useCanvasStore = create<CanvasStore>()(
           syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'renamePage', args: [id, name] });
         },
 
+        setPageHotkey: (id, hotkey) => {
+          set({ pages: get().pages.map((p) => p.id === id ? { ...p, hotkey: hotkey || undefined } : p) });
+          syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'setPageHotkey', args: [id, hotkey] });
+        },
+
         setActivePage: (id) => {
           set({ activePageId: id, selectedWidgetId: null });
         },
 
         setPageTournament: (id, tournamentId) => {
-          set({ pages: get().pages.map((p) => p.id === id ? { ...p, tournamentId } : p) });
+          // Resets venue on tournament change, same as the Sidebar's own
+          // Tournament→Venue picker (a venue name only means something
+          // relative to whichever tournament defined it).
+          set({ pages: get().pages.map((p) => p.id === id ? { ...p, tournamentId, venue: undefined } : p) });
           syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'setPageTournament', args: [id, tournamentId] });
+        },
+
+        setPageVenue: (id, venue) => {
+          set({ pages: get().pages.map((p) => p.id === id ? { ...p, venue } : p) });
+          syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'setPageVenue', args: [id, venue] });
         },
 
         duplicatePage: (id, opts) => {
@@ -624,6 +795,10 @@ export const useCanvasStore = create<CanvasStore>()(
             id: crypto.randomUUID(),
             name: opts?.name ?? `${src.name} Copy`,
             tournamentId: opts?.tournamentId ?? src.tournamentId,
+            // Only carries the source venue over for a plain duplicate — a
+            // duplicate explicitly aimed at a different tournament resets
+            // it, same reasoning as setPageTournament's own reset.
+            venue: opts?.tournamentId ? undefined : src.venue,
             widgets: src.widgets.map((w) => ({ ...w, id: crypto.randomUUID(), config: { ...w.config } })),
           };
           set({ pages: [...get().pages, newPage], activePageId: newPage.id });
@@ -695,6 +870,47 @@ export const useCanvasStore = create<CanvasStore>()(
           }),
 
         updateWidgetConfig,
+
+        renameWidgetId: (widgetId, newId) => {
+          const trimmed = newId.trim();
+          if (!trimmed) return { ok: false, error: 'ID cannot be empty' };
+          if (trimmed === widgetId) return { ok: true };
+          const allWidgets = [...get().pages, ...get().commentatorPages].flatMap(p => p.widgets);
+          if (!allWidgets.some(w => w.id === widgetId)) return { ok: false, error: 'Widget not found' };
+          if (allWidgets.some(w => w.id === trimmed)) return { ok: false, error: 'That ID is already used by another widget' };
+
+          const remap = (pages: CanvasPage[]) => pages.map(p => ({
+            ...p,
+            widgets: p.widgets.map(w => ({
+              ...w,
+              id: w.id === widgetId ? trimmed : w.id,
+              config: remapWidgetIdInConfig(w.config, widgetId, trimmed),
+            })),
+          }));
+
+          const { timerIntervals } = get();
+          const nextIntervals = timerIntervals[widgetId] !== undefined
+            ? (() => { const n = { ...timerIntervals }; n[trimmed] = n[widgetId]; delete n[widgetId]; return n; })()
+            : timerIntervals;
+
+          set({
+            pages: remap(get().pages),
+            commentatorPages: remap(get().commentatorPages),
+            timerIntervals: nextIntervals,
+            selectedWidgetId: get().selectedWidgetId === widgetId ? trimmed : get().selectedWidgetId,
+          });
+
+          // A timer renamed while running has live engine state keyed by its
+          // old id (the running interval, wall-clock anchors) — move it to
+          // the new key so the tick handler that's still firing keeps
+          // finding it, instead of the display silently freezing.
+          for (const m of [timerTickHandlers, _runWallStart, _runGameMs, _breakWallStart, _breakGameMs, _tickMsMap, _lastTickAt] as Record<string, unknown>[]) {
+            if (widgetId in m) { m[trimmed] = m[widgetId]; delete m[widgetId]; }
+          }
+
+          syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'renameWidgetId', args: [widgetId, trimmed] });
+          return { ok: true };
+        },
 
         moveWidget: (widgetId, x, y) => {
           set({
@@ -784,6 +1000,21 @@ export const useCanvasStore = create<CanvasStore>()(
               else store.startWidgetTimer(params.Input);
               break;
             }
+            case 'App.TimerJumpToPeriod':
+              store.jumpToPeriod(params.Input, parseInt(params.Period ?? '1', 10));
+              break;
+            case 'App.TimerStartExtraTime':
+              store.startExtraTime(params.Input);
+              break;
+            case 'App.TimerStartAfterEt':
+              store.startAfterEt(params.Input);
+              break;
+            case 'App.TimerStartFinalPlay':
+              store.startFinalPlay(params.Input);
+              break;
+            case 'App.TimerAdjust':
+              store.adjustWidgetTimer(params.Input, parseInt(params.Value ?? '0', 10));
+              break;
             case 'App.ScoreA':
               store.scoreWidgetAction(params.Input, 'A', parseInt(params.Value ?? '1', 10), params.Label);
               break;
@@ -792,6 +1023,9 @@ export const useCanvasStore = create<CanvasStore>()(
               break;
             case 'App.ScoreReset':
               store.resetWidgetScore(params.Input);
+              break;
+            case 'App.ScoreUndo':
+              store.undoLastScoreEntry(params.Input, (params.Team === 'B' ? 'B' : 'A'));
               break;
             case 'App.SetVariable': {
               const { globalVariables, setVariable } = useVmixStore.getState();
@@ -827,7 +1061,14 @@ export const useCanvasStore = create<CanvasStore>()(
             });
           }
 
-          const tickMs = config.highPrecision ? 100 : 1000;
+          // Showing milliseconds needs the underlying clock to actually tick
+          // faster than once a second, or the :FF digits just sit frozen for
+          // a full second and then jump — not "running". A 100 ms tick (what
+          // "high precision" alone gives you) isn't fine-grained enough
+          // either — the hundredths digit could then only ever land on a
+          // multiple of 10 (00, 10, 20…), so the last digit looked stuck.
+          // Either ms option gets the full 20 ms Rust tick rate instead.
+          const tickMs = (config.showMs || config.subMinuteMs) ? 20 : config.highPrecision ? 100 : 1000;
 
           // Broadcast so other connected clients also start their interval
           syncClient.send({ type: 'ACTION', store: 'canvas', fn: 'startWidgetTimer', args: [widgetId] });
@@ -898,7 +1139,7 @@ export const useCanvasStore = create<CanvasStore>()(
               } else {
                 label = `End of Period ${currentPeriod}`;
               }
-              const endTimeStr = formatTime(periodEndMs, cfg.format ?? 'mm:ss');
+              const endTimeStr = formatTime(periodEndMs, cfg.format ?? 'mm:ss', cfg);
               const allWidgets = get().pages.flatMap((p: any) => p.widgets);
               for (const tlw of allWidgets) {
                 if (tlw.type === 'timeline' && tlw.config.linkedTimerWidgetId === widgetId) {
@@ -958,7 +1199,7 @@ export const useCanvasStore = create<CanvasStore>()(
                   // previously this only went out on the next main-period
                   // tick, which never happens while inBreak is true, so the
                   // label field stayed stuck on the last period's text.
-                  timerSendAll(triggerClient, { ...cfg, inBreak: true }, formatTime(breakStartMs, cfg.format));
+                  timerSendAll(triggerClient, { ...cfg, inBreak: true }, formatTimeForVmix(breakStartMs, cfg));
                 } else {
                   _runWallStart[widgetId] = Date.now();
                   _runGameMs[widgetId] = nextCurrentMs;
@@ -988,7 +1229,7 @@ export const useCanvasStore = create<CanvasStore>()(
             } else {
               const finalMs = cfg.mode === 'countdown' ? 0 : periods * cfg.durationMs;
               const { client } = useVmixStore.getState();
-              timerSendAll(client, cfg, formatTime(finalMs, cfg.format));
+              timerSendAll(client, cfg, formatTimeForVmix(finalMs, cfg));
               // The widget's own display recomputes total elapsed time as
               // (min(currentPeriod, periods) - 1) * durationMs + currentMs for
               // count-up + reset mode — i.e. currentMs is expected to hold only
@@ -1080,7 +1321,7 @@ export const useCanvasStore = create<CanvasStore>()(
               if (cfg.etOverrunning) {
                 const next = (cfg.etCurrentMs ?? 0) + tickMs;
                 updateWidgetConfig(widgetId, { etCurrentMs: next });
-                timerSendAll(client, cfg, formatTime(next, cfg.format));
+                timerSendAll(client, cfg, formatTimeForVmix(next, cfg));
                 sendMiniTimer(client, cfg, next);
                 return;
               }
@@ -1110,7 +1351,7 @@ export const useCanvasStore = create<CanvasStore>()(
                 if (cfg.overrun) {
                   const overrunStart = cfg.mode === 'countdown' ? 0 : (etPeriodStart + etDurationMs);
                   updateWidgetConfig(widgetId, { etCurrentMs: overrunStart, etOverrunning: true });
-                  timerSendAll(client, cfg, formatTime(overrunStart, cfg.format));
+                  timerSendAll(client, cfg, formatTimeForVmix(overrunStart, cfg));
                   sendMiniTimer(client, cfg, overrunStart);
                   sendOverrunColor(cfg, client, true);
                   return;
@@ -1142,14 +1383,14 @@ export const useCanvasStore = create<CanvasStore>()(
                 } else {
                   stopInterval();
                   updateWidgetConfig(widgetId, { etCurrentMs: etEndMs, running: false });
-                  timerSendAll(client, cfg, formatTime(etEndMs, cfg.format));
+                  timerSendAll(client, cfg, formatTimeForVmix(etEndMs, cfg));
                   sendMiniTimer(client, cfg, etEndMs);
                 }
                 return;
               }
 
               updateWidgetConfig(widgetId, { etCurrentMs: next });
-              timerSendAll(client, cfg, formatTime(next, cfg.format));
+              timerSendAll(client, cfg, formatTimeForVmix(next, cfg));
               sendMiniTimer(client, cfg, next);
               return;
             }
@@ -1159,7 +1400,7 @@ export const useCanvasStore = create<CanvasStore>()(
               if (cfg.afterEtOverrunning) {
                 const next = (cfg.afterEtCurrentMs ?? 0) + tickMs;
                 updateWidgetConfig(widgetId, { afterEtCurrentMs: next });
-                timerSendAll(client, cfg, formatTime(next, cfg.format));
+                timerSendAll(client, cfg, formatTimeForVmix(next, cfg));
                 sendMiniTimer(client, cfg, next);
                 return;
               }
@@ -1177,7 +1418,7 @@ export const useCanvasStore = create<CanvasStore>()(
                   sendMiniTimer(client, cfg, 0);
                 } else {
                   updateWidgetConfig(widgetId, { afterEtCurrentMs: next });
-                  timerSendAll(client, cfg, formatTime(next, cfg.format));
+                  timerSendAll(client, cfg, formatTimeForVmix(next, cfg));
                   sendMiniTimer(client, cfg, next);
                 }
               } else if (cfg.mode !== 'countdown' && maxMs > 0) {
@@ -1193,14 +1434,14 @@ export const useCanvasStore = create<CanvasStore>()(
                   sendMiniTimer(client, cfg, maxMs);
                 } else {
                   updateWidgetConfig(widgetId, { afterEtCurrentMs: next });
-                  timerSendAll(client, cfg, formatTime(next, cfg.format));
+                  timerSendAll(client, cfg, formatTimeForVmix(next, cfg));
                   sendMiniTimer(client, cfg, next);
                 }
               } else {
                 // unlimited countup
                 const next = (cfg.afterEtCurrentMs ?? 0) + tickMs;
                 updateWidgetConfig(widgetId, { afterEtCurrentMs: next });
-                timerSendAll(client, cfg, formatTime(next, cfg.format));
+                timerSendAll(client, cfg, formatTimeForVmix(next, cfg));
                 sendMiniTimer(client, cfg, next);
               }
               return;
@@ -1238,7 +1479,7 @@ export const useCanvasStore = create<CanvasStore>()(
                   stopInterval();
                   updateWidgetConfig(widgetId, base);
                 }
-                timerSendAll(client, cfg, formatTime(cfg.currentMs ?? 0, cfg.format));
+                timerSendAll(client, cfg, formatTimeForVmix(cfg.currentMs ?? 0, cfg));
                 return;
               }
               updateWidgetConfig(widgetId, { finalPlayMs: next });
@@ -1287,19 +1528,19 @@ export const useCanvasStore = create<CanvasStore>()(
                   });
                 }
                 if (client && cfg.breakVmixInputKey && cfg.breakFieldName) {
-                  client.setTextField(cfg.breakVmixInputKey, cfg.breakFieldName, formatTime(0, cfg.format));
+                  client.setTextField(cfg.breakVmixInputKey, cfg.breakFieldName, formatTimeForVmix(0, cfg));
                 }
-                timerSendAll(client, { ...cfg, inBreak: false, currentPeriod: nextPeriod }, formatTime(startMs, cfg.format));
+                timerSendAll(client, { ...cfg, inBreak: false, currentPeriod: nextPeriod }, formatTimeForVmix(startMs, cfg));
                 sendMiniTimer(client, cfg, 0);
               } else {
                 updateWidgetConfig(widgetId, { breakCurrentMs: nextBreak });
                 if (client && cfg.breakVmixInputKey && cfg.breakFieldName) {
-                  client.setTextField(cfg.breakVmixInputKey, cfg.breakFieldName, formatTime(nextBreak, cfg.format));
+                  client.setTextField(cfg.breakVmixInputKey, cfg.breakFieldName, formatTimeForVmix(nextBreak, cfg));
                 }
                 // Also push through the main vmixInputs targets so the period
                 // label field ("Half Time") stays live-refreshed during the
                 // break, not just at the moment the break started.
-                timerSendAll(client, cfg, formatTime(nextBreak, cfg.format));
+                timerSendAll(client, cfg, formatTimeForVmix(nextBreak, cfg));
                 sendMiniTimer(client, cfg, nextBreak);
               }
               return;
@@ -1313,7 +1554,7 @@ export const useCanvasStore = create<CanvasStore>()(
                 ? gameStart + (Date.now() - wallStart)
                 : (cfg.currentMs ?? 0) + tickMs;
               updateWidgetConfig(widgetId, { currentMs: overrunNext });
-              timerSendAll(client, cfg, formatTime(overrunNext, cfg.format));
+              timerSendAll(client, cfg, formatTimeForVmix(overrunNext, cfg));
               return;
             }
 
@@ -1348,7 +1589,7 @@ export const useCanvasStore = create<CanvasStore>()(
                 _runWallStart[widgetId] = Date.now();
                 _runGameMs[widgetId] = overrunStartMs;
                 updateWidgetConfig(widgetId, { currentMs: overrunStartMs, overrunning: true });
-                timerSendAll(client, cfg, formatTime(overrunStartMs, cfg.format));
+                timerSendAll(client, cfg, formatTimeForVmix(overrunStartMs, cfg));
                 sendOverrunColor(cfg, client, true);
                 return;
               }
@@ -1357,13 +1598,13 @@ export const useCanvasStore = create<CanvasStore>()(
             }
 
             updateWidgetConfig(widgetId, { currentMs: next });
-            timerSendAll(client, cfg, formatTime(next, cfg.format));
+            timerSendAll(client, cfg, formatTimeForVmix(next, cfg));
           };
 
           // Register tick source
           _tickMsMap[widgetId] = tickMs;
           if (_isTauriApp) {
-            // Rust 100ms ticks drive this timer; set wall-clock anchor so the
+            // Rust's ticks drive this timer; set wall-clock anchor so the
             // tick handler can compute accurate game time even after sleep.
             // Break has its own anchor slot (_breakWallStart/_breakGameMs),
             // separate from the main clock's, so resuming a manually-paused
@@ -1511,7 +1752,7 @@ export const useCanvasStore = create<CanvasStore>()(
           });
           useUndoStore.getState().pushUndo('Reset timer', () => updateWidgetConfig(widgetId, before));
           const { client } = useVmixStore.getState();
-          timerSendAll(client, config, formatTime(resetMs, config.format));
+          timerSendAll(client, config, formatTimeForVmix(resetMs, config));
           sendOverrunColor(config, client, false);
         },
 
@@ -1548,7 +1789,7 @@ export const useCanvasStore = create<CanvasStore>()(
             awaitingEndConfirm: false,
           });
           const { client } = useVmixStore.getState();
-          timerSendAll(client, config, formatTime(startMs, config.format));
+          timerSendAll(client, config, formatTimeForVmix(startMs, config));
           sendOverrunColor(config, client, false);
         },
 
@@ -1645,6 +1886,12 @@ export const useCanvasStore = create<CanvasStore>()(
           const cfg = findWidgetConfig(widgetId);
           if (!cfg) return;
 
+          // Every branch below freezes/advances the clock on the assumption
+          // the pending confirm has now been actioned — clear it up front so
+          // the Confirm button doesn't stay stuck showing (and looking like
+          // the press did nothing) once the branch's own patch lands on top.
+          updateWidgetConfig(widgetId, { awaitingEndConfirm: false });
+
           const { client } = useVmixStore.getState();
           sendOverrunColor(cfg, client, false);
 
@@ -1673,7 +1920,7 @@ export const useCanvasStore = create<CanvasStore>()(
             } else {
               updateWidgetConfig(widgetId, base);
             }
-            timerSendAll(client, cfg, formatTime(cfg.currentMs ?? 0, cfg.format));
+            timerSendAll(client, cfg, formatTimeForVmix(cfg.currentMs ?? 0, cfg));
             return;
           }
 
@@ -1727,7 +1974,7 @@ export const useCanvasStore = create<CanvasStore>()(
           firePeriodEndTrigger(cfg, client);
 
           if (currentPeriod < periods) {
-            const endTimeStr = formatTime(periodEndMs, cfg.format ?? 'mm:ss');
+            const endTimeStr = formatTime(periodEndMs, cfg.format ?? 'mm:ss', cfg);
             logToLinkedTimelines(widgetId, getPeriodEndLabel(periods, currentPeriod), endTimeStr);
             const breakMs = cfg.breakDurationMs ?? 0;
             if (breakMs > 0) {
@@ -1755,7 +2002,7 @@ export const useCanvasStore = create<CanvasStore>()(
           } else {
             // Full time — freeze at total accumulated game time
             const fullTimeMs = cfg.mode === 'countdown' ? 0 : periods * cfg.durationMs;
-            const fullTimeStr = formatTime(fullTimeMs, cfg.format ?? 'mm:ss');
+            const fullTimeStr = formatTime(fullTimeMs, cfg.format ?? 'mm:ss', cfg);
             logToLinkedTimelines(widgetId, getPeriodEndLabel(periods, currentPeriod), fullTimeStr);
             // See the matching comment in periodDone(): for count-up + reset
             // mode the display re-adds (periods-1)*duration on top of
@@ -1818,7 +2065,7 @@ export const useCanvasStore = create<CanvasStore>()(
             running: false,
           });
           const { client } = useVmixStore.getState();
-          timerSendAll(client, { ...config, inBreak: false, currentPeriod: nextPeriod }, formatTime(startMs, config.format));
+          timerSendAll(client, { ...config, inBreak: false, currentPeriod: nextPeriod }, formatTimeForVmix(startMs, config));
         },
 
         startFinalPlay: (widgetId) => {
@@ -1865,11 +2112,15 @@ export const useCanvasStore = create<CanvasStore>()(
 
           const scorerName = scorer ?? '';
 
-          // Build log entry with timer time if linked
+          // Build log entry with timer time (and current period, if linked)
           let timeStr = '';
+          let period: number | undefined;
           if (config.linkedTimerWidgetId) {
             const timerCfg = findWidgetConfig(config.linkedTimerWidgetId);
-            if (timerCfg) timeStr = formatTime(timerCfg.currentMs ?? 0, timerCfg.format ?? 'mm:ss');
+            if (timerCfg) {
+              timeStr = formatTime(timerCfg.currentMs ?? 0, timerCfg.format ?? 'mm:ss', timerCfg);
+              period = timerCfg.currentPeriod;
+            }
           }
           if (!timeStr) {
             const now = new Date();
@@ -1889,6 +2140,7 @@ export const useCanvasStore = create<CanvasStore>()(
             points: delta,
             scoreA,
             scoreB,
+            period,
           };
 
           updateWidgetConfig(widgetId, {
@@ -2034,6 +2286,35 @@ export const useCanvasStore = create<CanvasStore>()(
           set({ pages: get().pages.map(applyToPage), commentatorPages: get().commentatorPages.map(applyToPage) });
         },
 
+        syncScoreboardTeamIdentity: (teamId, identity) => {
+          const patchFor = (w: CanvasWidget) => {
+            if (w.type !== 'scoreboard' || w.config.linkedScoreboardSourceId) return null;
+            const c = w.config;
+            const patch: Record<string, unknown> = {};
+            if (c.teamAId === teamId) {
+              if (identity.name !== undefined) patch.teamAName = identity.name;
+              if (identity.shortName !== undefined) patch.teamAShortName = identity.shortName;
+              if (identity.color !== undefined) patch.teamAColor = identity.color;
+              if (identity.logo !== undefined) patch.teamALogo = identity.logo;
+            }
+            if (c.teamBId === teamId) {
+              if (identity.name !== undefined) patch.teamBName = identity.name;
+              if (identity.shortName !== undefined) patch.teamBShortName = identity.shortName;
+              if (identity.color !== undefined) patch.teamBColor = identity.color;
+              if (identity.logo !== undefined) patch.teamBLogo = identity.logo;
+            }
+            return Object.keys(patch).length > 0 ? patch : null;
+          };
+          const applyToPage = (p: CanvasPage): CanvasPage => ({
+            ...p,
+            widgets: p.widgets.map((w) => {
+              const patch = patchFor(w);
+              return patch ? { ...w, config: { ...w.config, ...patch } } : w;
+            }),
+          });
+          set({ pages: get().pages.map(applyToPage), commentatorPages: get().commentatorPages.map(applyToPage) });
+        },
+
         // Reverts the single most recent scoring action for one team — e.g.
         // undoing a "Try" (5pts) removes exactly that log entry and that
         // team's score drops by exactly 5, not a fixed decrement amount. The
@@ -2134,9 +2415,9 @@ export const useCanvasStore = create<CanvasStore>()(
               if (cfg.inExtraTime) displayMs = cfg.etCurrentMs ?? 0;
               else if (cfg.inAfterEt) displayMs = cfg.afterEtCurrentMs ?? 0;
               else displayMs = cfg.currentMs ?? 0;
-              timerSendAll(client, cfg, formatTime(displayMs, cfg.format ?? 'mm:ss'));
+              timerSendAll(client, cfg, formatTimeForVmix(displayMs, cfg));
               if (cfg.inBreak && cfg.breakVmixInputKey && cfg.breakFieldName) {
-                client.setTextField(cfg.breakVmixInputKey, cfg.breakFieldName, formatTime(cfg.breakCurrentMs ?? 0, cfg.format ?? 'mm:ss'));
+                client.setTextField(cfg.breakVmixInputKey, cfg.breakFieldName, formatTimeForVmix(cfg.breakCurrentMs ?? 0, cfg));
               }
               if (cfg.miniVmixInputKey && cfg.miniFieldName) {
                 let miniMs = 0;
@@ -2268,10 +2549,18 @@ export const useCanvasStore = create<CanvasStore>()(
       storage: (() => {
         // Debounce writes so timer ticks (every ~1 s) don't thrash localStorage
         // on every update.  Reads and removes are always synchronous and immediate.
-        const raw = () =>
-          typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-            ? localStorage
-            : sessionStorage;
+        // _isMainDesktopWindow, not syncClient.isHost — this storage object is
+        // built synchronously at store-creation time (module-import time), which
+        // runs before main.tsx's body has called syncClient.connect(), so
+        // isHost would still incorrectly read false here (it stayed false long
+        // enough for the very first hydration read to always hit empty
+        // sessionStorage instead of the real localStorage save — every restart
+        // looked like the canvas had never been saved). A popped-out
+        // canvas-page window is still a real Tauri webview but isn't the sync
+        // host, and must not independently persist its own (partial,
+        // single-page) copy of `pages` into the SAME localStorage key the
+        // main window writes to — _isMainDesktopWindow excludes it too.
+        const raw = () => _isMainDesktopWindow ? localStorage : sessionStorage;
         let _timer: ReturnType<typeof setTimeout> | null = null;
         let _pendingKey: string | null = null;
         let _pendingValue: string | null = null;
@@ -2301,7 +2590,10 @@ export const useCanvasStore = create<CanvasStore>()(
         // via FULL_STATE. Persisting pages (which may contain multi-MB base64 logos)
         // causes QuotaExceededError in sessionStorage, which prevents setSyncReady()
         // from being called and leaves the canvas stuck on the loading overlay.
-        if (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) return {};
+        // _isMainDesktopWindow, not syncClient.isHost — same synchronous-timing
+        // reasoning as raw() above, kept consistent so nothing in this
+        // persistence path depends on syncClient.connect() having run yet.
+        if (!_isMainDesktopWindow) return {};
         return {
           pages: s.pages.map((p) => ({
             ...p,
@@ -2325,14 +2617,17 @@ export { formatTime };
 export function initCanvasSync() {
   syncClient.onMessage((msg) => {
     if (msg.type === 'REQUEST_STATE') {
-      // A remote client just connected and wants our state — only host responds
-      if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) syncClient.sendFullState();
+      // A remote client just connected and wants our state — only the real
+      // sync host responds (syncClient.isHost, NOT '__TAURI_INTERNALS__' in
+      // window — that's true for every Tauri webview, including a popped-out
+      // canvas-page window, which is a client here, not a second host).
+      if (syncClient.isHost) syncClient.sendFullState();
       return;
     }
     if (msg.type === 'FULL_STATE') {
       // Host never accepts FULL_STATE (it IS the source of truth).
       // Clients always apply it so any stale sessionStorage never wins over live host state.
-      const isHost = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+      const isHost = syncClient.isHost;
       if (!isHost && msg.canvas) {
         const store = useCanvasStore.getState();
         try {
@@ -2414,6 +2709,21 @@ export function initCanvasSync() {
       case 'deletePage':
         store.deletePage(msg.args[0] as string);
         break;
+      case 'restorePageAt': {
+        const [page, index] = msg.args as [CanvasPage, number];
+        store.restorePageAt(page, index);
+        break;
+      }
+      case 'reorderPages': {
+        const [draggedId, targetId] = msg.args as [string, string];
+        store.reorderPages(draggedId, targetId);
+        break;
+      }
+      case 'setPageHotkey': {
+        const [pid, hotkey] = msg.args as [string, string | undefined];
+        useCanvasStore.setState((s) => ({ pages: s.pages.map((p) => p.id === pid ? { ...p, hotkey: hotkey || undefined } : p) }));
+        break;
+      }
       case 'renamePage': {
         const [pid, name] = msg.args as [string, string];
         store.renamePage(pid, name);
@@ -2421,7 +2731,17 @@ export function initCanvasSync() {
       }
       case 'setPageTournament': {
         const [pid, tid] = msg.args as [string, string | undefined];
-        useCanvasStore.setState((s) => ({ pages: s.pages.map((p) => p.id === pid ? { ...p, tournamentId: tid } : p) }));
+        useCanvasStore.setState((s) => ({ pages: s.pages.map((p) => p.id === pid ? { ...p, tournamentId: tid, venue: undefined } : p) }));
+        break;
+      }
+      case 'setPageVenue': {
+        const [pid, venue] = msg.args as [string, string | undefined];
+        useCanvasStore.setState((s) => ({ pages: s.pages.map((p) => p.id === pid ? { ...p, venue } : p) }));
+        break;
+      }
+      case 'renameWidgetId': {
+        const [oldId, newId] = msg.args as [string, string];
+        store.renameWidgetId(oldId, newId);
         break;
       }
     }

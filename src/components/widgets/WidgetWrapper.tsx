@@ -1,4 +1,5 @@
 import { useRef, useState, useEffect, useContext } from 'react';
+import { ArrowLeftRight } from 'lucide-react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import type { CanvasWidget } from '../../types/canvas';
 import { WIDGET_TYPE_LABELS } from '../../types/canvas';
@@ -118,7 +119,7 @@ export function WidgetWrapper({ widget, children }: Props) {
               onClick={(e) => { e.stopPropagation(); setShowPageMenu((v) => !v); }}
               title="Move / copy to page"
             >
-              ⇄
+              <ArrowLeftRight size={12} strokeWidth={2} />
             </button>
             {showPageMenu && (
               <div className="cw-page-dropdown">

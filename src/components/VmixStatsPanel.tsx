@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import type { LucideIcon } from 'lucide-react';
+import { Check, X, AlertTriangle, RotateCcw, ArrowRight, Zap, ArrowLeftRight, Minus } from 'lucide-react';
 import { useVmixStore } from '../stores/vmixStore';
 import type { ConnectionLogEvent } from '../types/vmix';
 
@@ -10,21 +12,21 @@ interface Props {
 type Tab = 'stats' | 'data' | 'log';
 type Filter = 'all' | 'connection' | 'commands' | 'errors';
 
-const EVENT_META: Record<ConnectionLogEvent, { icon: string; label: string; color: string; group: Filter }> = {
-  'connected':      { icon: '✓',  label: 'Connected',       color: 'var(--green-bright)', group: 'connection' },
-  'disconnected':   { icon: '–',  label: 'Disconnected',    color: 'var(--text-muted)',   group: 'connection' },
-  'error':          { icon: '✗',  label: 'Error',           color: 'var(--red)',           group: 'errors' },
-  'stale':          { icon: '⚠',  label: 'Stale',           color: '#f39c12',             group: 'connection' },
-  'recovered':      { icon: '↺',  label: 'Recovered',       color: 'var(--green-bright)', group: 'connection' },
-  'sent':           { icon: '→',  label: 'Sent',            color: 'var(--accent)',        group: 'commands' },
-  'send-error':     { icon: '✗',  label: 'Send failed',     color: 'var(--red)',           group: 'errors' },
-  'tcp-connect':    { icon: '⚡', label: 'TCP connected',   color: 'var(--green-bright)', group: 'connection' },
-  'tcp-disconnect': { icon: '⚡', label: 'TCP dropped',     color: '#f39c12',             group: 'connection' },
-  'tcp-reconnect':  { icon: '⚡', label: 'TCP reconnected', color: 'var(--green-bright)', group: 'connection' },
-  'poll-fallback':  { icon: '↔',  label: 'HTTP fallback',   color: '#f39c12',             group: 'connection' },
-  'poll-error':     { icon: '✗',  label: 'Poll failed',     color: 'var(--red)',           group: 'errors' },
-  'poll-restart':   { icon: '↺',  label: 'Poll restarted',  color: '#f39c12',             group: 'connection' },
-  'tcp-stale':      { icon: '↺',  label: 'TCP stale—reset', color: '#e67e22',             group: 'connection' },
+const EVENT_META: Record<ConnectionLogEvent, { icon: LucideIcon; label: string; color: string; group: Filter }> = {
+  'connected':      { icon: Check,          label: 'Connected',       color: 'var(--green-bright)', group: 'connection' },
+  'disconnected':   { icon: Minus,          label: 'Disconnected',    color: 'var(--text-muted)',   group: 'connection' },
+  'error':          { icon: X,              label: 'Error',           color: 'var(--red)',           group: 'errors' },
+  'stale':          { icon: AlertTriangle,  label: 'Stale',           color: '#f39c12',             group: 'connection' },
+  'recovered':      { icon: RotateCcw,      label: 'Recovered',       color: 'var(--green-bright)', group: 'connection' },
+  'sent':           { icon: ArrowRight,     label: 'Sent',            color: 'var(--accent)',        group: 'commands' },
+  'send-error':     { icon: X,              label: 'Send failed',     color: 'var(--red)',           group: 'errors' },
+  'tcp-connect':    { icon: Zap,            label: 'TCP connected',   color: 'var(--green-bright)', group: 'connection' },
+  'tcp-disconnect': { icon: Zap,            label: 'TCP dropped',     color: '#f39c12',             group: 'connection' },
+  'tcp-reconnect':  { icon: Zap,            label: 'TCP reconnected', color: 'var(--green-bright)', group: 'connection' },
+  'poll-fallback':  { icon: ArrowLeftRight, label: 'HTTP fallback',   color: '#f39c12',             group: 'connection' },
+  'poll-error':     { icon: X,              label: 'Poll failed',     color: 'var(--red)',           group: 'errors' },
+  'poll-restart':   { icon: RotateCcw,      label: 'Poll restarted',  color: '#f39c12',             group: 'connection' },
+  'tcp-stale':      { icon: RotateCcw,      label: 'TCP stale—reset', color: '#e67e22',             group: 'connection' },
 };
 
 function parseFieldKey(key: string) {
@@ -234,7 +236,7 @@ export function VmixStatsPanel({ anchorRef, onClose }: Props) {
                         {input && <span className="vmix-field-input">{input.slice(0, 8)}…</span>}
                         {f.connectionName && <span className="vmix-field-conn">{f.connectionName}</span>}
                         <span className="vmix-field-time" style={{ color: '#c0392b' }}>
-                          target input not found in current vMix project — re-pick it in ⚙ config
+                          target input not found in current vMix project — re-pick it in config
                         </span>
                       </div>
                     </div>
@@ -381,6 +383,7 @@ export function VmixStatsPanel({ anchorRef, onClose }: Props) {
             )}
             {filteredLog.map((entry) => {
               const meta = EVENT_META[entry.event];
+              const MetaIcon = meta?.icon;
               return (
                 <div key={entry.id} className="vmix-log-row">
                   <span className="vmix-log-time">{fmtTime(entry.time)}</span>
@@ -389,7 +392,7 @@ export function VmixStatsPanel({ anchorRef, onClose }: Props) {
                     style={{ background: meta?.color ?? 'var(--text-muted)', color: '#fff' }}
                     title={meta?.label}
                   >
-                    {meta?.icon ?? '?'}
+                    {MetaIcon ? <MetaIcon size={14} /> : '?'}
                   </span>
                   <div className="vmix-log-info">
                     <div className="vmix-log-top">

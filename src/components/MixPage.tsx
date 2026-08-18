@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
+import { Play, Pause, Camera } from 'lucide-react';
 import { useVmixStore } from '../stores/vmixStore';
 
 // ─── T-Bar ─────────────────────────────────────────────────────────────────
@@ -140,8 +141,12 @@ function ReplayControls() {
       <div className="replay-grid">
         <button className="replay-btn" onClick={replayMarkIn}  disabled={!vmixState}>Mark In</button>
         <button className="replay-btn" onClick={replayMarkOut} disabled={!vmixState}>Mark Out</button>
-        <button className="replay-btn replay-btn--play" onClick={replayPlay}  disabled={!vmixState}>▶ Play</button>
-        <button className="replay-btn" onClick={replayPause} disabled={!vmixState}>⏸ Pause</button>
+        <button className="replay-btn replay-btn--play" onClick={replayPlay}  disabled={!vmixState}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Play size={14} /> Play</span>
+        </button>
+        <button className="replay-btn" onClick={replayPause} disabled={!vmixState}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Pause size={14} /> Pause</span>
+        </button>
         <button className="replay-btn replay-btn--now"  onClick={replayNow}  disabled={!vmixState}>Replay Now</button>
         <button className="replay-btn replay-btn--live" onClick={replayLive} disabled={!vmixState}>Go Live</button>
       </div>
@@ -158,7 +163,7 @@ function SnapshotControl() {
       <div className="mix-section-title">Snapshot</div>
       <div className="output-grid">
         <button className="output-btn" onClick={() => sendFunction('Snapshot')} disabled={!vmixState}>
-          📷 Snapshot
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Camera size={14} /> Snapshot</span>
         </button>
       </div>
     </div>

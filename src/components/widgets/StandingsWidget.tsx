@@ -5,7 +5,7 @@ import { useTournamentStore } from '../../stores/tournamentStore';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { SPORT_DEFAULTS } from '../../types/tournament';
 import type { TournamentGroup } from '../../types/tournament';
-import { computeStandings, normalizeGroups, StandingsTable } from '../TournamentManager';
+import { computeStandings, isPoolStageResult, normalizeGroups, StandingsTable } from '../TournamentManager';
 
 interface Props {
   widgetId: string;
@@ -35,8 +35,9 @@ export function StandingsWidget({ widgetId, config }: Props) {
     () => tournament ? allTeams.filter(t => t.tournamentId === tournament.id && (!category || t.category === category)) : [],
     [allTeams, tournament, category]
   );
+  // Group standings must only count pool-stage results — see isPoolStageResult.
   const results = useMemo(
-    () => tournament ? allResults.filter(r => r.tournamentId === tournament.id) : [],
+    () => tournament ? allResults.filter(r => r.tournamentId === tournament.id && isPoolStageResult(r)) : [],
     [allResults, tournament]
   );
 

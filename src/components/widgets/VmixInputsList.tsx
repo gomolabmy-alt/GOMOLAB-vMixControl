@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { ArrowRight } from 'lucide-react';
 import { useVmixStore } from '../../stores/vmixStore';
 
 export interface VmixInputBinding {
@@ -92,7 +93,7 @@ export function VmixInputsList({ items }: Props) {
                   disabled={!connected || !item.inputKey}
                   onClick={() => setTextField(item.inputKey, item.fieldName!, textValues[item.id] ?? '')}
                   title="Send to vMix"
-                >→</button>
+                ><ArrowRight size={12} strokeWidth={2} /></button>
               </div>
             )}
           </div>

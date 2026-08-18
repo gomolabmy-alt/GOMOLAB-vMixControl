@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { X, AlertTriangle } from 'lucide-react';
 import { buildAccelerator, hotkeyLabel } from '../lib/hotkeyFormat';
 import type { HotkeyBinding } from '../lib/hotkeyBindings';
 
@@ -45,10 +46,10 @@ export function HotkeyRecorder({ value, onChange, allBindings }: Props) {
         {listening ? 'Press a key…' : value ? hotkeyLabel(value) : '— set hotkey —'}
       </button>
       {value && (
-        <button type="button" className="hotkey-recorder-clear" title="Clear hotkey" onClick={() => onChange('')}>×</button>
+        <button type="button" className="hotkey-recorder-clear" title="Clear hotkey" onClick={() => onChange('')}><X size={14} strokeWidth={2} /></button>
       )}
       {duplicate && dupCount > 1 && (
-        <span className="hotkey-recorder-warning" title="This key combo is already bound elsewhere">⚠ in use</span>
+        <span className="hotkey-recorder-warning" title="This key combo is already bound elsewhere" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><AlertTriangle size={12} strokeWidth={2} /> in use</span>
       )}
     </div>
   );

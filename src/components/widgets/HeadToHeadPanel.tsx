@@ -142,13 +142,13 @@ export function HeadToHeadPanel({
                   <StatRow key={`ts-${row.label}`} label={row.label} aVal={row.a} bVal={row.b} aColor={teamAColor} bColor={teamBColor} />
                 ))}
                 {(aTeamStats.cards.yellow + bTeamStats.cards.yellow) > 0 && (
-                  <StatRow label="🟨 Yellow Cards" aVal={aTeamStats.cards.yellow} bVal={bTeamStats.cards.yellow} aColor={teamAColor} bColor={teamBColor} />
+                  <StatRow label="Yellow Cards" aVal={aTeamStats.cards.yellow} bVal={bTeamStats.cards.yellow} aColor={teamAColor} bColor={teamBColor} />
                 )}
                 {(aTeamStats.cards.orange + bTeamStats.cards.orange) > 0 && (
-                  <StatRow label="🟧 Orange Cards" aVal={aTeamStats.cards.orange} bVal={bTeamStats.cards.orange} aColor={teamAColor} bColor={teamBColor} />
+                  <StatRow label="Orange Cards" aVal={aTeamStats.cards.orange} bVal={bTeamStats.cards.orange} aColor={teamAColor} bColor={teamBColor} />
                 )}
                 {(aTeamStats.cards.red + bTeamStats.cards.red) > 0 && (
-                  <StatRow label="🟥 Red Cards" aVal={aTeamStats.cards.red} bVal={bTeamStats.cards.red} aColor={teamAColor} bColor={teamBColor} />
+                  <StatRow label="Red Cards" aVal={aTeamStats.cards.red} bVal={bTeamStats.cards.red} aColor={teamAColor} bColor={teamBColor} />
                 )}
               </>
             )}

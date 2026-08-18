@@ -9,6 +9,7 @@ export type WidgetType =
   | 'timer'
   | 'timeline'
   | 'player-list'
+  | 'player-list-next'
   | 'substitution'
   | 'card-display'
   | 'sin-bin-lower-third'
@@ -22,16 +23,21 @@ export type WidgetType =
   | 'panel'
   | 'vmix-titles'
   | 'rugby-lineup'
+  | 'rugby-lineup-next'
   | 'card-lower-third'
+  | 'placement-lower-third'
   | 'pomodoro'
   | 'image-display'
   | 'recent-matches'
   | 'match-schedule'
+  | 'rundown'
   | 'standings'
   | 'bracket'
   | 'team-form'
   | 'player-h2h'
-  | 'player-stats';
+  | 'player-stats'
+  | 'player-highlight'
+  | 'group-standings';
 
 export type TimelineEventType = 'score' | 'yellow-card' | 'orange-card' | 'red-card' | 'substitution' | 'period' | 'custom';
 
@@ -69,6 +75,15 @@ export interface CanvasPage {
    *  built for one specific tournament, widgets on it fall back to this
    *  instead of each needing its own "which tournament" picker. */
   tournamentId?: string;
+  /** Venue this canvas is dedicated to, within its bound tournament — same
+   *  fallback idea as `tournamentId`, for a multi-venue tournament where
+   *  different canvases (e.g. different physical courts) each cover one
+   *  venue. Only meaningful alongside `tournamentId` (mirrors the Sidebar's
+   *  own Tournament→Venue cascading picker). */
+  venue?: string;
+  /** OS-global hotkey that jumps straight to this page (see
+   *  collectHotkeyBindings/App.GoToPage) — main canvas pages only. */
+  hotkey?: string;
 }
 
 export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config: Record<string, any> }> = {
@@ -145,6 +160,18 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       ],
     },
   },
+  'placement-lower-third': {
+    w: 300, h: 180,
+    config: {
+      filterTournamentId: '', filterCategory: '',
+      activeSlotId: 'p1', autoSend: false, overlayChannel: 1,
+      slots: [
+        { id: 'p1', rank: 1, label: 'Champion', manualTeamName: '', vmixInputKey: '', fieldLabel: 'Label.Text', fieldTeam: 'Team.Text' },
+        { id: 'p2', rank: 2, label: 'Runner-Up', manualTeamName: '', vmixInputKey: '', fieldLabel: 'Label.Text', fieldTeam: 'Team.Text' },
+        { id: 'p3', rank: 3, label: '3rd Place', manualTeamName: '', vmixInputKey: '', fieldLabel: 'Label.Text', fieldTeam: 'Team.Text' },
+      ],
+    },
+  },
   'player-lower-third': {
     w: 300, h: 180,
     config: {
@@ -192,6 +219,13 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
     w: 220, h: 180,
     config: {
       name: 'Timer', mode: 'countdown', format: 'mm:ss', timerFontSize: 28,
+      // All optional, off by default — combine freely with `format`. Applied
+      // to the on-screen display always, and to the vMix text output too
+      // unless vmixFollowsFormat is turned off, in which case the vmix*
+      // fields below take over for vMix only.
+      showMs: false, noLeadingZero: false, subMinuteMs: false,
+      vmixFollowsFormat: true, vmixFormat: 'mm:ss',
+      vmixShowMs: false, vmixNoLeadingZero: false, vmixSubMinuteMs: false,
       periodOverrides: {},
       durationMs: 300000, currentMs: 300000, running: false,
       highPrecision: false, vmixInputKey: '', fieldName: 'Timer.Text',
@@ -256,10 +290,14 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       linkedTournamentId: '',
       linkedTeamId: '',
       teamSide: 'A',
+      linkedScoreboardId: '',
+      layout: 'single',
       linkedTimerWidgetId: '',
       linkedTimelineId: '',
       showTime: true,
       showPosition: true,
+      showStats: false,
+      viewSize: 'normal',
       starters: [],
       subs: [],
       onField: [],
@@ -271,6 +309,22 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       vmixTeamFieldName: 'TeamName.Text',
       vmixTeamFieldShort: 'ShortName.Text',
       vmixTeamAutoSync: false,
+    },
+  },
+  'player-list-next': {
+    w: 600, h: 520,
+    config: {
+      linkedTournamentId: '',
+      filterVenue: '',
+      filterCategory: '',
+      linkedTimerWidgetId: '',
+      linkedTimelineId: '',
+      showTime: true,
+      showPosition: true,
+      showStats: false,
+      viewSize: 'normal',
+      a_starters: [], a_subs: [], a_onField: [], a_entries: {}, a_accumulated: {}, a_subbedOnPlayers: [],
+      b_starters: [], b_subs: [], b_onField: [], b_entries: {}, b_accumulated: {}, b_subbedOnPlayers: [],
     },
   },
   substitution: {
@@ -360,6 +414,17 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       ],
     },
   },
+  'rugby-lineup-next': {
+    w: 420, h: 560,
+    config: {
+      linkedTournamentId: '',
+      filterVenue: '',
+      filterCategory: '',
+      teamSide: 'A',
+      teamColor: '#3498db',
+      fieldColor: '#2d7a3a',
+    },
+  },
   pomodoro: {
     w: 360, h: 200,
     config: {
@@ -391,6 +456,10 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       title: 'Upcoming Matches',
       linkedScoreboardId: '',
     },
+  },
+  rundown: {
+    w: 380, h: 420,
+    config: { title: 'Rundown' },
   },
   standings: {
     w: 360, h: 320,
@@ -449,8 +518,35 @@ export const WIDGET_DEFAULTS: Record<WidgetType, { w: number; h: number; config:
       teamSide: 'A',
       playerId: '',
       vmixInputKey: '', vmixInputTitle: '',
+      vmixAutoSync: false,
       fieldName: '', fieldJersey: '', fieldPosition: '', fieldTeam: '', fieldTeamLogo: '',
       fieldTries: '', fieldConversions: '', fieldPenalties: '', fieldDropGoals: '', fieldYellowCards: '', fieldRedCards: '', fieldAppearances: '',
+    },
+  },
+  'player-highlight': {
+    w: 260, h: 300,
+    config: {
+      linkedScoreboardId: '',
+      teamSide: 'A',
+      playerId: '',
+      highlightTitle: 'MVP',
+      customTitles: [] as string[],
+      vmixInputKey: '', vmixInputTitle: '',
+      vmixAutoSync: false,
+      fieldTitle: '', fieldName: '', fieldJersey: '', fieldPosition: '', fieldTeam: '', fieldTeamLogo: '',
+      fieldTries: '', fieldConversions: '', fieldPenalties: '', fieldDropGoals: '', fieldYellowCards: '', fieldRedCards: '', fieldAppearances: '',
+    },
+  },
+  'group-standings': {
+    w: 300, h: 340,
+    config: {
+      linkedScoreboardId: '',
+      title: '',
+      vmixInputKey: '', vmixInputTitle: '',
+      vmixAutoSync: false,
+      rankPrefix: '', teamPrefix: '', shortTeamPrefix: '', playedPrefix: '', wonPrefix: '', drawnPrefix: '', lostPrefix: '',
+      pfPrefix: '', paPrefix: '', diffPrefix: '', ptsPrefix: '',
+      mergedPrefix: '', mergedParts: [] as string[], mergedSeparator: ' ',
     },
   },
 };
@@ -460,6 +556,7 @@ export const WIDGET_TYPE_LABELS: Record<WidgetType, string> = {
   scoreboard: 'Scoreboard', 'score-log': 'Score Log', 'score-lower-third': 'Score Lower Third', 'player-lower-third': 'Player Highlight', 'sin-bin-lower-third': 'Sin Bin LT',
   timeline: 'Timeline',
   'player-list': 'Player List',
+  'player-list-next': 'Player List — Next Match',
   substitution: 'Quick Sub',
   'card-display': 'Card Display',
   timer: 'Timer', tbar: 'T-Bar', volume: 'Volume',
@@ -468,39 +565,20 @@ export const WIDGET_TYPE_LABELS: Record<WidgetType, string> = {
   panel: 'Custom Panel',
   'vmix-titles': 'vMix Titles',
   'rugby-lineup': 'Rugby Lineup',
+  'rugby-lineup-next': 'Rugby Lineup — Next Match',
   'card-lower-third': 'Card LT',
+  'placement-lower-third': 'Placement Lower Third',
   pomodoro: 'Custom Timer',
   'image-display': 'Image',
   'recent-matches': 'Latest Results',
   'match-schedule': 'Match Schedule',
+  rundown: 'Rundown',
   standings: 'Standings',
   bracket: 'Bracket',
   'team-form': 'Team Form',
   'player-h2h': 'Player H2H',
   'player-stats': 'Player Stats',
+  'player-highlight': 'Player Highlight (MVP)',
+  'group-standings': 'Group Standings (Live)',
 };
 
-export const WIDGET_TYPE_ICONS: Record<WidgetType, string> = {
-  button: '⬡', 'title-field': 'T', 'file-path': '📁',
-  scoreboard: '⚽', 'score-log': '📋', 'score-lower-third': '⬇', 'player-lower-third': '★', 'sin-bin-lower-third': '🟨',
-  timeline: '📅',
-  'player-list': '👕',
-  substitution: '⇄',
-  'card-display': '🟨',
-  timer: '⏱', tbar: '⇄', volume: '♪',
-  overlay: '▣', label: 'A', 'input-tally': '●', transitions: '⇌',
-  'ndi-input': 'NDI',
-  panel: '⊞',
-  'vmix-titles': 'Aa',
-  'rugby-lineup': '🏉',
-  'card-lower-third': '🟨',
-  pomodoro: '⏲',
-  'image-display': '🖼',
-  'recent-matches': '🏆',
-  'match-schedule': '📅',
-  standings: '📊',
-  bracket: '🌳',
-  'team-form': '📈',
-  'player-h2h': '🤼',
-  'player-stats': '🧑‍💼',
-};

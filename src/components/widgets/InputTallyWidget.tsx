@@ -26,7 +26,7 @@ export function InputTallyWidget({ config }: Props) {
         <div className="wgt-tally-type">{INPUT_TYPE_LABELS[input.type] ?? input.type}</div>
       )}
       {config.showTitle !== false && (
-        <div className="wgt-tally-title">{input ? input.title : config.inputKey ? 'Not found' : 'Set input in ⚙'}</div>
+        <div className="wgt-tally-title">{input ? input.title : config.inputKey ? 'Not found' : 'Set input in settings'}</div>
       )}
       <div className="wgt-tally-state">
         {isPgm && <span className="tally-badge tally-badge--pgm">PGM</span>}

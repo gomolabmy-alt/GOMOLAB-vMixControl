@@ -3,6 +3,18 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Player, StaffMember } from '../types/tournament';
 import { useUndoStore } from './undoStore';
 import { useMatchScheduleStore } from './matchScheduleStore';
+import { useCanvasStore } from './canvasStore';
+
+/** A named alternate kit (e.g. "Home"/"Away") with its own per-player
+ *  jersey-number overrides — authored in the Team DB, picked per match in
+ *  the Player List widget (see effectiveJerseyNo in src/lib/jerseySets.ts). */
+export interface JerseySet {
+  id: string;
+  name: string;
+  /** playerId → overridden jerseyNo for this set; a player missing here,
+   *  or mapped to '', falls back to their own base Player.jerseyNo. */
+  numbers: Record<string, string>;
+}
 
 // Reusable team profiles — the source of truth for team identity (name,
 // short name, color, logo), roster (players) and staff. A team optionally
@@ -47,6 +59,21 @@ export interface SavedTeam {
    *  without a human re-picking it every cycle. Unset = never linked, so
    *  auto-sync leaves this team alone entirely. */
   externalTeamSlug?: string;
+  /** Where this team's player stat fields (tries/conversions/penalties/
+   *  dropGoals/yellowCards/redCards/appearances) come from — 'api' (default,
+   *  including unset) keeps letting the external roster auto-sync overwrite
+   *  them; 'local' stops that and instead has the app track them itself:
+   *  tries/conversions/penalties/dropGoals are recomputed from this team's
+   *  own saved match history (see src/lib/localPlayerStats.ts), and
+   *  yellowCards/redCards are incremented live the moment a card is given in
+   *  the Player List widget (see giveCard in PlayerListWidget.tsx).
+   *  Appearances has no local source yet, so it stays whatever it already
+   *  was (manual entry or a prior API pull) regardless of this setting. */
+  statsSource?: 'api' | 'local';
+  /** Alternate jersey-number kits for this team — see JerseySet. Unset or
+   *  empty means every player just shows their own base jerseyNo, exactly
+   *  as before this feature existed. */
+  jerseySets?: JerseySet[];
 }
 
 interface TeamDbStore {
@@ -69,6 +96,12 @@ interface TeamDbStore {
   deletePlayer: (teamId: string, playerId: string) => void;
   replaceTeamPlayers: (teamId: string, players: Omit<Player, 'id'>[]) => void;
   updateStaffMember: (teamId: string, staffId: string, name: string) => void;
+
+  addJerseySet: (teamId: string, name: string) => string;
+  updateJerseySet: (teamId: string, setId: string, patch: Partial<Omit<JerseySet, 'id'>>) => void;
+  deleteJerseySet: (teamId: string, setId: string) => void;
+  setJerseySetNumber: (teamId: string, setId: string, playerId: string, jerseyNo: string) => void;
+
   restoreTeams: (teams: unknown[]) => void;
   /** Consumes (removes) the given ids from pendingDeletedIds — called by
    *  cloudSync.ts once they've actually been pushed to the cloud. */
@@ -92,10 +125,16 @@ export const useTeamDbStore = create<TeamDbStore>()(
         set(s => ({ teams: s.teams.map(t => t.id === id ? { ...t, ...patch } : t) }));
         // Cascade an identity change (name/shortName/color/logo) into this
         // team's own existing fixtures — see matchScheduleStore's
-        // syncTeamIdentity for why a fixture wouldn't otherwise notice.
+        // syncTeamIdentity for why a fixture wouldn't otherwise notice —
+        // and into any scoreboard widget that already has this team loaded
+        // (matched by id, not name, since a scoreboard's copied fields
+        // don't otherwise notice an edit made after it was loaded either).
         if (before && (patch.name !== undefined || patch.shortName !== undefined || patch.color !== undefined || patch.logo !== undefined)) {
           const after = { ...before, ...patch };
           useMatchScheduleStore.getState().syncTeamIdentity(before.tournamentId, before.name, before.category, {
+            name: after.name, shortName: after.shortName, color: after.color, logo: after.logo,
+          });
+          useCanvasStore.getState().syncScoreboardTeamIdentity(id, {
             name: after.name, shortName: after.shortName, color: after.color, logo: after.logo,
           });
         }
@@ -172,6 +211,44 @@ export const useTeamDbStore = create<TeamDbStore>()(
           const next: StaffMember[] = (t.staff ?? []).map(m => m.id === staffId ? { ...m, name } : m);
           return { ...t, staff: next };
         }),
+      })),
+
+      addJerseySet: (teamId, name) => {
+        const setId = crypto.randomUUID();
+        set(s => ({
+          teams: s.teams.map(t => t.id === teamId
+            ? { ...t, jerseySets: [...(t.jerseySets ?? []), { id: setId, name, numbers: {} }] }
+            : t),
+        }));
+        return setId;
+      },
+
+      updateJerseySet: (teamId, setId, patch) => set(s => ({
+        teams: s.teams.map(t => t.id === teamId
+          ? { ...t, jerseySets: (t.jerseySets ?? []).map(js => js.id === setId ? { ...js, ...patch } : js) }
+          : t),
+      })),
+
+      deleteJerseySet: (teamId, setId) => {
+        const team = get().teams.find(t => t.id === teamId);
+        const jerseySet = team?.jerseySets?.find(j => j.id === setId);
+        set(s => ({
+          teams: s.teams.map(t => t.id === teamId
+            ? { ...t, jerseySets: (t.jerseySets ?? []).filter(j => j.id !== setId) }
+            : t),
+        }));
+        if (jerseySet) useUndoStore.getState().pushUndo(`Deleted jersey set "${jerseySet.name}"`, () =>
+          useTeamDbStore.setState(s => ({
+            teams: s.teams.map(t => t.id === teamId ? { ...t, jerseySets: [...(t.jerseySets ?? []), jerseySet] } : t),
+          })));
+      },
+
+      setJerseySetNumber: (teamId, setId, playerId, jerseyNo) => set(s => ({
+        teams: s.teams.map(t => t.id === teamId
+          ? { ...t, jerseySets: (t.jerseySets ?? []).map(js => js.id === setId
+              ? { ...js, numbers: { ...js.numbers, [playerId]: jerseyNo } }
+              : js) }
+          : t),
       })),
 
       restoreTeams: (teams) => set({ teams: teams as SavedTeam[] }),

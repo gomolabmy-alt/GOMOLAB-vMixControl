@@ -392,6 +392,16 @@ pub fn get_build_number() -> &'static str {
     env!("BUILD_NUMBER")
 }
 
+// This running instance's OS process id — shown alongside the build number
+// so an operator can independently confirm which exact process is live
+// after a rebuild/redeploy (the same PID check already done manually via
+// `ps aux` every time this app gets rebuilt during development), without
+// needing a terminal.
+#[tauri::command]
+pub fn get_pid() -> u32 {
+    std::process::id()
+}
+
 // The OS's own stable machine identifier (macOS IOPlatformUUID, Windows
 // MachineGuid, Linux /etc/machine-id) — survives app reinstalls/data resets,
 // unlike a randomly-generated id stored in app data. Sent alongside sign-in

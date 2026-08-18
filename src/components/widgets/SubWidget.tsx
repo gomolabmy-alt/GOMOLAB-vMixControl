@@ -1,8 +1,13 @@
 import { useState, useMemo, useContext } from 'react';
+import { ArrowDown, ArrowUp, ArrowRight, X } from 'lucide-react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
+import { useAppSettings } from '../../stores/appSettingsStore';
+import { autoLinkedWidget, autoLinkedWidgetId } from '../../lib/autoLink';
+import { simplifyPlayerName } from '../../lib/simpleName';
+import { resolveImageUrl } from '../../lib/imageUrl';
 import type { Player } from '../../types/tournament';
 
 interface Props {
@@ -29,6 +34,11 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { teams: teamDbTeams } = useTeamDbStore();
   const { getClient } = useVmixStore();
+  // Simple Names (App Settings) — prefills the confirm dialog and every
+  // read-only row; the operator can still hand-edit the confirm dialog's
+  // text before it's sent, and nothing here writes back to the roster.
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const disp = (name: string) => simplifyPlayerName(name, { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker });
 
   const [selOut, setSelOut] = useState<string | null>(null);
   const [selIn, setSelIn] = useState<string | null>(null);
@@ -44,9 +54,13 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
     : null;
   const plCfg = playerListWidget?.config ?? cfg;
 
-  const timerWidget = cfg.linkedTimerWidgetId
-    ? pages.flatMap(p => p.widgets).find(w => w.id === cfg.linkedTimerWidgetId)
-    : null;
+  // Falls back to the sole Timer widget on this page when nothing's been
+  // explicitly linked in settings — an explicit pick always wins. (Player
+  // List link stays manual-only — an unlinked SubWidget deliberately runs
+  // its own standalone starters/subs state, so auto-linking it to whatever
+  // Player List happens to be on the page would silently switch that.)
+  const timerWidget = autoLinkedWidget(pages, widgetId, cfg.linkedTimerWidgetId, 'timer') ?? null;
+  const linkedTimelineId = autoLinkedWidgetId(pages, widgetId, cfg.linkedTimelineId, 'timeline');
   const timerCfg = timerWidget?.config ?? null;
   const currentMs: number = timerCfg?.currentMs ?? 0;
   const timeFormat: string = timerCfg?.format ?? 'mm:ss';
@@ -81,8 +95,8 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
     setConfirm({
       outId,
       inId,
-      nameOut: playerById[outId]?.name ?? '',
-      nameIn: playerById[inId]?.name ?? '',
+      nameOut: playerById[outId] ? disp(playerById[outId].name) : '',
+      nameIn: playerById[inId] ? disp(playerById[inId].name) : '',
     });
   };
 
@@ -104,15 +118,20 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
     if (!outgoing || !incoming) return;
 
     // Send names to vMix (all linked inputs)
-    const subTargets: Array<{inputKey:string;vmixFieldOut?:string;vmixFieldIn?:string}> = cfg.vmixInputs?.length
+    const subTargets: Array<{inputKey:string;vmixFieldOut?:string;vmixFieldIn?:string;vmixFieldLogo?:string;mergedPrefix?:string;mergedParts?:string[];mergedSeparator?:string}> = cfg.vmixInputs?.length
       ? cfg.vmixInputs
       : cfg.vmixInputKey
-        ? [{ inputKey: cfg.vmixInputKey, vmixFieldOut: cfg.vmixFieldOut, vmixFieldIn: cfg.vmixFieldIn }]
+        ? [{ inputKey: cfg.vmixInputKey, vmixFieldOut: cfg.vmixFieldOut, vmixFieldIn: cfg.vmixFieldIn, vmixFieldLogo: cfg.vmixFieldLogo }]
         : [];
     for (const t of subTargets) {
       if (!t.inputKey) continue;
       getClient()?.setTextField(t.inputKey, t.vmixFieldOut || 'PlayerOff.Text', nameOut);
       getClient()?.setTextField(t.inputKey, t.vmixFieldIn  || 'PlayerOn.Text',  nameIn);
+      if (t.vmixFieldLogo && team?.logo) getClient()?.setImageField(t.inputKey, t.vmixFieldLogo, team.logo);
+      if (t.mergedPrefix && t.mergedParts?.length) {
+        const src: Record<string, string> = { out: nameOut, in: nameIn };
+        getClient()?.setTextField(t.inputKey, t.mergedPrefix, t.mergedParts.map(k => src[k] ?? '').join(t.mergedSeparator ?? ' '));
+      }
     }
 
     const timePlayed = (accumulated[outId] ?? 0) +
@@ -136,8 +155,8 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
       subbedOnPlayers: [...new Set([...subbedOnPlayers, inId])],
     });
 
-    if (cfg.linkedTimelineId) {
-      addTimelineEvent(cfg.linkedTimelineId, {
+    if (linkedTimelineId) {
+      addTimelineEvent(linkedTimelineId, {
         type: 'substitution', team: side, timeMs: Date.now(),
         timeStr: timerCfg ? formatTime(currentMs, timeFormat) : wallClock(),
         player: nameIn,
@@ -157,21 +176,22 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
     <div className="wgt-sub">
       <div className="wgt-sub-header" style={{ '--tc': teamColor } as React.CSSProperties}>
         <span className="wgt-sub-team-dot" style={{ background: teamColor }} />
+        {team?.logo && <img className="wgt-sub-team-logo" src={resolveImageUrl(team.logo)} alt="" />}
         <span className="wgt-sub-team-name">{team?.name ?? '—'}</span>
         <span className="wgt-sub-title">Quick Sub</span>
       </div>
 
       {!team ? (
-        <div className="wgt-sub-empty">Link a team in ⚙</div>
+        <div className="wgt-sub-empty">Link a team in settings</div>
       ) : !playerListWidget ? (
-        <div className="wgt-sub-empty">Link a Player List widget in ⚙</div>
+        <div className="wgt-sub-empty">Link a Player List widget in settings</div>
       ) : confirm ? (
         /* ── Confirmation dialog ── */
         <div className="wgt-sub-confirm">
           <div className="wgt-sub-confirm-title">Confirm Substitution</div>
 
           <div className="wgt-sub-confirm-row">
-            <span className="wgt-sub-confirm-lbl wgt-sub-confirm-lbl--off">▼ Off</span>
+            <span className="wgt-sub-confirm-lbl wgt-sub-confirm-lbl--off" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowDown size={12} strokeWidth={2} /> Off</span>
             <input
               className="wgt-sub-confirm-inp"
               value={confirm.nameOut}
@@ -180,7 +200,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
           </div>
 
           <div className="wgt-sub-confirm-row">
-            <span className="wgt-sub-confirm-lbl wgt-sub-confirm-lbl--in">▲ On</span>
+            <span className="wgt-sub-confirm-lbl wgt-sub-confirm-lbl--in" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowUp size={12} strokeWidth={2} /> On</span>
             <input
               className="wgt-sub-confirm-inp"
               value={confirm.nameIn}
@@ -208,10 +228,10 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
         <>
           {(selOut || selIn) && (
             <div className="wgt-sub-pending">
-              {selOut && <span className="wgt-sub-pending-off">▼ {playerById[selOut]?.name}</span>}
-              {selOut && selIn && <span className="wgt-sub-pending-arr">→</span>}
-              {selIn && <span className="wgt-sub-pending-in">▲ {playerById[selIn]?.name}</span>}
-              <button className="wgt-sub-cancel" onClick={cancelSelection}>✕</button>
+              {selOut && <span className="wgt-sub-pending-off" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowDown size={12} strokeWidth={2} /> {playerById[selOut] ? disp(playerById[selOut].name) : ''}</span>}
+              {selOut && selIn && <span className="wgt-sub-pending-arr"><ArrowRight size={12} strokeWidth={2} /></span>}
+              {selIn && <span className="wgt-sub-pending-in" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowUp size={12} strokeWidth={2} /> {playerById[selIn] ? disp(playerById[selIn].name) : ''}</span>}
+              <button className="wgt-sub-cancel" onClick={cancelSelection}><X size={12} strokeWidth={2} /></button>
             </div>
           )}
 
@@ -232,7 +252,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
                   onClick={() => handleSelectOut(p.id)}
                 >
                   <span className="wgt-sub-no">{p.jerseyNo || '—'}</span>
-                  <span className="wgt-sub-name">{p.name}</span>
+                  <span className="wgt-sub-name">{disp(p.name)}</span>
                 </button>
               ))}
             </div>
@@ -251,7 +271,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
                   onClick={() => handleSelectIn(p.id)}
                 >
                   <span className="wgt-sub-no">{p.jerseyNo || '—'}</span>
-                  <span className="wgt-sub-name">{p.name}</span>
+                  <span className="wgt-sub-name">{disp(p.name)}</span>
                 </button>
               ))}
             </div>

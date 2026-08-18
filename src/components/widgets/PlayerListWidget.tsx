@@ -1,16 +1,32 @@
 import { useState, useMemo, useCallback, useEffect, useRef, useContext } from 'react';
+import {
+  Award, Star, ArrowDown, ArrowUp, X, Plus, UserCheck, Users, Briefcase,
+  Play, ArrowLeftRight, ArrowUpRight, Send, RotateCcw, Shirt,
+} from 'lucide-react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTournamentStore } from '../../stores/tournamentStore';
-import { useTeamDbStore } from '../../stores/teamDbStore';
+import { useTeamDbStore, type SavedTeam, type JerseySet } from '../../stores/teamDbStore';
+import { useMatchScheduleStore } from '../../stores/matchScheduleStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useUndoStore } from '../../stores/undoStore';
+import { useAppSettings } from '../../stores/appSettingsStore';
 import { SPORT_DEFAULTS, DEFAULT_STAFF_ROLES } from '../../types/tournament';
-import type { Player, StaffMember } from '../../types/tournament';
+import type { Player, StaffMember, Tournament } from '../../types/tournament';
+import type { CanvasPage } from '../../types/canvas';
+import { findTeamRecord, resolveNextFixtureTeams } from '../../lib/teamForm';
+import { autoLinkedWidget } from '../../lib/autoLink';
+import { effectiveJerseyNo } from '../../lib/jerseySets';
+import { simplifyPlayerName } from '../../lib/simpleName';
 
 interface Props {
   widgetId: string;
   config: Record<string, any>;
+  /** Renders as the "Next Match" variant — always side-by-side, teams
+   *  resolved from the soonest not-yet-sent fixture instead of a linked
+   *  scoreboard/direct team pick. Set by the 'player-list-next' widget type
+   *  (see components/widgets/index.tsx). */
+  nextMatchMode?: boolean;
 }
 
 function wallClock(): string {
@@ -18,27 +34,140 @@ function wallClock(): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-export function PlayerListWidget({ widgetId, config: cfg }: Props) {
+
+// ── Outer component: resolves team(s) + layout, delegates rendering ────────
+// Single/direct-team-link and single/scoreboard-follow both render one
+// PlayerListTeamPanel with an empty key prefix — identical config field
+// names to before this widget supported more than one team, so an existing
+// widget on canvas keeps working with zero migration. Side-by-side and
+// Next Match render two panels with 'a_'/'b_'-prefixed field names instead,
+// so each side's squad/session/vMix-target state stays fully independent.
+export function PlayerListWidget({ widgetId, config: cfg, nextMatchMode }: Props) {
   const store = useCanvasStore();
   const ctx = useContext(CanvasActionContext);
   const { pages, addTimelineEvent } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
+  const { tournaments } = useTournamentStore();
+  const { teams: teamDbTeams } = useTeamDbStore();
+  const { matches } = useMatchScheduleStore();
+
+  const pageTournamentId = pages.find(p => p.widgets.some(w => w.id === widgetId))?.tournamentId;
+  const effTournamentId: string | undefined = cfg.linkedTournamentId || pageTournamentId;
+  const tournament = tournaments.find(t => t.id === effTournamentId) ?? null;
+
+  // Auto-linking only kicks in for a genuinely untouched widget — if
+  // linkedTeamId is already set, that's a deliberate "pick a team directly"
+  // choice (linkedScoreboardId being empty is meaningful there, not just
+  // unconfigured), so it's never overridden by auto-detecting a scoreboard.
+  const linkedScoreboard = cfg.linkedTeamId && !cfg.linkedScoreboardId
+    ? undefined
+    : autoLinkedWidget(pages, widgetId, cfg.linkedScoreboardId, 'scoreboard');
+  const dc = linkedScoreboard?.config;
+
+  let teamA: SavedTeam | undefined;
+  let teamB: SavedTeam | undefined;
+  let dual = false;
+
+  if (nextMatchMode) {
+    dual = true;
+    const next = resolveNextFixtureTeams(matches, teamDbTeams, {
+      tournamentId: effTournamentId, venue: cfg.filterVenue, category: cfg.filterCategory,
+    });
+    teamA = next?.teamA;
+    teamB = next?.teamB;
+  } else if (cfg.layout === 'side-by-side' && dc) {
+    dual = true;
+    teamA = findTeamRecord(teamDbTeams, dc.teamAName ?? '', dc.category, dc.linkedTournamentId);
+    teamB = findTeamRecord(teamDbTeams, dc.teamBName ?? '', dc.category, dc.linkedTournamentId);
+  } else if (dc) {
+    const side: 'A' | 'B' = cfg.teamSide ?? 'A';
+    const name = side === 'A' ? dc.teamAName : dc.teamBName;
+    teamA = findTeamRecord(teamDbTeams, name ?? '', dc.category, dc.linkedTournamentId);
+  } else {
+    teamA = teamDbTeams.find(t => t.id === cfg.linkedTeamId);
+  }
+
+  // Caches the resolved team id(s) back onto this widget's own config — the
+  // one thing every OTHER widget that reads a linked Player List's roster
+  // (Scoreboard's scorer picker, Card Display, Timeline highlight, etc.)
+  // can rely on regardless of HOW this widget resolved its team this time
+  // (direct pick, following a scoreboard, or the next unsent fixture) —
+  // those consumers have no way to replicate that resolution themselves.
+  // Same keyPrefix convention as every other per-side field: unprefixed for
+  // single mode, a_/b_ for side-by-side or Next Match.
+  const resolvedAId = teamA?.id ?? '';
+  const resolvedBId = dual ? (teamB?.id ?? '') : '';
+  useEffect(() => {
+    const fieldA = dual ? 'a_resolvedTeamId' : 'resolvedTeamId';
+    const patch: Record<string, any> = {};
+    if ((cfg[fieldA] ?? '') !== resolvedAId) patch[fieldA] = resolvedAId;
+    if (dual && (cfg.b_resolvedTeamId ?? '') !== resolvedBId) patch.b_resolvedTeamId = resolvedBId;
+    if (Object.keys(patch).length > 0) updateWidgetConfig(widgetId, patch);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dual, resolvedAId, resolvedBId, cfg.resolvedTeamId, cfg.a_resolvedTeamId, cfg.b_resolvedTeamId, widgetId]);
+
+  const panelShared = { widgetId, cfg, updateWidgetConfig, addTimelineEvent, pages, tournament };
+
+  if (dual) {
+    return (
+      <div className="wgt-players-dual">
+        <PlayerListTeamPanel {...panelShared} keyPrefix="a_" side="A" team={teamA} />
+        <PlayerListTeamPanel {...panelShared} keyPrefix="b_" side="B" team={teamB} />
+      </div>
+    );
+  }
+  return <PlayerListTeamPanel {...panelShared} keyPrefix="" side={cfg.teamSide ?? 'A'} team={teamA} />;
+}
+
+// ── One team's full squad panel — everything this widget used to be ────────
+interface PanelProps {
+  widgetId: string;
+  cfg: Record<string, any>;
+  keyPrefix: string;
+  side: 'A' | 'B';
+  team: SavedTeam | undefined;
+  updateWidgetConfig: (id: string, patch: Record<string, any>) => void;
+  addTimelineEvent: (id: string, event: any) => void;
+  pages: CanvasPage[];
+  tournament: Tournament | null;
+}
+
+function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidgetConfig, addTimelineEvent, pages, tournament }: PanelProps) {
+  const { updatePlayer, updateTeam, updateStaffMember, setJerseySetNumber } = useTeamDbStore();
+  const { getClient, vmixState, vmixSyncVersion } = useVmixStore();
+  // Simple Names (App Settings) — applied to every READ-ONLY name display
+  // and vMix push in this widget, never to an editable name input (see
+  // src/lib/simpleName.ts for why).
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const disp = (name: string) => simplifyPlayerName(name, { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker });
+
+  // Every per-side field (squad/session state + this side's own vMix
+  // targets) is namespaced by keyPrefix ('' for a single-team widget, 'a_'/
+  // 'b_' for side-by-side or Next Match) — k() builds the actual config key,
+  // patch() builds an update patch with every one of its keys namespaced the
+  // same way, so call sites read exactly like the original single-team code
+  // did. Shared display settings (showTime, viewSize, etc.) are read
+  // straight off cfg with no prefix — one setting for the whole widget.
+  const k = (key: string) => keyPrefix + key;
+  const patch = (p: Record<string, any>) => {
+    const prefixed: Record<string, any> = {};
+    for (const key of Object.keys(p)) prefixed[k(key)] = p[key];
+    updateWidgetConfig(widgetId, prefixed);
+  };
+
   const highlightPlayer = (player: Player) => {
-    const targetId = cfg.linkedPlayerHighlightId;
+    const targetId = linkedPlayerHighlightId;
     if (!targetId) return;
     updateWidgetConfig(targetId, {
       highlightedPlayerId:   player.id,
-      highlightedName:       player.name,
-      highlightedJersey:     player.jerseyNo,
+      highlightedName:       disp(player.name),
+      highlightedJersey:     effectiveJerseyNo(player, team, activeJerseySetId),
       highlightedPosition:   player.position,
       highlightedTeam:       team?.name ?? '',
       highlightedTeamColor:  team?.color ?? '',
       highlightedSide:       side,
     });
   };
-  const { tournaments } = useTournamentStore();
-  const { teams: teamDbTeams, updatePlayer, updateTeam, updateStaffMember } = useTeamDbStore();
-  const { getClient, vmixState, vmixSyncVersion } = useVmixStore();
 
   // Slot assignment picker
   const [picking, setPicking] = useState<{ section: 'starter' | 'sub'; idx: number } | null>(null);
@@ -47,19 +176,13 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
   // Card picker: which card type is being assigned
   const [cardPicker, setCardPicker] = useState<'yellow' | 'orange' | 'red' | null>(null);
 
-  // Tournament link is now settings-only (maxOnField/maxSubs/etc); team
-  // identity + roster comes directly from the linked SavedTeam (teamDbStore).
-  // A canvas is normally dedicated to one tournament — falls back to that
-  // instead of requiring "which tournament" to be picked on every widget.
-  const pageTournamentId = pages.find(p => p.widgets.some(w => w.id === widgetId))?.tournamentId;
-  const tournament = tournaments.find(t => t.id === (cfg.linkedTournamentId || pageTournamentId));
-  const side: 'A' | 'B' = cfg.teamSide ?? 'A';
-  const team = teamDbTeams.find(t => t.id === cfg.linkedTeamId);
   const players: Player[] = team?.players ?? [];
 
-  const timerWidget = cfg.linkedTimerWidgetId
-    ? pages.flatMap(p => p.widgets).find(w => w.id === cfg.linkedTimerWidgetId)
-    : null;
+  // Falls back to the sole Timer/Timeline widget on this page when nothing's
+  // been explicitly linked in settings — an explicit pick always wins.
+  const timerWidget = autoLinkedWidget(pages, widgetId, cfg.linkedTimerWidgetId, 'timer') ?? null;
+  const linkedTimelineId = autoLinkedWidget(pages, widgetId, cfg.linkedTimelineId, 'timeline')?.id;
+  const linkedPlayerHighlightId = autoLinkedWidget(pages, widgetId, cfg.linkedPlayerHighlightId, 'player-lower-third')?.id;
   const timerCfg = timerWidget?.config ?? null;
   const currentMs: number = timerCfg?.currentMs ?? 0;
   const timeFormat: string = timerCfg?.format ?? 'mm:ss';
@@ -75,18 +198,18 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
 
   // Slot arrays (always padded to exact length with '' for empty slots)
   const starterSlots: string[] = useMemo(() =>
-    Array.from({ length: maxOnField }, (_, i) => (cfg.starters ?? [])[i] ?? ''),
-    [cfg.starters, maxOnField]
+    Array.from({ length: maxOnField }, (_, i) => (cfg[k('starters')] ?? [])[i] ?? ''),
+    [cfg[k('starters')], maxOnField]
   );
   const subSlots: string[] = useMemo(() =>
-    Array.from({ length: maxSubs }, (_, i) => (cfg.subs ?? [])[i] ?? ''),
-    [cfg.subs, maxSubs]
+    Array.from({ length: maxSubs }, (_, i) => (cfg[k('subs')] ?? [])[i] ?? ''),
+    [cfg[k('subs')], maxSubs]
   );
 
-  const onField: string[] = cfg.onField ?? [];
-  const entries: Record<string, number> = cfg.entries ?? {};
-  const accumulated: Record<string, number> = cfg.accumulated ?? {};
-  const subbedOnPlayers: string[] = cfg.subbedOnPlayers ?? [];
+  const onField: string[] = cfg[k('onField')] ?? [];
+  const entries: Record<string, number> = cfg[k('entries')] ?? {};
+  const accumulated: Record<string, number> = cfg[k('accumulated')] ?? {};
+  const subbedOnPlayers: string[] = cfg[k('subbedOnPlayers')] ?? [];
 
   const playerById = useMemo(() =>
     Object.fromEntries(players.map(p => [p.id, p])),
@@ -99,13 +222,139 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
   };
   const specialRole = (jerseyNo: string) => SPECIAL_JERSEY_ROLES[jerseyNo.toUpperCase()] ?? null;
 
+  // ── Active jersey set (multi-kit numbering) ───────────────────────────
+  // A team with 2+ named sets (e.g. Home/Away — see teamDbStore.ts) needs
+  // the operator to pick which one is active for this match; a lone set
+  // has nothing to choose between so it just applies silently, and no
+  // sets at all leaves effectiveJerseyNo() a no-op passthrough to each
+  // player's own base jerseyNo — exactly today's behavior.
+  const teamJerseySets: JerseySet[] = team?.jerseySets ?? [];
+  const jerseySetChoices: Record<string, string> = cfg[k('jerseySetChoices')] ?? {};
+  const recordedChoiceId = team ? jerseySetChoices[team.id] : undefined;
+  const recordedChoiceValid = !!recordedChoiceId && teamJerseySets.some(js => js.id === recordedChoiceId);
+  const activeJerseySetId: string | undefined =
+    teamJerseySets.length === 1 ? teamJerseySets[0].id
+    : recordedChoiceValid ? recordedChoiceId
+    : undefined;
+  const needsJerseyPrompt = teamJerseySets.length > 1 && !recordedChoiceValid;
+
+  const [jerseyPickerOpen, setJerseyPickerOpen] = useState(false);
+  useEffect(() => { setJerseyPickerOpen(false); }, [team?.id]);
+
+  const pickJerseySet = (setId: string) => {
+    if (!team) return;
+    patch({ jerseySetChoices: { ...jerseySetChoices, [team.id]: setId } });
+    setJerseyPickerOpen(false);
+  };
+
+  // Commits a jersey-number edit from the widget's own inline input: role
+  // markers (MNG/HC) are roster metadata, always written to the player's
+  // base field; a real number, while a jersey set is active, is written
+  // into that set's override instead of the base field.
+  const commitJerseyEdit = (player: Player, raw: string) => {
+    if (!team) return;
+    const jersey = raw.trim();
+    const role = specialRole(jersey);
+    if (role) {
+      updatePlayer(team.id, player.id, { jerseyNo: jersey, ...(!player.position ? { position: role } : {}) });
+    } else if (activeJerseySetId) {
+      setJerseySetNumber(team.id, activeJerseySetId, player.id, jersey);
+    } else {
+      updatePlayer(team.id, player.id, { jerseyNo: jersey });
+    }
+  };
+
+  // Cumulative-stat columns (same short labels used in the Team Database's
+  // Players tab), pulled straight from the player's own record (normally
+  // populated via the external roster API, see src/lib/externalRoster.ts).
+  // Rendered as a fixed-width column per stat, sharing widths with the one
+  // shared header row (renderStatHeader) so every player's numbers line up
+  // under their label — same convention as a real stats table, which means
+  // every column always shows (0 included) rather than only non-zero ones.
+  const STAT_FIELDS: { key: 'tries' | 'conversions' | 'penalties' | 'dropGoals' | 'yellowCards' | 'redCards' | 'appearances'; short: string }[] = [
+    { key: 'appearances', short: 'APP' },
+    { key: 'tries', short: 'T' }, { key: 'conversions', short: 'C' }, { key: 'penalties', short: 'P' },
+    { key: 'dropGoals', short: 'DG' }, { key: 'yellowCards', short: 'YC' }, { key: 'redCards', short: 'RC' },
+  ];
+
+  // Standard scoring values per code (rugby league awards fewer points per
+  // try/penalty/drop goal than union) — same numbers as the Scoreboard's own
+  // increment buttons (see RUGBY_UNION_INCS/RUGBY_LEAGUE_INCS in
+  // WidgetConfigPanel.tsx), just applied to a player's cumulative stats
+  // instead of a single live score event.
+  const playerPoints = (p: Player): number => {
+    const isLeague = tournament?.sport === 'rugby_league';
+    return (p.tries ?? 0) * (isLeague ? 4 : 5)
+      + (p.conversions ?? 0) * 2
+      + (p.penalties ?? 0) * (isLeague ? 2 : 3)
+      + (p.dropGoals ?? 0) * (isLeague ? 1 : 3);
+  };
+  // Top try-scorer / top points-scorer badges — computed across the whole
+  // roster (not just starters/subs) so they still show on a bench or
+  // unassigned player; ties all get the badge rather than picking one
+  // arbitrarily. Zero doesn't count as "most" when nobody has scored yet.
+  const maxTries = Math.max(0, ...players.map(p => p.tries ?? 0));
+  const maxPoints = Math.max(0, ...players.map(playerPoints));
+  const isTopTries = (p: Player) => maxTries > 0 && (p.tries ?? 0) === maxTries;
+  const isTopPoints = (p: Player) => maxPoints > 0 && playerPoints(p) === maxPoints;
+  function renderTopBadges(p: Player) {
+    if (!showStats) return null;
+    const topTries = isTopTries(p);
+    const topPoints = isTopPoints(p);
+    if (!topTries && !topPoints) return null;
+    return (
+      <>
+        {topTries && <span className="wgt-pl-top-badge wgt-pl-top-badge--tries" title={`Most tries (${maxTries})`}><Award size={11} strokeWidth={2} /></span>}
+        {topPoints && <span className="wgt-pl-top-badge wgt-pl-top-badge--points" title={`Most points (${maxPoints})`}><Award size={11} strokeWidth={2} /></span>}
+      </>
+    );
+  }
+  // .wgt-pl-info now has a fixed width per view size (not flex-grow) — a
+  // row's own stats always start right after it, at the same offset no
+  // matter how many action buttons or badges a given row happens to have
+  // (that variability lives entirely after the stats now, absorbed by
+  // .wgt-pl-flex-spacer before the time/action cluster). So the header only
+  // needs to reproduce what comes BEFORE the stats — real ghost copies of
+  // the highlight button, jersey, and info block, using the exact same
+  // classes so the widths always match — nothing needs to guess at the
+  // variable trailing content anymore. The stat cells themselves must also
+  // be wrapped in the same .wgt-pl-stats container a row uses (not placed
+  // directly in .wgt-pl-stats-header) — that inner wrapper has its own
+  // tighter gap between cells, so without it the header's 7 columns drift
+  // further apart from the row's on each successive column.
+  function renderStatHeader() {
+    return (
+      <div className="wgt-pl-stats-header">
+        {linkedPlayerHighlightId && (
+          <span className="wgt-pl-btn wgt-pl-btn--highlight wgt-pl-btn--highlight-left wgt-pl-ghost" aria-hidden="true" />
+        )}
+        <span className="wgt-pl-jersey wgt-pl-ghost" aria-hidden="true" />
+        <span className="wgt-pl-info wgt-pl-ghost" aria-hidden="true" />
+        <span className="wgt-pl-stats">
+          {STAT_FIELDS.map(f => (
+            <span key={f.key} className={`wgt-pl-stats-cell wgt-pl-stats-cell--head${f.key === 'tries' ? ' wgt-pl-stats-cell--tries' : ''}`} title={f.key}>{f.short}</span>
+          ))}
+        </span>
+      </div>
+    );
+  }
+  function renderStatCells(player: Player) {
+    return (
+      <span className="wgt-pl-stats">
+        {STAT_FIELDS.map(f => (
+          <span key={f.key} className={`wgt-pl-stats-cell${f.key === 'tries' ? ' wgt-pl-stats-cell--tries' : ''}`}>{player[f.key] ?? 0}</span>
+        ))}
+      </span>
+    );
+  }
+
   const sortedPlayers = useMemo(() =>
     [...players].sort((a, b) => {
-      const n1 = parseInt(a.jerseyNo) || 999;
-      const n2 = parseInt(b.jerseyNo) || 999;
+      const n1 = parseInt(effectiveJerseyNo(a, team, activeJerseySetId)) || 999;
+      const n2 = parseInt(effectiveJerseyNo(b, team, activeJerseySetId)) || 999;
       return n1 !== n2 ? n1 - n2 : a.name.localeCompare(b.name);
     }),
-    [players]
+    [players, team, activeJerseySetId]
   );
 
   const assignedIds = useMemo(() =>
@@ -123,19 +372,31 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
 
   const teamColor = team?.color ?? '#3498db';
   const showTime = cfg.showTime !== false && timerCfg !== null;
+  // On by default, matching how the sin bin countdown always showed before
+  // this toggle existed — only gates the in-widget countdown UI, not
+  // sinBinEntries tracking itself, so SinBinLowerThirdWidget/CardDisplayWidget
+  // keep working (badges, lower-third countdown) even with this off.
+  const showSinBin = cfg.showSinBinTimer !== false;
   const showPos = cfg.showPosition !== false;
+  // Off by default — a full stat line on every row is a lot of extra text
+  // for a widget that's mostly about live squad/substitution management,
+  // so it's opt-in rather than always shown.
+  const showStats = cfg.showStats === true;
+  const viewSize: 'compact' | 'normal' | 'large' = cfg.viewSize ?? 'normal';
 
-  const highlightWidget = cfg.linkedPlayerHighlightId
-    ? pages.flatMap(p => p.widgets).find(w => w.id === cfg.linkedPlayerHighlightId)
+  const highlightWidget = linkedPlayerHighlightId
+    ? pages.flatMap(p => p.widgets).find(w => w.id === linkedPlayerHighlightId)
     : null;
   const highlightedPlayerId: string = highlightWidget?.config.highlightedPlayerId ?? '';
 
-  // Resolve all vMix name-sync targets (multi-input or legacy single)
+  // Resolve all vMix name-sync targets (multi-input or legacy single) — the
+  // Name field itself is Simple-Name-aware (see disp() above), driven by
+  // the global App Settings toggle, not a per-target option.
   const plVmixTargets: Array<{inputKey:string;vmixNamePrefix?:string;vmixJerseyPrefix?:string;vmixAutoSync?:boolean}> =
-    cfg.vmixInputs?.length
-      ? cfg.vmixInputs
-      : cfg.vmixInputKey
-        ? [{ inputKey: cfg.vmixInputKey, vmixNamePrefix: cfg.vmixNamePrefix, vmixJerseyPrefix: cfg.vmixJerseyPrefix, vmixAutoSync: cfg.vmixAutoSync }]
+    cfg[k('vmixInputs')]?.length
+      ? cfg[k('vmixInputs')]
+      : cfg[k('vmixInputKey')]
+        ? [{ inputKey: cfg[k('vmixInputKey')], vmixNamePrefix: cfg[k('vmixNamePrefix')], vmixJerseyPrefix: cfg[k('vmixJerseyPrefix')], vmixAutoSync: cfg[k('vmixAutoSync')] }]
         : [];
 
   // vMix name sync: slotIdx is 1-based; overrides let callers pass fresh values before store update propagates
@@ -145,12 +406,12 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       if (!t.inputKey || !t.vmixAutoSync) continue;
       const p = playerId ? playerById[playerId] : null;
       const name     = overrides?.name     ?? p?.name     ?? '';
-      const jerseyNo = overrides?.jerseyNo ?? p?.jerseyNo ?? '';
-      if (t.vmixNamePrefix && c)   c.setTextField(t.inputKey, `${t.vmixNamePrefix}${slotIdx}.Text`, name);
+      const jerseyNo = overrides?.jerseyNo ?? (p ? effectiveJerseyNo(p, team, activeJerseySetId) : '');
+      if (t.vmixNamePrefix && c)   c.setTextField(t.inputKey, `${t.vmixNamePrefix}${slotIdx}.Text`, disp(name));
       if (t.vmixJerseyPrefix && c) c.setTextField(t.inputKey, `${t.vmixJerseyPrefix}${slotIdx}.Text`, jerseyNo);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg.vmixInputs, cfg.vmixInputKey, cfg.vmixAutoSync, cfg.vmixNamePrefix, cfg.vmixJerseyPrefix, playerById, getClient]);
+  }, [cfg[k('vmixInputs')], cfg[k('vmixInputKey')], cfg[k('vmixAutoSync')], cfg[k('vmixNamePrefix')], cfg[k('vmixJerseyPrefix')], playerById, getClient, team, activeJerseySetId, simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker]);
 
   const syncAllNames = useCallback(() => {
     if (!plVmixTargets.length) return;
@@ -161,13 +422,13 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       if (!t.inputKey) continue;
       starterSlots.forEach((id, i) => {
         const p = id ? playerById[id] : null;
-        if (t.vmixNamePrefix)   c.setTextField(t.inputKey, `${t.vmixNamePrefix}${i + 1}.Text`,              p?.name     ?? '');
-        if (t.vmixJerseyPrefix) c.setTextField(t.inputKey, `${t.vmixJerseyPrefix}${i + 1}.Text`,            p?.jerseyNo ?? '');
+        if (t.vmixNamePrefix)   c.setTextField(t.inputKey, `${t.vmixNamePrefix}${i + 1}.Text`,              p ? disp(p.name) : '');
+        if (t.vmixJerseyPrefix) c.setTextField(t.inputKey, `${t.vmixJerseyPrefix}${i + 1}.Text`,            p ? effectiveJerseyNo(p, team, activeJerseySetId) : '');
       });
       subSlots.forEach((id, i) => {
         const p = id ? playerById[id] : null;
-        if (t.vmixNamePrefix)   c.setTextField(t.inputKey, `${t.vmixNamePrefix}${maxOnField + i + 1}.Text`,   p?.name     ?? '');
-        if (t.vmixJerseyPrefix) c.setTextField(t.inputKey, `${t.vmixJerseyPrefix}${maxOnField + i + 1}.Text`, p?.jerseyNo ?? '');
+        if (t.vmixNamePrefix)   c.setTextField(t.inputKey, `${t.vmixNamePrefix}${maxOnField + i + 1}.Text`,   p ? disp(p.name) : '');
+        if (t.vmixJerseyPrefix) c.setTextField(t.inputKey, `${t.vmixJerseyPrefix}${maxOnField + i + 1}.Text`, p ? effectiveJerseyNo(p, team, activeJerseySetId) : '');
       });
       // Clear any extra same-prefix fields in the vMix input beyond the last used slot
       const vmixInput = vmixState?.inputs?.find(inp => inp.key === t.inputKey);
@@ -186,43 +447,53 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg.vmixInputs, cfg.vmixInputKey, cfg.vmixNamePrefix, cfg.vmixJerseyPrefix, starterSlots, subSlots, playerById, maxOnField, getClient, vmixState]);
+  }, [cfg[k('vmixInputs')], cfg[k('vmixInputKey')], cfg[k('vmixNamePrefix')], cfg[k('vmixJerseyPrefix')], starterSlots, subSlots, playerById, maxOnField, getClient, vmixState, team, activeJerseySetId, simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker]);
 
   // vMix staff names sync (MNG → Manager field, HC → Head Coach field)
   const sendStaffToVmix = useCallback(() => {
-    const key = cfg.vmixStaffInputKey;
+    const key = cfg[k('vmixStaffInputKey')];
     if (!key) return;
     const c = getClient();
     if (!c) return;
     const manager = players.find(p => p.jerseyNo?.toUpperCase() === 'MNG');
     const hc      = players.find(p => p.jerseyNo?.toUpperCase() === 'HC');
-    if (cfg.vmixManagerField) c.setTextField(key, cfg.vmixManagerField, manager?.name ?? '');
-    if (cfg.vmixHCField)      c.setTextField(key, cfg.vmixHCField,      hc?.name      ?? '');
-  }, [cfg.vmixStaffInputKey, cfg.vmixManagerField, cfg.vmixHCField, players, getClient]);
+    if (cfg[k('vmixManagerField')]) c.setTextField(key, cfg[k('vmixManagerField')], manager ? disp(manager.name) : '');
+    if (cfg[k('vmixHCField')])      c.setTextField(key, cfg[k('vmixHCField')],      hc      ? disp(hc.name)      : '');
+    const mergedParts: string[] | undefined = cfg[k('vmixStaffMergedParts')];
+    if (cfg[k('vmixStaffMergedPrefix')] && mergedParts?.length) {
+      const src: Record<string, string> = { manager: manager ? disp(manager.name) : '', headCoach: hc ? disp(hc.name) : '' };
+      c.setTextField(key, cfg[k('vmixStaffMergedPrefix')], mergedParts.map(p => src[p] ?? '').join(cfg[k('vmixStaffMergedSeparator')] ?? ' '));
+    }
+  }, [cfg[k('vmixStaffInputKey')], cfg[k('vmixManagerField')], cfg[k('vmixHCField')], cfg[k('vmixStaffMergedPrefix')], cfg[k('vmixStaffMergedParts')], cfg[k('vmixStaffMergedSeparator')], players, getClient, simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker]);
 
   useEffect(() => {
-    if (cfg.vmixStaffAutoSync) sendStaffToVmix();
+    if (cfg[k('vmixStaffAutoSync')]) sendStaffToVmix();
   }, [
     players.find(p => p.jerseyNo?.toUpperCase() === 'MNG')?.name,
     players.find(p => p.jerseyNo?.toUpperCase() === 'HC')?.name,
-    cfg.vmixStaffAutoSync,
+    cfg[k('vmixStaffAutoSync')],
     sendStaffToVmix,
     vmixSyncVersion,
   ]);
 
   // vMix team title sync
   const sendTeamToVmix = useCallback(() => {
-    const key = cfg.vmixTeamInputKey;
+    const key = cfg[k('vmixTeamInputKey')];
     if (!key || !team) return;
     const c = getClient();
     if (!c) return;
-    if (cfg.vmixTeamFieldName) c.setTextField(key, cfg.vmixTeamFieldName, team.name ?? '');
-    if (cfg.vmixTeamFieldShort) c.setTextField(key, cfg.vmixTeamFieldShort, team.shortName ?? team.name ?? '');
-  }, [cfg.vmixTeamInputKey, cfg.vmixTeamFieldName, cfg.vmixTeamFieldShort, team, getClient]);
+    if (cfg[k('vmixTeamFieldName')]) c.setTextField(key, cfg[k('vmixTeamFieldName')], team.name ?? '');
+    if (cfg[k('vmixTeamFieldShort')]) c.setTextField(key, cfg[k('vmixTeamFieldShort')], team.shortName ?? team.name ?? '');
+    const mergedParts: string[] | undefined = cfg[k('vmixTeamMergedParts')];
+    if (cfg[k('vmixTeamMergedPrefix')] && mergedParts?.length) {
+      const src: Record<string, string> = { name: team.name ?? '', short: team.shortName ?? team.name ?? '' };
+      c.setTextField(key, cfg[k('vmixTeamMergedPrefix')], mergedParts.map(p => src[p] ?? '').join(cfg[k('vmixTeamMergedSeparator')] ?? ' '));
+    }
+  }, [cfg[k('vmixTeamInputKey')], cfg[k('vmixTeamFieldName')], cfg[k('vmixTeamFieldShort')], cfg[k('vmixTeamMergedPrefix')], cfg[k('vmixTeamMergedParts')], cfg[k('vmixTeamMergedSeparator')], team, getClient]);
 
   useEffect(() => {
-    if (cfg.vmixTeamAutoSync) sendTeamToVmix();
-  }, [team?.name, team?.shortName, cfg.vmixTeamAutoSync, sendTeamToVmix, vmixSyncVersion]);
+    if (cfg[k('vmixTeamAutoSync')]) sendTeamToVmix();
+  }, [team?.name, team?.shortName, cfg[k('vmixTeamAutoSync')], sendTeamToVmix, vmixSyncVersion]);
 
   // Auto-send full list whenever slots change and any target has auto-sync on
   // (also re-fires on vmixSyncVersion so a reconnect re-pushes the current
@@ -235,7 +506,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
 
   // ── Rugby card tracking ───────────────────────────────────────────
   type RugbyCard = 'yellow' | 'orange' | 'red';
-  const playerCards: Record<string, RugbyCard[]> = cfg.playerCards ?? {};
+  const playerCards: Record<string, RugbyCard[]> = cfg[k('playerCards')] ?? {};
 
   // Effective disciplinary status (most severe)
   const effectiveCard = (playerId: string): 'none' | 'yellow' | 'orange' | 'red' => {
@@ -261,11 +532,11 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
   };
 
   // Sin bin timer tracking: maps playerId → timer currentMs at the moment they were binned
-  const sinBinEntries: Record<string, number> = cfg.sinBinEntries ?? {};
+  const sinBinEntries: Record<string, number> = cfg[k('sinBinEntries')] ?? {};
   const sinBinDuration: number = cfg.sinBinDuration ?? 600000; // 10 min default
 
   // HIA (orange card) tracking: maps playerId → currentMs when they went off for assessment
-  const orangeCardEntries: Record<string, number> = cfg.orangeCardEntries ?? {};
+  const orangeCardEntries: Record<string, number> = cfg[k('orangeCardEntries')] ?? {};
 
   const getSinBinRemaining = (playerId: string): number => {
     const startMs = sinBinEntries[playerId];
@@ -280,17 +551,17 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
     if (!player) return;
     const nextSinBinEntries = { ...sinBinEntries };
     delete nextSinBinEntries[playerId];
-    updateWidgetConfig(widgetId, {
+    patch({
       onField: [...onField, playerId],
       entries: { ...entries, [playerId]: currentMs },
       sinBinEntries: nextSinBinEntries,
     });
-    if (cfg.linkedTimelineId) {
-      addTimelineEvent(cfg.linkedTimelineId, {
+    if (linkedTimelineId) {
+      addTimelineEvent(linkedTimelineId, {
         type: 'substitution', team: side, timeMs: Date.now(),
         timeStr: timerCfg ? formatTime(currentMs, timeFormat) : wallClock(),
-        player: player.name,
-        jerseyNo: player.jerseyNo || undefined,
+        player: disp(player.name),
+        jerseyNo: effectiveJerseyNo(player, team, activeJerseySetId) || undefined,
       });
     }
   };
@@ -300,17 +571,17 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
     if (!player) return;
     const nextOrangeEntries = { ...orangeCardEntries };
     delete nextOrangeEntries[playerId];
-    updateWidgetConfig(widgetId, {
+    patch({
       onField: [...onField, playerId],
       entries: { ...entries, [playerId]: currentMs },
       orangeCardEntries: nextOrangeEntries,
     });
-    if (cfg.linkedTimelineId) {
-      addTimelineEvent(cfg.linkedTimelineId, {
+    if (linkedTimelineId) {
+      addTimelineEvent(linkedTimelineId, {
         type: 'substitution', team: side, timeMs: Date.now(),
         timeStr: timerCfg ? formatTime(currentMs, timeFormat) : wallClock(),
-        player: player.name,
-        jerseyNo: player.jerseyNo || undefined,
+        player: disp(player.name),
+        jerseyNo: effectiveJerseyNo(player, team, activeJerseySetId) || undefined,
       });
     }
   };
@@ -324,44 +595,55 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
     const yellows = newCards.filter(c => c === 'yellow').length;
     const isEffectiveRed = type === 'red' || yellows >= 2;
 
-    const patch: Record<string, any> = { playerCards: { ...playerCards, [playerId]: newCards } };
+    const p: Record<string, any> = { playerCards: { ...playerCards, [playerId]: newCards } };
 
     // All cards remove player from field (yellow=sin bin, orange=HIA off, red=dismissed)
     if (onField.includes(playerId)) {
       const timePlayed = (accumulated[playerId] ?? 0) + elapsed(entries[playerId] ?? currentMs);
-      patch.onField = onField.filter(id => id !== playerId);
-      patch.accumulated = { ...accumulated, [playerId]: timePlayed };
+      p.onField = onField.filter(id => id !== playerId);
+      p.accumulated = { ...accumulated, [playerId]: timePlayed };
     }
 
     // Record sin bin start time for yellow cards (not 2nd yellow which is a red)
     if (type === 'yellow' && !isEffectiveRed) {
-      patch.sinBinEntries = { ...sinBinEntries, [playerId]: currentMs };
+      p.sinBinEntries = { ...sinBinEntries, [playerId]: currentMs };
     } else {
       // Red or 2nd yellow: clear any existing sin bin entry
       const nextSinBinEntries = { ...sinBinEntries };
       delete nextSinBinEntries[playerId];
-      patch.sinBinEntries = nextSinBinEntries;
+      p.sinBinEntries = nextSinBinEntries;
     }
 
     // Record HIA entry for orange cards
     if (type === 'orange') {
-      patch.orangeCardEntries = { ...orangeCardEntries, [playerId]: currentMs };
+      p.orangeCardEntries = { ...orangeCardEntries, [playerId]: currentMs };
     } else {
       const nextOrangeEntries = { ...orangeCardEntries };
       delete nextOrangeEntries[playerId];
-      patch.orangeCardEntries = nextOrangeEntries;
+      p.orangeCardEntries = nextOrangeEntries;
     }
 
-    updateWidgetConfig(widgetId, patch);
+    patch(p);
 
-    if (cfg.linkedTimelineId) {
-      addTimelineEvent(cfg.linkedTimelineId, {
+    // Local stat counting: unlike tries/kicks (recomputed from this team's
+    // saved match history, see localPlayerStats.ts), the app doesn't
+    // persist a per-player card record into a saved match result — this is
+    // the one live moment a card is unambiguously "given", so it's counted
+    // right here instead, directly onto the player's cumulative total.
+    // Orange (HIA) has no stat field, so only yellow/red increment anything.
+    if (team && team.statsSource === 'local' && (type === 'yellow' || type === 'red')) {
+      const statKey = type === 'yellow' ? 'yellowCards' : 'redCards';
+      updatePlayer(team.id, playerId, { [statKey]: (player[statKey] ?? 0) + 1 });
+    }
+
+    if (linkedTimelineId) {
+      addTimelineEvent(linkedTimelineId, {
         type: isEffectiveRed ? 'red-card' : CARD_TIMELINE[type],
         team: side,
         timeMs: Date.now(),
         timeStr: timerCfg ? formatTime(currentMs, timeFormat) : wallClock(),
-        player: player.name,
-        jerseyNo: player.jerseyNo || undefined,
+        player: disp(player.name),
+        jerseyNo: effectiveJerseyNo(player, team, activeJerseySetId) || undefined,
       });
     }
     setCardPicker(null);
@@ -395,14 +677,14 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       const nextSubs = [...subSlots];
       if (subIdx >= 0) nextSubs[subIdx] = '';
       next[idx] = playerId;
-      updateWidgetConfig(widgetId, { starters: next, subs: nextSubs });
+      patch({ starters: next, subs: nextSubs });
     } else {
       const next = [...subSlots];
       const starterIdx = starterSlots.indexOf(playerId);
       const nextStarters = [...starterSlots];
       if (starterIdx >= 0) nextStarters[starterIdx] = '';
       next[idx] = playerId;
-      updateWidgetConfig(widgetId, { starters: nextStarters, subs: next });
+      patch({ starters: nextStarters, subs: next });
     }
     setPicking(null);
   };
@@ -413,7 +695,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       const removed = next[idx];
       next[idx] = '';
       // also remove from onField if active
-      updateWidgetConfig(widgetId, {
+      patch({
         starters: next,
         onField: onField.filter(id => id !== removed),
       });
@@ -421,7 +703,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       const next = [...subSlots];
       const removed = next[idx];
       next[idx] = '';
-      updateWidgetConfig(widgetId, {
+      patch({
         subs: next,
         onField: onField.filter(id => id !== removed),
       });
@@ -444,7 +726,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       const emptyIdx = nextSubs.indexOf('');
       if (emptyIdx >= 0) nextSubs[emptyIdx] = playerId;
     }
-    updateWidgetConfig(widgetId, { starters: nextStarters, subs: nextSubs });
+    patch({ starters: nextStarters, subs: nextSubs });
   };
 
   const addUnassignedToSection = (playerId: string, section: 'starter' | 'sub') => {
@@ -454,20 +736,20 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       if (idx < 0) idx = next.findIndex(id => id && !playerById[id]); // replace stale slot
       if (idx >= 0) next[idx] = playerId;
       else next.push(playerId);
-      updateWidgetConfig(widgetId, { starters: next });
+      patch({ starters: next });
     } else {
       const next = [...subSlots];
       let idx = next.indexOf('');
       if (idx < 0) idx = next.findIndex(id => id && !playerById[id]); // replace stale slot
       if (idx >= 0) next[idx] = playerId;
       else next.push(playerId);
-      updateWidgetConfig(widgetId, { subs: next });
+      patch({ subs: next });
     }
   };
 
   const autoFill = () => {
     const sorted = [...sortedPlayers];
-    updateWidgetConfig(widgetId, {
+    patch({
       starters: Array.from({ length: maxOnField }, (_, i) => sorted[i]?.id ?? ''),
       subs: Array.from({ length: maxSubs }, (_, i) => sorted[maxOnField + i]?.id ?? ''),
     });
@@ -492,7 +774,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
     if (starterIdx >= 0) nextStarters[starterIdx] = incomingId;
     if (subIdx >= 0) nextSubs[subIdx] = outgoingId;
 
-    updateWidgetConfig(widgetId, {
+    patch({
       starters: nextStarters,
       subs: nextSubs,
       onField: [...onField.filter(id => id !== outgoingId), incomingId],
@@ -501,14 +783,14 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       subbedOnPlayers: [...new Set([...subbedOnPlayers, incomingId])],
     });
 
-    if (cfg.linkedTimelineId) {
-      addTimelineEvent(cfg.linkedTimelineId, {
+    if (linkedTimelineId) {
+      addTimelineEvent(linkedTimelineId, {
         type: 'substitution', team: side, timeMs: Date.now(),
         timeStr: timerCfg ? formatTime(currentMs, timeFormat) : wallClock(),
-        player: incoming.name,
-        playerOff: outgoing.name,
-        jerseyNo: incoming.jerseyNo || undefined,
-        jerseyNoOff: outgoing.jerseyNo || undefined,
+        player: disp(incoming.name),
+        playerOff: disp(outgoing.name),
+        jerseyNo: effectiveJerseyNo(incoming, team, activeJerseySetId) || undefined,
+        jerseyNoOff: effectiveJerseyNo(outgoing, team, activeJerseySetId) || undefined,
       });
     }
     setPendingSubIn(null);
@@ -520,31 +802,31 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
     const active = onField.includes(player.id);
     if (active) {
       const timePlayed = (accumulated[player.id] ?? 0) + elapsed(entries[player.id] ?? currentMs);
-      updateWidgetConfig(widgetId, {
+      patch({
         onField: onField.filter(id => id !== player.id),
         accumulated: { ...accumulated, [player.id]: timePlayed },
       });
-      if (cfg.linkedTimelineId) {
-        addTimelineEvent(cfg.linkedTimelineId, {
+      if (linkedTimelineId) {
+        addTimelineEvent(linkedTimelineId, {
           type: 'substitution', team: side, timeMs: Date.now(),
           timeStr: timerCfg ? formatTime(currentMs, timeFormat) : wallClock(),
-          playerOff: player.name,
-          jerseyNoOff: player.jerseyNo || undefined,
+          playerOff: disp(player.name),
+          jerseyNoOff: effectiveJerseyNo(player, team, activeJerseySetId) || undefined,
         });
       }
     } else {
       const fromBench = subSlots.includes(player.id);
-      updateWidgetConfig(widgetId, {
+      patch({
         onField: [...onField, player.id],
         entries: { ...entries, [player.id]: currentMs },
         ...(fromBench ? { subbedOnPlayers: [...new Set([...subbedOnPlayers, player.id])] } : {}),
       });
-      if (cfg.linkedTimelineId) {
-        addTimelineEvent(cfg.linkedTimelineId, {
+      if (linkedTimelineId) {
+        addTimelineEvent(linkedTimelineId, {
           type: 'substitution', team: side, timeMs: Date.now(),
           timeStr: timerCfg ? formatTime(currentMs, timeFormat) : wallClock(),
-          player: player.name,
-          jerseyNo: player.jerseyNo || undefined,
+          player: disp(player.name),
+          jerseyNo: effectiveJerseyNo(player, team, activeJerseySetId) || undefined,
         });
       }
     }
@@ -554,7 +836,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
     const ids = starterSlots.filter(id => id && playerById[id]);
     const newEntries = { ...entries };
     ids.forEach(id => { if (!onField.includes(id)) newEntries[id] = currentMs; });
-    updateWidgetConfig(widgetId, {
+    patch({
       onField: [...new Set([...onField, ...ids])],
       entries: newEntries,
     });
@@ -570,7 +852,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       if (ids.length > 0 && alreadyOnField === 0) {
         const newEntries = { ...entries };
         ids.forEach(id => { if (!onField.includes(id)) newEntries[id] = currentMs; });
-        updateWidgetConfig(widgetId, {
+        patch({
           onField: [...new Set([...onField, ...ids])],
           entries: newEntries,
         });
@@ -582,11 +864,11 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
   const resetSession = () => {
     if (!confirm('Reset all playtime data and cards?')) return;
     const before = {
-      onField: cfg.onField, entries: cfg.entries, accumulated: cfg.accumulated,
-      playerCards: cfg.playerCards, sinBinEntries: cfg.sinBinEntries, orangeCardEntries: cfg.orangeCardEntries,
-      subbedOnPlayers: cfg.subbedOnPlayers,
+      onField: cfg[k('onField')], entries: cfg[k('entries')], accumulated: cfg[k('accumulated')],
+      playerCards: cfg[k('playerCards')], sinBinEntries: cfg[k('sinBinEntries')], orangeCardEntries: cfg[k('orangeCardEntries')],
+      subbedOnPlayers: cfg[k('subbedOnPlayers')],
     };
-    updateWidgetConfig(widgetId, { onField: [], entries: {}, accumulated: {}, playerCards: {}, sinBinEntries: {}, orangeCardEntries: {}, subbedOnPlayers: [] });
+    patch({ onField: [], entries: {}, accumulated: {}, playerCards: {}, sinBinEntries: {}, orangeCardEntries: {}, subbedOnPlayers: [] });
     useUndoStore.getState().pushUndo('Reset playtime & cards', () => updateWidgetConfig(widgetId, before));
   };
 
@@ -612,6 +894,8 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
   ) {
     const player = playerById[playerId];
     if (!player) return null;
+    const effNo = effectiveJerseyNo(player, team, activeJerseySetId);
+    const dispName = disp(player.name);
     const active = onField.includes(player.id);
     const timePlayed = getTimePlayed(player.id);
     const isStarter = section === 'starter';
@@ -640,13 +924,13 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
 
     return (
       <div key={player.id} className={rowClass}>
-        {cfg.linkedPlayerHighlightId && (
+        {linkedPlayerHighlightId && (
           <button
             className={`wgt-pl-btn wgt-pl-btn--highlight wgt-pl-btn--highlight-left${highlightedPlayerId === player.id ? ' wgt-pl-btn--highlight--active' : ''}`}
             title="Highlight player"
             onClick={() => highlightPlayer(player)}
           >
-            ★
+            <Star size={11} strokeWidth={2} fill={highlightedPlayerId === player.id ? 'currentColor' : 'none'} />
           </button>
         )}
         {specialRole(player.jerseyNo) ? (
@@ -655,21 +939,13 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
           </span>
         ) : (
           <input
-            key={`j-${player.id}-${player.jerseyNo}`}
+            key={`j-${player.id}-${activeJerseySetId ?? ''}-${effNo}`}
             className="wgt-pl-jersey wgt-pl-jersey--inp"
             style={{ borderColor: active ? teamColor : undefined, color: active ? teamColor : undefined }}
-            defaultValue={player.jerseyNo}
+            defaultValue={effNo}
             placeholder="#"
             maxLength={3}
-            onBlur={e => {
-              if (!canEdit) return;
-              const jersey = e.target.value.trim();
-              const role = specialRole(jersey);
-              updatePlayer(team!.id, player.id, {
-                jerseyNo: jersey,
-                ...(role && !player.position ? { position: role } : {}),
-              });
-            }}
+            onBlur={e => { if (canEdit) commitJerseyEdit(player, e.target.value); }}
             onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
             onClick={e => e.stopPropagation()}
           />
@@ -680,28 +956,35 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
             <span className="wgt-pl-pos">{player.position}</span>
           )}
           <input
-            key={`n-${player.id}-${player.name}`}
+            key={`n-${player.id}-${dispName}`}
             className="wgt-pl-name wgt-pl-name--inp"
-            defaultValue={player.name}
+            defaultValue={dispName}
             placeholder="Name"
             readOnly={!canEdit}
             onBlur={e => {
-              const name = e.target.value.trim();
-              if (canEdit) updatePlayer(team!.id, player.id, { name });
+              const typed = e.target.value.trim();
               const vmixIdx = isStarter ? slotIdx + 1 : maxOnField + slotIdx + 1;
-              syncName(vmixIdx, player.id, { name });
+              // Still showing the Simple Name display, untouched — don't
+              // overwrite the player's real stored name with the shortened
+              // text, just re-sync vMix (which resolves + simplifies the
+              // real name itself).
+              if (typed === dispName) { syncName(vmixIdx, player.id); return; }
+              if (canEdit) updatePlayer(team!.id, player.id, { name: typed });
+              syncName(vmixIdx, player.id, { name: typed });
             }}
             onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
             onClick={e => e.stopPropagation()}
           />
+          {renderTopBadges(player)}
         </div>
+        {showStats && renderStatCells(player)}
 
         {(subbedOn || subbedOff) && (
           <span
             className={`wgt-pl-sub-ind wgt-pl-sub-ind--${subbedOn ? 'on' : 'off'}`}
             title={subbedOn ? 'Substituted on' : 'Substituted off'}
           >
-            {subbedOn ? '↑' : '↓'}
+            {subbedOn ? <ArrowUp size={9} strokeWidth={2.5} /> : <ArrowDown size={9} strokeWidth={2.5} />}
           </span>
         )}
 
@@ -714,7 +997,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
         )}
 
         {/* Sin bin countdown + return button */}
-        {card === 'yellow' && sinBinEntries[player.id] !== undefined && (
+        {showSinBin && card === 'yellow' && sinBinEntries[player.id] !== undefined && (
           (() => {
             const remaining = getSinBinRemaining(player.id);
             const done = remaining === 0;
@@ -725,7 +1008,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                   className="wgt-pl-sinbin-return"
                   title="Return player to field"
                   onClick={() => returnFromSinBin(player.id)}
-                >▶ Return</button>
+                ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Play size={10} strokeWidth={2} /> Return</span></button>
               </div>
             );
           })()
@@ -739,9 +1022,11 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
               className="wgt-pl-hia-return"
               title="Player cleared — return to field"
               onClick={() => returnFromHIA(player.id)}
-            >▶ Return</button>
+            ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Play size={10} strokeWidth={2} /> Return</span></button>
           </div>
         )}
+
+        <span className="wgt-pl-flex-spacer" />
 
         {showTime && (
           <span className={`wgt-pl-time ${active ? 'wgt-pl-time--live' : ''}`}>
@@ -754,10 +1039,10 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
           {isSwapTarget && (
             <button
               className="wgt-pl-btn wgt-pl-btn--swap"
-              title={`Swap in ${playerById[pendingSubIn!]?.name ?? 'player'}`}
+              title={`Swap in ${playerById[pendingSubIn!] ? disp(playerById[pendingSubIn!].name) : 'player'}`}
               onClick={() => executeSwap(player.id, pendingSubIn!)}
             >
-              ↔
+              <ArrowLeftRight size={11} strokeWidth={2} />
             </button>
           )}
 
@@ -771,11 +1056,11 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                   title={active ? 'Sub off' : 'Stage for substitution'}
                   onClick={() => toggleOnField(player)}
                 >
-                  {active ? '▼' : '▲'}
+                  {active ? <ArrowDown size={11} strokeWidth={2} /> : <ArrowUp size={11} strokeWidth={2} />}
                 </button>
               )}
 
-              {/* Bench player: ▲ stages the swap / ✕ cancels it */}
+              {/* Bench player: ArrowUp stages the swap / X cancels it */}
               {!isStarter && !active && (
                 <button
                   className={`wgt-pl-btn ${isPendingIn ? 'wgt-pl-btn--cancel-swap' : 'wgt-pl-btn--in'}`}
@@ -785,7 +1070,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                     setPendingSubIn(isPendingIn ? null : player.id);
                   }}
                 >
-                  {isPendingIn ? '✕' : '▲'}
+                  {isPendingIn ? <X size={11} strokeWidth={2} /> : <ArrowUp size={11} strokeWidth={2} />}
                 </button>
               )}
 
@@ -797,14 +1082,14 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                     title={isStarter ? 'Move to bench' : 'Move to starters'}
                     onClick={() => moveToSection(player.id, isStarter ? 'sub' : 'starter')}
                   >
-                    {isStarter ? '⬇' : '⬆'}
+                    {isStarter ? <ArrowDown size={11} strokeWidth={2} /> : <ArrowUp size={11} strokeWidth={2} />}
                   </button>
                   <button
                     className="wgt-pl-btn wgt-pl-btn--remove"
                     title="Remove from squad"
                     onClick={() => removeFromSlot(section, slotIdx)}
                   >
-                    ×
+                    <X size={11} strokeWidth={2} />
                   </button>
                 </>
               )}
@@ -829,8 +1114,8 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                 className="wgt-pl-picker-opt"
                 onClick={() => assignToSlot(p.id, section, idx)}
               >
-                <span className="wgt-pl-picker-no">{p.jerseyNo}</span>
-                <span className="wgt-pl-picker-name">{p.name}</span>
+                <span className="wgt-pl-picker-no">{effectiveJerseyNo(p, team, activeJerseySetId)}</span>
+                <span className="wgt-pl-picker-name">{disp(p.name)}</span>
                 {p.position && <span className="wgt-pl-picker-pos">{p.position}</span>}
               </button>
             ))}
@@ -850,7 +1135,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
   }
 
   return (
-    <div className="wgt-players" onClick={() => { picking && setPicking(null); pendingSubIn && setPendingSubIn(null); cardPicker && setCardPicker(null); }}>
+    <div className={`wgt-players${viewSize !== 'normal' ? ` wgt-players--${viewSize}` : ''}`} onClick={() => { picking && setPicking(null); pendingSubIn && setPendingSubIn(null); cardPicker && setCardPicker(null); }}>
 
       {/* Header */}
       <div className="wgt-pl-header" style={{ '--tc': teamColor } as React.CSSProperties}>
@@ -859,12 +1144,19 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
           : <span className="wgt-pl-team-dot" style={{ background: teamColor }} />
         }
         <span className="wgt-pl-team-name">{team?.name ?? '—'}</span>
-        {cfg.vmixTeamInputKey && (
+        {cfg[k('vmixTeamInputKey')] && (
           <button
             className="wgt-pl-team-vmix-btn"
             title="Send team name to vMix"
             onClick={e => { e.stopPropagation(); sendTeamToVmix(); }}
-          >↗</button>
+          ><ArrowUpRight size={11} strokeWidth={2} /></button>
+        )}
+        {team && teamJerseySets.length > 1 && (
+          <button
+            className="wgt-pl-team-vmix-btn"
+            title={`Jersey set: ${activeJerseySetId ? teamJerseySets.find(js => js.id === activeJerseySetId)?.name : 'not chosen'} — click to change`}
+            onClick={e => { e.stopPropagation(); setJerseyPickerOpen(v => !v); }}
+          ><Shirt size={11} strokeWidth={2} /></button>
         )}
         <span className="wgt-pl-field-count">
           <span className={`wgt-pl-on-num ${totalOnField >= maxOnField ? 'wgt-pl-on-num--full' : ''}`}>
@@ -901,7 +1193,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
             <span className="wgt-pl-card-picker-label">
               {cardPicker ? CARD_LABELS[cardPicker] : ''}
             </span>
-            <button className="wgt-pl-card-picker-close" onClick={() => setCardPicker(null)}>✕</button>
+            <button className="wgt-pl-card-picker-close" onClick={() => setCardPicker(null)}><X size={12} strokeWidth={2} /></button>
           </div>
           <div className="wgt-pl-card-picker-list">
             {cardPickerOptions.length === 0
@@ -912,8 +1204,8 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                     className="wgt-pl-card-picker-opt"
                     onClick={() => giveCard(p.id, cardPicker!)}
                   >
-                    <span className="wgt-pl-card-picker-no">{p.jerseyNo || '—'}</span>
-                    <span className="wgt-pl-card-picker-name">{p.name}</span>
+                    <span className="wgt-pl-card-picker-no">{effectiveJerseyNo(p, team, activeJerseySetId) || '—'}</span>
+                    <span className="wgt-pl-card-picker-name">{disp(p.name)}</span>
                     {(playerCards[p.id] ?? []).map((c, i) => (
                       <span key={i} className={`wgt-pl-card-pip wgt-pl-card-pip--${c}`} />
                     ))}
@@ -929,6 +1221,24 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
       ) : (
         <div className="wgt-pl-body">
 
+          {showStats && renderStatHeader()}
+
+          {/* Jersey set prompt — shown for a genuinely new/unresolved choice
+              (needsJerseyPrompt) or when manually reopened via the header
+              button (jerseyPickerOpen) */}
+          {team && teamJerseySets.length > 1 && (needsJerseyPrompt || jerseyPickerOpen) && (
+            <div className="wgt-pl-autofill" onClick={e => e.stopPropagation()}>
+              <span className="wgt-pl-autofill-hint">Which jersey set is {team.name} wearing this match?</span>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {teamJerseySets.map(js => (
+                  <button key={js.id} className="wgt-pl-autofill-btn" onClick={() => pickJerseySet(js.id)}>
+                    {js.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Auto-fill prompt when both lists are empty */}
           {starterSlots.every(s => !s) && subSlots.every(s => !s) && sortedPlayers.length > 0 && (
             <div className="wgt-pl-autofill">
@@ -942,7 +1252,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
           {/* Starters section */}
           <div className="wgt-pl-section">
             <div className="wgt-pl-section-hdr wgt-pl-section-hdr--starters">
-              <span className="wgt-pl-section-icon">◈</span>
+              <span className="wgt-pl-section-icon"><UserCheck size={12} strokeWidth={2} /></span>
               <span className="wgt-pl-section-title">Starting {maxOnField}</span>
               <span className="wgt-pl-section-count">
                 {starterSlots.filter(id => id && playerById[id]).length}/{maxOnField}
@@ -967,22 +1277,22 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
           {/* Swap banner — shown when a bench player is staged */}
           {pendingSubIn && (
             <div className="wgt-pl-swap-banner" onClick={e => e.stopPropagation()}>
-              <span className="wgt-pl-swap-banner-ico">↔</span>
+              <span className="wgt-pl-swap-banner-ico"><ArrowLeftRight size={14} strokeWidth={2} /></span>
               <span className="wgt-pl-swap-banner-txt">
                 Tap a starter to substitute
-                <strong> {playerById[pendingSubIn]?.name ?? '—'}</strong>
+                <strong> {playerById[pendingSubIn] ? disp(playerById[pendingSubIn].name) : '—'}</strong>
               </span>
               <button
                 className="wgt-pl-swap-banner-cancel"
                 onClick={() => setPendingSubIn(null)}
-              >✕</button>
+              ><X size={12} strokeWidth={2} /></button>
             </div>
           )}
 
           {/* Substitutes section */}
           <div className="wgt-pl-section">
             <div className="wgt-pl-section-hdr wgt-pl-section-hdr--subs">
-              <span className="wgt-pl-section-icon">≡</span>
+              <span className="wgt-pl-section-icon"><Users size={12} strokeWidth={2} /></span>
               <span className="wgt-pl-section-title">Substitutes</span>
               <span className="wgt-pl-section-count">
                 {subSlots.filter(id => id && playerById[id]).length}/{maxSubs}
@@ -1009,6 +1319,8 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                 {unassigned.map(player => {
                   const uAcc = (accumulated[player.id] ?? 0) > 0;
                   const uSubbedOff = !onField.includes(player.id) && uAcc;
+                  const uEffNo = effectiveJerseyNo(player, team, activeJerseySetId);
+                  const uDispName = disp(player.name);
                   return (
                   <div key={player.id} className="wgt-pl-row wgt-pl-row--unassigned">
                     {specialRole(player.jerseyNo) ? (
@@ -1017,19 +1329,12 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                       </span>
                     ) : (
                       <input
-                        key={`j-${player.id}-${player.jerseyNo}`}
+                        key={`j-${player.id}-${activeJerseySetId ?? ''}-${uEffNo}`}
                         className="wgt-pl-jersey wgt-pl-jersey--inp"
-                        defaultValue={player.jerseyNo}
+                        defaultValue={uEffNo}
                         placeholder="#"
                         maxLength={3}
-                        onBlur={e => {
-                          const jersey = e.target.value.trim();
-                          const role = specialRole(jersey);
-                          updatePlayer(team!.id, player.id, {
-                            jerseyNo: jersey,
-                            ...(role && !player.position ? { position: role } : {}),
-                          });
-                        }}
+                        onBlur={e => commitJerseyEdit(player, e.target.value)}
                         onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
                         onClick={e => e.stopPropagation()}
                       />
@@ -1037,18 +1342,25 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                     <div className="wgt-pl-info">
                       {showPos && player.position && <span className="wgt-pl-pos">{player.position}</span>}
                       <input
-                        key={`n-${player.id}-${player.name}`}
+                        key={`n-${player.id}-${uDispName}`}
                         className="wgt-pl-name wgt-pl-name--inp"
-                        defaultValue={player.name}
+                        defaultValue={uDispName}
                         placeholder="Name"
-                        onBlur={e => updatePlayer(team!.id, player.id, { name: e.target.value.trim() })}
+                        onBlur={e => {
+                          const typed = e.target.value.trim();
+                          if (typed === uDispName) return;
+                          updatePlayer(team!.id, player.id, { name: typed });
+                        }}
                         onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
                         onClick={e => e.stopPropagation()}
                       />
+                      {renderTopBadges(player)}
                     </div>
+                    {showStats && renderStatCells(player)}
                     {uSubbedOff && (
-                      <span className="wgt-pl-sub-ind wgt-pl-sub-ind--off" title="Substituted off">↓</span>
+                      <span className="wgt-pl-sub-ind wgt-pl-sub-ind--off" title="Substituted off"><ArrowDown size={9} strokeWidth={2.5} /></span>
                     )}
+                    <span className="wgt-pl-flex-spacer" />
                     <div className="wgt-pl-actions">
                       {!specialRole(player.jerseyNo) && (
                         <>
@@ -1056,12 +1368,16 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                             className="wgt-pl-btn wgt-pl-btn--assign"
                             title="Add to bench"
                             onClick={() => addUnassignedToSection(player.id, 'sub')}
-                          >+bench</button>
+                          >{viewSize === 'large'
+                              ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 1 }}><Plus size={10} strokeWidth={2} /><ArrowDown size={10} strokeWidth={2} /></span>
+                              : '+bench'}</button>
                           <button
                             className="wgt-pl-btn wgt-pl-btn--assign"
                             title="Add to starters"
                             onClick={() => addUnassignedToSection(player.id, 'starter')}
-                          >+start</button>
+                          >{viewSize === 'large'
+                              ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 1 }}><Plus size={10} strokeWidth={2} /><ArrowUp size={10} strokeWidth={2} /></span>
+                              : '+start'}</button>
                         </>
                       )}
                       {!player.jerseyNo && (
@@ -1125,19 +1441,19 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
             return (
               <div className="wgt-pl-section wgt-pl-section--staff">
                 <div className="wgt-pl-section-hdr wgt-pl-section-hdr--staff">
-                  <span className="wgt-pl-section-icon">♟</span>
+                  <span className="wgt-pl-section-icon"><Briefcase size={12} strokeWidth={2} /></span>
                   <span className="wgt-pl-section-title">Team Staff</span>
                 </div>
                 <div className="wgt-pl-list" onClick={e => e.stopPropagation()}>
                   {staffList.map(member => (
                     <div key={member.id} className="wgt-pl-row wgt-pl-row--staff">
-                      {cfg.linkedPlayerHighlightId && (
+                      {linkedPlayerHighlightId && (
                         <button
                           className={`wgt-pl-btn wgt-pl-btn--highlight wgt-pl-btn--highlight-left${highlightedPlayerId === member.id ? ' wgt-pl-btn--highlight--active' : ''}`}
                           title="Highlight staff member"
-                          onClick={() => updateWidgetConfig(cfg.linkedPlayerHighlightId, {
+                          onClick={() => updateWidgetConfig(linkedPlayerHighlightId, {
                             highlightedPlayerId:  member.id,
-                            highlightedName:      member.name,
+                            highlightedName:      disp(member.name),
                             highlightedJersey:    '',
                             highlightedPosition:  member.role,
                             highlightedTeam:      team?.name ?? '',
@@ -1145,7 +1461,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                             highlightedSide:      side,
                           })}
                         >
-                          ★
+                          <Star size={11} strokeWidth={2} fill={highlightedPlayerId === member.id ? 'currentColor' : 'none'} />
                         </button>
                       )}
                       <span className="wgt-pl-staff-role">{member.role}</span>
@@ -1177,7 +1493,7 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
                         >
                           <option value="">▾</option>
                           {nonJerseyPlayers.map(p => (
-                            <option key={p.id} value={p.name}>{p.name}</option>
+                            <option key={p.id} value={p.name}>{disp(p.name)}</option>
                           ))}
                         </select>
                       )}
@@ -1189,16 +1505,22 @@ export function PlayerListWidget({ widgetId, config: cfg }: Props) {
           })()}
 
           {/* Footer */}
-          {(onField.length > 0 || Object.keys(cfg.playerCards ?? {}).length > 0 || cfg.vmixInputKey || cfg.vmixStaffInputKey) && (
+          {(onField.length > 0 || Object.keys(cfg[k('playerCards')] ?? {}).length > 0 || cfg[k('vmixInputKey')] || cfg[k('vmixStaffInputKey')]) && (
             <div className="wgt-pl-footer">
-              {(onField.length > 0 || Object.keys(cfg.playerCards ?? {}).length > 0) && (
-                <button className="wgt-pl-reset" onClick={resetSession}>↺ Reset time &amp; cards</button>
+              {(onField.length > 0 || Object.keys(cfg[k('playerCards')] ?? {}).length > 0) && (
+                <button className="wgt-pl-reset" onClick={resetSession}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><RotateCcw size={11} strokeWidth={2} /> Reset time &amp; cards</span>
+                </button>
               )}
-              {cfg.vmixInputKey && (
-                <button className="wgt-pl-reset" onClick={syncAllNames} title="Push all player names to vMix">⇒ Sync Names</button>
+              {cfg[k('vmixInputKey')] && (
+                <button className="wgt-pl-reset" onClick={syncAllNames} title="Push all player names to vMix">
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Send size={11} strokeWidth={2} /> Sync Names</span>
+                </button>
               )}
-              {cfg.vmixStaffInputKey && (
-                <button className="wgt-pl-reset" onClick={sendStaffToVmix} title="Push Manager and Head Coach names to vMix">⇒ Sync Staff</button>
+              {cfg[k('vmixStaffInputKey')] && (
+                <button className="wgt-pl-reset" onClick={sendStaffToVmix} title="Push Manager and Head Coach names to vMix">
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Send size={11} strokeWidth={2} /> Sync Staff</span>
+                </button>
               )}
             </div>
           )}

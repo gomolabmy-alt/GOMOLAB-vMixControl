@@ -9,6 +9,8 @@
     "deep-link:default",
     "opener:default",
     "os:default",
-    "global-shortcut:default"
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "core:webview:allow-create-webview-window"
   ]
 }

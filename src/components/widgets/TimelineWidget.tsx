@@ -1,8 +1,16 @@
 import React, { useState, useMemo, useContext } from 'react';
+import {
+  CircleDot, Asterisk, ArrowDown, ArrowUp, ChevronDown, Pencil, Check,
+  X, StickyNote, ArrowLeftRight, ArrowUpDown, Pause, RotateCcw,
+} from 'lucide-react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTeamDbStore } from '../../stores/teamDbStore';
+import { useAppSettings } from '../../stores/appSettingsStore';
 import { useUndoStore } from '../../stores/undoStore';
+import { autoLinkedWidget, autoLinkedWidgetPair } from '../../lib/autoLink';
+import { resolvePlayerListRoster } from '../../lib/playerListSquad';
+import { simplifyPlayerName } from '../../lib/simpleName';
 import type { TimelineEvent, TimelineEventType } from '../../types/canvas';
 
 interface Props { widgetId: string; config: Record<string, any>; }
@@ -17,12 +25,12 @@ function renderEventIcon(ev: TimelineEvent) {
   if (ev.type === 'score') {
     return ev.jerseyNo
       ? <span className="wgt-tl2-ico wgt-tl2-ico--jersey">{ev.jerseyNo}</span>
-      : <span className="wgt-tl2-ico wgt-tl2-ico--score">⚽</span>;
+      : <span className="wgt-tl2-ico wgt-tl2-ico--score"><CircleDot size={13} strokeWidth={2} /></span>;
   }
   if (ev.type === 'yellow-card') return <span className="wgt-tl2-ico wgt-tl2-ico--ycard" />;
   if (ev.type === 'orange-card') return <span className="wgt-tl2-ico wgt-tl2-ico--ocard" />;
   if (ev.type === 'red-card')    return <span className="wgt-tl2-ico wgt-tl2-ico--rcard" />;
-  if (ev.type === 'custom')      return <span className="wgt-tl2-ico wgt-tl2-ico--custom">✱</span>;
+  if (ev.type === 'custom')      return <span className="wgt-tl2-ico wgt-tl2-ico--custom"><Asterisk size={12} strokeWidth={2} /></span>;
   return null;
 }
 
@@ -79,22 +87,22 @@ function renderEventContent(ev: TimelineEvent, side: 'left' | 'right') {
       <div className="wgt-tl2-content">
         {ev.playerOff && (
           <div className={`wgt-tl2-sub-row wgt-tl2-sub-row--${side}`}>
-            {side === 'right' && <span className="wgt-tl2-ico wgt-tl2-ico--sub-out">▼</span>}
+            {side === 'right' && <span className="wgt-tl2-ico wgt-tl2-ico--sub-out"><ArrowDown size={11} strokeWidth={2} /></span>}
             <div className="wgt-tl2-sub-text">
               <span className="wgt-tl2-label">Off</span>
               <PlayerName name={ev.playerOff} jersey={ev.jerseyNoOff} />
             </div>
-            {side === 'left' && <span className="wgt-tl2-ico wgt-tl2-ico--sub-out">▼</span>}
+            {side === 'left' && <span className="wgt-tl2-ico wgt-tl2-ico--sub-out"><ArrowDown size={11} strokeWidth={2} /></span>}
           </div>
         )}
         {ev.player && (
           <div className={`wgt-tl2-sub-row wgt-tl2-sub-row--${side}`}>
-            {side === 'right' && <span className="wgt-tl2-ico wgt-tl2-ico--sub-in">▲</span>}
+            {side === 'right' && <span className="wgt-tl2-ico wgt-tl2-ico--sub-in"><ArrowUp size={11} strokeWidth={2} /></span>}
             <div className="wgt-tl2-sub-text">
               <span className="wgt-tl2-label">On</span>
               <PlayerName name={ev.player} jersey={ev.jerseyNo} />
             </div>
-            {side === 'left' && <span className="wgt-tl2-ico wgt-tl2-ico--sub-in">▲</span>}
+            {side === 'left' && <span className="wgt-tl2-ico wgt-tl2-ico--sub-in"><ArrowUp size={11} strokeWidth={2} /></span>}
           </div>
         )}
       </div>
@@ -138,9 +146,9 @@ function renderHCard(
     label = 'Substitution';
     playerNode = (
       <span className="wgt-tl2-hplayer-sub">
-        {ev.player && <><span className="wgt-tl2-sub-arr">▲</span><PlayerName name={ev.player} jersey={ev.jerseyNo} /></>}
+        {ev.player && <><span className="wgt-tl2-sub-arr"><ArrowUp size={9} strokeWidth={2.5} /></span><PlayerName name={ev.player} jersey={ev.jerseyNo} /></>}
         {ev.player && ev.playerOff && <span className="wgt-tl2-sub-sep">/</span>}
-        {ev.playerOff && <><span className="wgt-tl2-sub-arr wgt-tl2-sub-arr--out">▼</span><PlayerName name={ev.playerOff} jersey={ev.jerseyNoOff} /></>}
+        {ev.playerOff && <><span className="wgt-tl2-sub-arr wgt-tl2-sub-arr--out"><ArrowDown size={9} strokeWidth={2.5} /></span><PlayerName name={ev.playerOff} jersey={ev.jerseyNoOff} /></>}
       </span>
     );
   } else if (ev.type === 'custom') {
@@ -153,10 +161,10 @@ function renderHCard(
       <span className="wgt-tl2-hlabel">{label}</span>
       {playerNode && <span className="wgt-tl2-hplayer">{playerNode}</span>}
       {onEdit && (
-        <button className={`wgt-tl2-hedit${isEditing ? ' wgt-tl2-hedit--active' : ''}`} onClick={onEdit}>✏</button>
+        <button className={`wgt-tl2-hedit${isEditing ? ' wgt-tl2-hedit--active' : ''}`} onClick={onEdit}><Pencil size={11} strokeWidth={2} /></button>
       )}
       {canDelete && (
-        <button className="wgt-tl2-hdel" onClick={onDelete}>×</button>
+        <button className="wgt-tl2-hdel" onClick={onDelete}><X size={11} strokeWidth={2} /></button>
       )}
     </div>
   );
@@ -175,6 +183,12 @@ export function TimelineWidget({ widgetId, config }: Props) {
   const { pages, addTimelineEvent, deleteTimelineEvent } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { teams: teamDbTeams } = useTeamDbStore();
+  // Simple Names (App Settings) — card/sub events already arrive
+  // pre-simplified (see PlayerListWidget/SubWidget, which write them);
+  // score events are derived here straight from scoreLog's raw `scorer`,
+  // so they need the same treatment applied at the same point.
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const disp = (name: string) => simplifyPlayerName(name, { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker });
 
   const [adding, setAdding] = useState(false);
   const [detail, setDetail] = useState('');
@@ -187,26 +201,27 @@ export function TimelineWidget({ widgetId, config }: Props) {
     updateWidgetConfig(widgetId, { layout: layout === 'vertical' ? 'horizontal' : 'vertical' });
 
   const allWidgets = pages.flatMap(p => p.widgets);
-  const timerCfg = config.linkedTimerWidgetId
-    ? allWidgets.find(w => w.id === config.linkedTimerWidgetId)?.config ?? null
-    : null;
-  const scoreboardCfg = config.linkedScoreboardId
-    ? allWidgets.find(w => w.id === config.linkedScoreboardId)?.config ?? null
-    : null;
+  // Both fall back to the sole matching widget on this page when nothing's
+  // been explicitly linked in settings — an explicit pick always wins.
+  const linkedTimer = autoLinkedWidget(pages, widgetId, config.linkedTimerWidgetId, 'timer');
+  const linkedScoreboard = autoLinkedWidget(pages, widgetId, config.linkedScoreboardId, 'scoreboard');
+  const timerCfg = linkedTimer?.config ?? null;
+  const scoreboardCfg = linkedScoreboard?.config ?? null;
 
   const teamAName  = scoreboardCfg?.teamAName  ?? 'Team A';
   const teamBName  = scoreboardCfg?.teamBName  ?? 'Team B';
   const teamAColor = scoreboardCfg?.teamAColor ?? '#e74c3c';
   const teamBColor = scoreboardCfg?.teamBColor ?? '#3498db';
 
-  const resolveSquad = (team: 'A' | 'B') => {
-    const listId = team === 'A' ? scoreboardCfg?.linkedPlayerListA : scoreboardCfg?.linkedPlayerListB;
-    if (!listId) return [];
-    const plw = allWidgets.find(w => w.id === listId);
-    if (!plw) return [];
-    const plCfg = plw.config;
-    const teamData = teamDbTeams.find(t => t.id === plCfg.linkedTeamId);
-    const assigned = new Set([...(plCfg.starters ?? []), ...(plCfg.subs ?? [])].filter(Boolean) as string[]);
+  // Resolved the same way the scoreboard itself would (explicit link, or
+  // the two Player List widgets on its page assigned by teamSide/position).
+  const { a: scoreboardPlA, b: scoreboardPlB } = linkedScoreboard
+    ? autoLinkedWidgetPair(pages, linkedScoreboard.id, scoreboardCfg?.linkedPlayerListA, scoreboardCfg?.linkedPlayerListB, 'player-list')
+    : {};
+  const resolveSquad = (side: 'A' | 'B') => {
+    const plw = side === 'A' ? scoreboardPlA : scoreboardPlB;
+    const { team: teamData, starters, subs } = resolvePlayerListRoster(plw, side, teamDbTeams);
+    const assigned = new Set([...starters, ...subs].filter(Boolean));
     return (teamData?.players ?? [])
       .filter((p: any) => assigned.has(p.id))
       .sort((a: any, b: any) => (parseInt(a.jerseyNo) || 999) - (parseInt(b.jerseyNo) || 999));
@@ -227,7 +242,7 @@ export function TimelineWidget({ widgetId, config }: Props) {
     timeStr: e.timeStr ?? '',
     timeMs: e.timeMs ?? 0,
     team: e.team as 'A' | 'B',
-    player: e.scorer || undefined,
+    player: e.scorer ? disp(e.scorer) : undefined,
     jerseyNo: e.jerseyNo || undefined,
     detail: e.action,
     scoreA: e.scoreA,
@@ -270,7 +285,7 @@ export function TimelineWidget({ widgetId, config }: Props) {
       const updated = scoreLog.map((e: any) =>
         e.id === origId ? { ...e, scorer: editDraft.player, jerseyNo: editDraft.jerseyNo } : e
       );
-      if (config.linkedScoreboardId) updateWidgetConfig(config.linkedScoreboardId, { scoreLog: updated });
+      if (linkedScoreboard) updateWidgetConfig(linkedScoreboard.id, { scoreLog: updated });
     } else {
       const events: TimelineEvent[] = config.events ?? [];
       const updated = events.map(e =>
@@ -292,7 +307,7 @@ export function TimelineWidget({ widgetId, config }: Props) {
           onClick={() => setPickerTarget(pickerTarget === field ? null : field)}
         >
           <span className="wgt-tl2-edit-pickbtn-name">{name || '— No player —'}</span>
-          <span className="wgt-tl2-edit-pickbtn-ico">▾</span>
+          <span className="wgt-tl2-edit-pickbtn-ico"><ChevronDown size={11} strokeWidth={2} /></span>
         </button>
       );
     };
@@ -302,14 +317,14 @@ export function TimelineWidget({ widgetId, config }: Props) {
         {ev.type === 'substitution' ? (
           <>
             <div className="wgt-tl2-edit-row">
-              <span className="wgt-tl2-edit-lbl">▲ On</span>
+              <span className="wgt-tl2-edit-lbl"><span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><ArrowUp size={9} strokeWidth={2.5} /> On</span></span>
               <PlayerBtn field="player" />
               <input className="wgt-tl2-edit-inp wgt-tl2-edit-inp--no" value={editDraft.jerseyNo} placeholder="#"
                 onChange={e => setEditDraft(d => ({ ...d, jerseyNo: e.target.value }))}
                 onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }} />
             </div>
             <div className="wgt-tl2-edit-row">
-              <span className="wgt-tl2-edit-lbl">▼ Off</span>
+              <span className="wgt-tl2-edit-lbl"><span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><ArrowDown size={9} strokeWidth={2.5} /> Off</span></span>
               <PlayerBtn field="playerOff" />
               <input className="wgt-tl2-edit-inp wgt-tl2-edit-inp--no" value={editDraft.jerseyNoOff} placeholder="#"
                 onChange={e => setEditDraft(d => ({ ...d, jerseyNoOff: e.target.value }))}
@@ -325,7 +340,9 @@ export function TimelineWidget({ widgetId, config }: Props) {
           </div>
         )}
         <div className="wgt-tl2-edit-actions">
-          <button className="wgt-tl2-edit-save" onClick={saveEdit}>✓ Save</button>
+          <button className="wgt-tl2-edit-save" onClick={saveEdit}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Check size={11} strokeWidth={2} /> Save</span>
+          </button>
           <button className="wgt-tl2-edit-cancel" onClick={cancelEdit}>Cancel</button>
         </div>
       </div>
@@ -366,7 +383,7 @@ export function TimelineWidget({ widgetId, config }: Props) {
             onClick={toggleLayout}
             title={layout === 'vertical' ? 'Switch to horizontal view' : 'Switch to vertical view'}
           >
-            {layout === 'vertical' ? '⇄' : '⇅'}
+            {layout === 'vertical' ? <ArrowLeftRight size={13} strokeWidth={2} /> : <ArrowUpDown size={13} strokeWidth={2} />}
           </button>
         </div>
       )}
@@ -397,7 +414,7 @@ export function TimelineWidget({ widgetId, config }: Props) {
                   <div key={ev.id} className="wgt-tl2-hdivider">
                     <span className="wgt-tl2-hdivider-label">{ev.detail || ev.timeStr}</span>
                     {!isReadOnly(ev) && (
-                      <button className="wgt-tl2-hdivider-del" onClick={() => deleteTimelineEvent(widgetId, ev.id)}>×</button>
+                      <button className="wgt-tl2-hdivider-del" onClick={() => deleteTimelineEvent(widgetId, ev.id)}><X size={11} strokeWidth={2} /></button>
                     )}
                   </div>
                 );
@@ -454,7 +471,7 @@ export function TimelineWidget({ widgetId, config }: Props) {
                   <span className="wgt-tl2-period-label">{ev.detail || ev.timeStr}</span>
                   <div className="wgt-tl2-period-rule" />
                   {!isReadOnly(ev) && (
-                    <button className="wgt-tl2-del wgt-tl2-del--period" onClick={() => deleteTimelineEvent(widgetId, ev.id)}>×</button>
+                    <button className="wgt-tl2-del wgt-tl2-del--period" onClick={() => deleteTimelineEvent(widgetId, ev.id)}><X size={12} strokeWidth={2} /></button>
                   )}
                 </div>
               );
@@ -483,10 +500,10 @@ export function TimelineWidget({ widgetId, config }: Props) {
                     <button
                       className={`wgt-tl2-edit-btn${editing ? ' wgt-tl2-edit-btn--active' : ''}`}
                       onClick={() => editing ? cancelEdit() : startEdit(ev)}
-                    >✏</button>
+                    ><Pencil size={11} strokeWidth={2} /></button>
                   )}
                   {!isReadOnly(ev) && (
-                    <button className="wgt-tl2-del" onClick={() => deleteTimelineEvent(widgetId, ev.id)}>×</button>
+                    <button className="wgt-tl2-del" onClick={() => deleteTimelineEvent(widgetId, ev.id)}><X size={12} strokeWidth={2} /></button>
                   )}
                 </div>
                 {editing && <EditForm ev={ev} />}
@@ -508,13 +525,17 @@ export function TimelineWidget({ widgetId, config }: Props) {
             onKeyDown={e => { if (e.key === 'Enter') confirmAdd(); if (e.key === 'Escape') setAdding(false); }}
           />
           <div className="wgt-tl-form-actions">
-            <button className="wgt-tl-confirm" onClick={confirmAdd}>✓ Add</button>
+            <button className="wgt-tl-confirm" onClick={confirmAdd}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Check size={12} strokeWidth={2} /> Add</span>
+            </button>
             <button className="wgt-tl-cancel" onClick={() => setAdding(false)}>Cancel</button>
           </div>
         </div>
       ) : (
         <div className="wgt-tl-add-bar">
-          <button className="wgt-tl-add-btn" title="Add custom event" onClick={() => setAdding(true)}>📝 Custom</button>
+          <button className="wgt-tl-add-btn" title="Add custom event" onClick={() => setAdding(true)}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><StickyNote size={13} strokeWidth={2} /> Custom</span>
+          </button>
           <button
             className="wgt-tl-add-btn wgt-tl-add-btn--halftime"
             title="Insert half-time / period break divider"
@@ -532,7 +553,7 @@ export function TimelineWidget({ widgetId, config }: Props) {
               });
             }}
           >
-            ⏸ Half Time
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Pause size={13} strokeWidth={2} /> Half Time</span>
           </button>
           <button
             className="wgt-tl-add-btn wgt-tl-add-btn--danger"
@@ -543,14 +564,14 @@ export function TimelineWidget({ widgetId, config }: Props) {
               const beforeEvents = config.events;
               const beforeScoreLog = scoreboardCfg?.scoreLog;
               updateWidgetConfig(widgetId, { events: [] });
-              if (config.linkedScoreboardId) updateWidgetConfig(config.linkedScoreboardId, { scoreLog: [] });
+              if (linkedScoreboard) updateWidgetConfig(linkedScoreboard.id, { scoreLog: [] });
               useUndoStore.getState().pushUndo('Cleared timeline', () => {
                 updateWidgetConfig(widgetId, { events: beforeEvents });
-                if (config.linkedScoreboardId) updateWidgetConfig(config.linkedScoreboardId, { scoreLog: beforeScoreLog });
+                if (linkedScoreboard) updateWidgetConfig(linkedScoreboard.id, { scoreLog: beforeScoreLog });
               });
             }}
           >
-            ↺ Clear
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><RotateCcw size={13} strokeWidth={2} /> Clear</span>
           </button>
         </div>
       )}
@@ -576,9 +597,13 @@ export function TimelineWidget({ widgetId, config }: Props) {
                 <span className="wgt-tl2-picker-dot" style={{ background: teamColor }} />
                 <span className="wgt-tl2-picker-team">{teamName}</span>
                 <span className="wgt-tl2-picker-label">
-                  {pickerTarget === 'playerOff' ? '▼ Off' : '▲ On / Scorer'}
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                    {pickerTarget === 'playerOff'
+                      ? <><ArrowDown size={10} strokeWidth={2.5} /> Off</>
+                      : <><ArrowUp size={10} strokeWidth={2.5} /> On / Scorer</>}
+                  </span>
                 </span>
-                <button className="wgt-tl2-picker-close" onClick={() => setPickerTarget(null)}>✕</button>
+                <button className="wgt-tl2-picker-close" onClick={() => setPickerTarget(null)}><X size={13} strokeWidth={2} /></button>
               </div>
               <div className="wgt-tl2-picker-list">
                 <button
@@ -594,7 +619,7 @@ export function TimelineWidget({ widgetId, config }: Props) {
                     onClick={() => pick(p.name, p.jerseyNo ?? '')}
                   >
                     {p.jerseyNo && <span className="wgt-tl2-picker-no">{p.jerseyNo}</span>}
-                    <span className="wgt-tl2-picker-name">{p.name}</span>
+                    <span className="wgt-tl2-picker-name">{disp(p.name)}</span>
                   </button>
                 ))}
               </div>

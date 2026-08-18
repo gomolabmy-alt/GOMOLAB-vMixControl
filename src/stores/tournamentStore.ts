@@ -6,11 +6,19 @@ import { syncClient } from '../lib/syncClient';
 import { useTeamDbStore } from './teamDbStore';
 import { useMatchScheduleStore } from './matchScheduleStore';
 import { useMatchResultsStore } from './matchResultsStore';
+import { useRundownStore } from './rundownStore';
 import { useAppSettings } from './appSettingsStore';
 import { useUndoStore } from './undoStore';
 
-/** True on the desktop host (Tauri), false on any browser/remote client. */
-const isHostClient = () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+/** True only on the ONE webview actually acting as sync host — the main
+ *  desktop window. False for any browser/remote client AND for a popped-out
+ *  canvas-page window (still a real Tauri webview, but not the host — see
+ *  syncClient.isHost / main.tsx's isMainWindow). Using
+ *  '__TAURI_INTERNALS__' in window here directly would be wrong: that's
+ *  true for every Tauri webview, so a second real window would wrongly
+ *  self-appoint as a second host and refuse to accept the real host's
+ *  FULL_STATE. */
+const isHostClient = () => syncClient.isHost;
 
 /** Remote client only: push the current local Team DB/Schedule/Results/
  *  Tournament state to the host, which adopts it and re-broadcasts to
@@ -23,6 +31,7 @@ export function pushTournamentDataToHost() {
     teamDb: { teams: useTeamDbStore.getState().teams },
     matchSchedule: { matches: useMatchScheduleStore.getState().matches },
     matchResults: { results: useMatchResultsStore.getState().results },
+    rundown: { segments: useRundownStore.getState().segments },
     tournament: { tournaments: t.tournaments, activeTournamentId: t.activeTournamentId },
   });
 }
@@ -182,6 +191,7 @@ export function initTournamentSync() {
         if (msg.teamDb) useTeamDbStore.getState().restoreTeams(msg.teamDb.teams);
         if (msg.matchSchedule) useMatchScheduleStore.getState().restoreMatches(msg.matchSchedule.matches);
         if (msg.matchResults) useMatchResultsStore.getState().restoreResults(msg.matchResults.results);
+        if (msg.rundown) useRundownStore.getState().restoreSegments(msg.rundown.segments);
       }
       return;
     }
@@ -192,6 +202,7 @@ export function initTournamentSync() {
         useTeamDbStore.getState().restoreTeams(msg.teamDb.teams);
         useMatchScheduleStore.getState().restoreMatches(msg.matchSchedule.matches);
         useMatchResultsStore.getState().restoreResults(msg.matchResults.results);
+        if (msg.rundown) useRundownStore.getState().restoreSegments(msg.rundown.segments);
         useTournamentStore.setState({
           tournaments: msg.tournament.tournaments,
           activeTournamentId: msg.tournament.activeTournamentId,

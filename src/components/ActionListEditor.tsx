@@ -72,8 +72,17 @@ export function ActionListEditor({ actions, onChange, sectionKey, pages, timerWi
                 <optgroup label="App">
                   <option value="App.ToggleEditMode">Toggle Edit Mode</option>
                 </optgroup>
+                <optgroup label="Timing">
+                  <option value="App.Wait">Wait</option>
+                </optgroup>
               </select>
             </Field>
+            {fn === 'App.Wait' && (
+              <Field label="Seconds">
+                <input className="field-input" type="number" min={0} step={0.1} value={params.Seconds ?? '1'}
+                  onChange={e => setParam('Seconds', e.target.value)} />
+              </Field>
+            )}
             {fn === 'App.GoToPage' && (
               <Field label="Page">
                 <select className="field-input" value={params.Page ?? ''} onChange={e => setParam('Page', e.target.value)}>

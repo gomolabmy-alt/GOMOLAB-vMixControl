@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Settings, X, Play, Pause, RotateCcw } from 'lucide-react';
 import { useVmixStore, formatTime } from '../stores/vmixStore';
 import { SCORE_INCREMENTS } from '../types/vmix';
 import type { Scoreboard, VmixTimer, ScoreboardStyle, TimerMode, TimerFormat } from '../types/vmix';
@@ -18,9 +19,9 @@ function ScoreboardCard({ sb }: { sb: Scoreboard }) {
         <span className="score-card-name">{sb.name}</span>
         <div style={{ display: 'flex', gap: 4 }}>
           <button className="btn btn--ghost btn--small" onClick={() => setEditing((v) => !v)}>
-            {editing ? 'Done' : '⚙'}
+            {editing ? 'Done' : <Settings size={14} />}
           </button>
-          <button className="btn btn--ghost btn--small" onClick={() => deleteScoreboard(sb.id)} title="Delete">×</button>
+          <button className="btn btn--ghost btn--small" onClick={() => deleteScoreboard(sb.id)} title="Delete"><X size={14} /></button>
         </div>
       </div>
 
@@ -133,9 +134,9 @@ function TimerCard({ timer }: { timer: VmixTimer }) {
         <span className="score-card-name">{timer.name}</span>
         <div style={{ display: 'flex', gap: 4 }}>
           <button className="btn btn--ghost btn--small" onClick={() => setEditing((v) => !v)}>
-            {editing ? 'Done' : '⚙'}
+            {editing ? 'Done' : <Settings size={14} />}
           </button>
-          <button className="btn btn--ghost btn--small" onClick={() => deleteTimer(timer.id)} title="Delete">×</button>
+          <button className="btn btn--ghost btn--small" onClick={() => deleteTimer(timer.id)} title="Delete"><X size={14} /></button>
         </div>
       </div>
 
@@ -225,11 +226,17 @@ function TimerCard({ timer }: { timer: VmixTimer }) {
             </div>
             <div className="timer-main-controls">
               {timer.running ? (
-                <button className="timer-btn timer-btn--pause" onClick={() => pauseTimer(timer.id)}>⏸ Pause</button>
+                <button className="timer-btn timer-btn--pause" onClick={() => pauseTimer(timer.id)}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Pause size={14} /> Pause</span>
+                </button>
               ) : (
-                <button className="timer-btn timer-btn--start" onClick={() => startTimer(timer.id)}>▶ Start</button>
+                <button className="timer-btn timer-btn--start" onClick={() => startTimer(timer.id)}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Play size={14} /> Start</span>
+                </button>
               )}
-              <button className="timer-btn timer-btn--reset" onClick={() => resetTimer(timer.id)}>↺ Reset</button>
+              <button className="timer-btn timer-btn--reset" onClick={() => resetTimer(timer.id)}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><RotateCcw size={14} /> Reset</span>
+              </button>
             </div>
           </div>
         </div>

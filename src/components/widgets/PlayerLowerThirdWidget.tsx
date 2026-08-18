@@ -1,7 +1,10 @@
 import { useEffect, useRef } from 'react';
+import { ArrowUp, Eye, EyeOff } from 'lucide-react';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { buildActionSummary } from '../../utils/scoreActions';
+import { autoLinkedWidget } from '../../lib/autoLink';
+import { resolveImageUrl } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -10,7 +13,7 @@ interface Props {
   h: number;
 }
 
-export function PlayerLowerThirdWidget({ config }: Props) {
+export function PlayerLowerThirdWidget({ widgetId, config }: Props) {
   const { pages } = useCanvasStore();
   const { getClient, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
 
@@ -22,15 +25,20 @@ export function PlayerLowerThirdWidget({ config }: Props) {
 
   const allWidgets = pages.flatMap(p => p.widgets);
 
-  // Resolve linked player list to get team color when available
-  const linkedPl = allWidgets.find(w => w.id === config.linkedPlayerListId);
+  // Falls back to the sole Player List/Scoreboard widget on this page when
+  // nothing's been explicitly linked in settings — an explicit pick always
+  // wins.
+  const linkedPl = autoLinkedWidget(pages, widgetId, config.linkedPlayerListId, 'player-list');
   const resolvedColor = config.highlightedTeamColor
     || (config.highlightedSide === 'A' ? linkedPl?.config.teamColor : undefined)
     || '#888';
 
   // Compute score summary live from linked scoreboard log
-  const linkedScoreboard = allWidgets.find(w => w.id === config.linkedScoreboardId);
+  const linkedScoreboard = autoLinkedWidget(pages, widgetId, config.linkedScoreboardId, 'scoreboard');
   const scoreLog: any[] = linkedScoreboard?.config.scoreLog ?? [];
+  const teamLogo: string | undefined = config.highlightedSide === 'A' ? linkedScoreboard?.config.teamALogo
+    : config.highlightedSide === 'B' ? linkedScoreboard?.config.teamBLogo
+    : undefined;
   const scoreSummary = (() => {
     if (!hasPlayer || scoreLog.length === 0) return config.highlightedScoreSummary ?? '';
     const playerLog = scoreLog.filter(e =>
@@ -58,6 +66,11 @@ export function PlayerLowerThirdWidget({ config }: Props) {
     if (config.fieldPosition     && position)     c.setTextField(key, config.fieldPosition,     position);
     if (config.fieldTeam         && teamName)     c.setTextField(key, config.fieldTeam,         teamName);
     if (config.fieldScoreSummary && scoreSummary) c.setTextField(key, config.fieldScoreSummary, scoreSummary);
+    if (config.fieldTeamLogo && teamLogo) c.setImageField(key, config.fieldTeamLogo, teamLogo);
+    if (config.mergedPrefix && config.mergedParts?.length) {
+      const src: Record<string, string> = { name, jersey, position, team: teamName, scoreSummary };
+      c.setTextField(key, config.mergedPrefix, config.mergedParts.map((k: string) => src[k] ?? '').join(config.mergedSeparator ?? ' '));
+    }
   };
 
   const lastIdRef = useRef<string | null>(null);
@@ -100,7 +113,10 @@ export function PlayerLowerThirdWidget({ config }: Props) {
       <div className="wgt-slt-preview">
         {hasPlayer ? (
           <div className="wgt-slt-info">
-            <div className="wgt-slt-team" style={{ color: resolvedColor }}>{teamName || '—'}</div>
+            <div className="wgt-slt-team" style={{ color: resolvedColor }}>
+              {teamLogo && <img className="wgt-slt-team-logo" src={resolveImageUrl(teamLogo)} alt="" />}
+              {teamName || '—'}
+            </div>
             <div className="wgt-slt-scorer">
               {jersey   && <span className="wgt-slt-jersey">#{jersey}</span>}
               {name     && <span className="wgt-slt-name">{name}</span>}
@@ -116,9 +132,7 @@ export function PlayerLowerThirdWidget({ config }: Props) {
             )}
           </div>
         ) : (
-          <span className="wgt-slt-empty">
-            {config.linkedPlayerListId ? 'No player highlighted' : 'Link a player list in settings'}
-          </span>
+          <span className="wgt-slt-empty">No player highlighted</span>
         )}
       </div>
 
@@ -128,21 +142,24 @@ export function PlayerLowerThirdWidget({ config }: Props) {
           onClick={sendToVmix}
           disabled={!getClient() || !hasInput || !hasPlayer}
           title="Send player data to vMix title"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, justifyContent: 'center' }}
         >
-          ↑ Send
+          <ArrowUp size={12} strokeWidth={2} /> Send
         </button>
         <button
           className={`wgt-slt-btn wgt-slt-btn--show${overlayActive ? ' wgt-slt-btn--active' : ''}`}
           onClick={() => overlayIn(ch, config.vmixInputKey || undefined)}
           disabled={!vmixState || !hasInput}
           title="Show on overlay"
-        >▶ Show</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><Eye size={12} strokeWidth={2} /> Show</button>
         <button
           className={`wgt-slt-btn wgt-slt-btn--hide${!overlayActive ? ' wgt-slt-btn--active' : ''}`}
           onClick={() => overlayOut(ch)}
           disabled={!vmixState || !hasInput}
           title="Hide from overlay"
-        >■ Hide</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><EyeOff size={12} strokeWidth={2} /> Hide</button>
       </div>
     </div>
   );

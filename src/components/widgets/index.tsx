@@ -24,15 +24,19 @@ import { PanelWidget } from './PanelWidget';
 import { VmixTitlesWidget } from './VmixTitlesWidget';
 import { RugbyLineupWidget } from './RugbyLineupWidget';
 import { CardLowerThirdWidget } from './CardLowerThirdWidget';
+import { PlacementLowerThirdWidget } from './PlacementLowerThirdWidget';
 import { CustomTimerWidget } from './CustomTimerWidget';
 import { ImageDisplayWidget } from './ImageDisplayWidget';
 import { RecentMatchesWidget } from './RecentMatchesWidget';
 import { MatchScheduleWidget } from './MatchScheduleWidget';
+import { RundownWidget } from './RundownWidget';
 import { StandingsWidget } from './StandingsWidget';
 import { BracketWidget } from './BracketWidget';
 import { TeamFormWidget } from './TeamFormWidget';
 import { PlayerHeadToHeadWidget } from './PlayerHeadToHeadWidget';
 import { PlayerStatsWidget } from './PlayerStatsWidget';
+import { PlayerHighlightWidget } from './PlayerHighlightWidget';
+import { GroupStandingsWidget } from './GroupStandingsWidget';
 
 interface Props {
   widget: CanvasWidget;
@@ -62,22 +66,28 @@ export function WidgetRenderer({ widget }: Props) {
     case 'transitions': content = <TransitionsWidget {...sharedProps} />; break;
     case 'timeline':    content = <TimelineWidget widgetId={id} {...sharedProps} />; break;
     case 'player-list':  content = <PlayerListWidget widgetId={id} {...sharedProps} />; break;
+    case 'player-list-next': content = <PlayerListWidget widgetId={id} nextMatchMode {...sharedProps} />; break;
     case 'substitution':  content = <SubWidget widgetId={id} {...sharedProps} />; break;
-    case 'card-display':  content = <CardDisplayWidget {...sharedProps} />; break;
+    case 'card-display':  content = <CardDisplayWidget widgetId={id} {...sharedProps} />; break;
     case 'ndi-input':     content = <NdiInputWidget widgetId={id} {...sharedProps} />; break;
     case 'panel':         content = <PanelWidget {...sharedProps} />; break;
     case 'vmix-titles':   content = <VmixTitlesWidget {...sharedProps} />; break;
     case 'rugby-lineup':       content = <RugbyLineupWidget widgetId={id} {...sharedProps} />; break;
+    case 'rugby-lineup-next':  content = <RugbyLineupWidget widgetId={id} nextMatchMode {...sharedProps} />; break;
     case 'card-lower-third':   content = <CardLowerThirdWidget widgetId={id} {...sharedProps} />; break;
+    case 'placement-lower-third': content = <PlacementLowerThirdWidget widgetId={id} {...sharedProps} />; break;
     case 'pomodoro':           content = <CustomTimerWidget widgetId={id} {...sharedProps} />; break;
     case 'image-display':      content = <ImageDisplayWidget config={config} />; break;
     case 'recent-matches':     content = <RecentMatchesWidget widgetId={id} {...sharedProps} />; break;
     case 'match-schedule':     content = <MatchScheduleWidget widgetId={id} {...sharedProps} />; break;
+    case 'rundown':            content = <RundownWidget {...sharedProps} />; break;
     case 'standings':          content = <StandingsWidget widgetId={id} {...sharedProps} />; break;
     case 'bracket':            content = <BracketWidget widgetId={id} {...sharedProps} />; break;
     case 'team-form':          content = <TeamFormWidget widgetId={id} {...sharedProps} />; break;
     case 'player-h2h':         content = <PlayerHeadToHeadWidget widgetId={id} {...sharedProps} />; break;
     case 'player-stats':       content = <PlayerStatsWidget widgetId={id} {...sharedProps} />; break;
+    case 'player-highlight':   content = <PlayerHighlightWidget widgetId={id} {...sharedProps} />; break;
+    case 'group-standings':    content = <GroupStandingsWidget widgetId={id} {...sharedProps} />; break;
     default:            content = <div style={{ padding: 8, fontSize: 11 }}>Unknown widget</div>;
   }
 

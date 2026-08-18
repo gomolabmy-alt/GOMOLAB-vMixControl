@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { Timer, Check, X, ChevronDown, ArrowUp, Eye, EyeOff, ArrowLeftRight } from 'lucide-react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useTeamDbStore } from '../../stores/teamDbStore';
+import { useAppSettings } from '../../stores/appSettingsStore';
+import { autoLinkedWidget } from '../../lib/autoLink';
+import { simplifyPlayerName } from '../../lib/simpleName';
+import { resolveImageUrl } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -17,16 +22,20 @@ interface SinBinPlayer {
   jerseyNo: string;
   teamName: string;
   teamColor: string;
+  teamLogo?: string;
   remainingMs: number;
 }
 
-export function SinBinLowerThirdWidget({ config }: Props) {
+export function SinBinLowerThirdWidget({ widgetId, config }: Props) {
   const { pages, returnPlayerFromSinBin } = useCanvasStore();
   const { teams: teamDbTeams } = useTeamDbStore();
   const { client, vmixState, overlayIn, overlayOut, vmixSyncVersion } = useVmixStore();
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const disp = (name: string) => simplifyPlayerName(name, { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker });
 
-  const allWidgets = pages.flatMap(p => p.widgets);
-  const plw = allWidgets.find(w => w.id === config.linkedPlayerListId);
+  // Falls back to the sole Player List widget on this page when nothing's
+  // been explicitly linked in settings — an explicit pick always wins.
+  const plw = autoLinkedWidget(pages, widgetId, config.linkedPlayerListId, 'player-list');
   const plCfg = plw?.config ?? null;
 
   // ── Resolve active sin bin players from the linked player list ────────────
@@ -37,9 +46,9 @@ export function SinBinLowerThirdWidget({ config }: Props) {
 
     const sinBinDuration: number = plCfg.sinBinDuration ?? 600_000;
 
-    const timerWidget = plCfg.linkedTimerWidgetId
-      ? allWidgets.find(w => w.id === plCfg.linkedTimerWidgetId)
-      : null;
+    // Resolved the same way the Player List widget itself would (explicit
+    // link, or the sole Timer on its page).
+    const timerWidget = autoLinkedWidget(pages, plw!.id, plCfg.linkedTimerWidgetId, 'timer');
     const timerCfg = timerWidget?.config ?? null;
     const currentMs: number = timerCfg?.currentMs ?? 0;
     const timerMode: string = timerCfg?.mode ?? 'countup';
@@ -55,10 +64,11 @@ export function SinBinLowerThirdWidget({ config }: Props) {
       if (!player) return [];
       return [{
         playerId,
-        name: player.name,
+        name: disp(player.name),
         jerseyNo: player.jerseyNo ?? '',
         teamName: teamData?.name ?? (side === 'A' ? 'Team A' : 'Team B'),
         teamColor: teamData?.color ?? (side === 'A' ? '#e74c3c' : '#3498db'),
+        teamLogo: teamData?.logo,
         remainingMs: remaining,
       }];
     }).sort((a, b) => a.remainingMs - b.remainingMs); // shortest remaining first
@@ -97,8 +107,8 @@ export function SinBinLowerThirdWidget({ config }: Props) {
 
   const dismissExpired = () => setExpiredQueue(q => q.slice(1));
   const returnAndDismiss = () => {
-    if (currentExpired && config.linkedPlayerListId) {
-      returnPlayerFromSinBin(config.linkedPlayerListId, currentExpired.playerId);
+    if (currentExpired && plw) {
+      returnPlayerFromSinBin(plw.id, currentExpired.playerId);
     }
     dismissExpired();
   };
@@ -130,6 +140,13 @@ export function SinBinLowerThirdWidget({ config }: Props) {
     if (config.fieldName)   client.setTextField(key, config.fieldName,   player.name);
     if (config.fieldTimer)  client.setTextField(key, config.fieldTimer,  formatTime(player.remainingMs, 'mm:ss'));
     if (config.fieldTeam)   client.setTextField(key, config.fieldTeam,   player.teamName);
+    if (config.fieldTeamLogo && player.teamLogo) client.setImageField(key, config.fieldTeamLogo, player.teamLogo);
+    if (config.mergedPrefix && config.mergedParts?.length) {
+      const src: Record<string, string> = {
+        jersey: player.jerseyNo, name: player.name, timer: formatTime(player.remainingMs, 'mm:ss'), team: player.teamName,
+      };
+      client.setTextField(key, config.mergedPrefix, config.mergedParts.map((k: string) => src[k] ?? '').join(config.mergedSeparator ?? ' '));
+    }
   };
 
   const lastSentRef = useRef<string | null>(null);
@@ -163,7 +180,7 @@ export function SinBinLowerThirdWidget({ config }: Props) {
         <div className="sinbin-popup-backdrop">
           <div className="sinbin-popup" style={{ '--sbp-color': currentExpired.teamColor } as React.CSSProperties}>
             <div className="sinbin-popup-strip" style={{ background: currentExpired.teamColor }} />
-            <div className="sinbin-popup-icon">⏱</div>
+            <div className="sinbin-popup-icon"><Timer size={40} strokeWidth={1.75} /></div>
             <div className="sinbin-popup-body">
               <div className="sinbin-popup-label">Sin Bin Ended</div>
               <div className="sinbin-popup-player">
@@ -181,7 +198,8 @@ export function SinBinLowerThirdWidget({ config }: Props) {
                 className="sinbin-popup-return"
                 onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); returnAndDismiss(); }}
                 onClick={(e) => e.stopPropagation()}
-              >✓ Return to Field</button>
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              ><Check size={14} strokeWidth={2} /> Return to Field</button>
               <button
                 className="sinbin-popup-ok"
                 onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); dismissExpired(); }}
@@ -205,7 +223,7 @@ export function SinBinLowerThirdWidget({ config }: Props) {
               className="wgt-sblt-picker-close"
               onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setShowPicker(false); }}
               onClick={(e) => e.stopPropagation()}
-            >✕</button>
+            ><X size={14} strokeWidth={2} /></button>
           </div>
           <div className="wgt-sblt-picker-list">
             {activePlayers.length === 0 && (
@@ -234,6 +252,7 @@ export function SinBinLowerThirdWidget({ config }: Props) {
             <div className="wgt-sblt-team-bar" style={{ background: selected.teamColor }} />
             <div className="wgt-sblt-info">
               <div className="wgt-sblt-identity">
+                {selected.teamLogo && <img className="wgt-sblt-team-logo" src={resolveImageUrl(selected.teamLogo)} alt="" />}
                 {selected.jerseyNo && <span className="wgt-sblt-jersey">{selected.jerseyNo}</span>}
                 <span className="wgt-sblt-name">{selected.name}</span>
                 <span className="wgt-sblt-team-name" style={{ color: selected.teamColor }}>
@@ -248,12 +267,13 @@ export function SinBinLowerThirdWidget({ config }: Props) {
                 title="Switch player"
                 onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); setShowPicker(true); }}
                 onClick={(e) => e.stopPropagation()}
-              >⇄ {activePlayers.length}</button>
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              ><ArrowLeftRight size={12} strokeWidth={2} /> {activePlayers.length}</button>
             )}
           </>
         ) : (
           <div className="wgt-sblt-empty">
-            {config.linkedPlayerListId ? 'No players in sin bin' : 'Link a player list in settings'}
+            {plw ? 'No players in sin bin' : 'Link a player list in settings'}
           </div>
         )}
       </div>
@@ -266,28 +286,32 @@ export function SinBinLowerThirdWidget({ config }: Props) {
           onClick={(e) => e.stopPropagation()}
           disabled={activePlayers.length === 0}
           title="Pick player"
-        >▾ Pick</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><ChevronDown size={12} strokeWidth={2} /> Pick</button>
         <button
           className="wgt-sblt-btn wgt-sblt-btn--send"
           onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); sendToVmix(selected); }}
           onClick={(e) => e.stopPropagation()}
           disabled={!client || !hasInput || !selected}
           title="Send to vMix"
-        >↑ Send</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><ArrowUp size={12} strokeWidth={2} /> Send</button>
         <button
           className={`wgt-sblt-btn wgt-sblt-btn--show${overlayActive ? ' wgt-sblt-btn--active' : ''}`}
           onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); overlayIn(ch, config.vmixInputKey || undefined); }}
           onClick={(e) => e.stopPropagation()}
           disabled={!vmixState || !hasInput}
           title="Show overlay"
-        >▶ Show</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><Eye size={12} strokeWidth={2} /> Show</button>
         <button
           className={`wgt-sblt-btn wgt-sblt-btn--hide${!overlayActive ? ' wgt-sblt-btn--active' : ''}`}
           onPointerDown={(e) => { e.stopPropagation(); e.currentTarget.setPointerCapture(e.pointerId); overlayOut(ch); }}
           onClick={(e) => e.stopPropagation()}
           disabled={!vmixState || !hasInput}
           title="Hide overlay"
-        >■ Hide</button>
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+        ><EyeOff size={12} strokeWidth={2} /> Hide</button>
       </div>
     </div>
   );

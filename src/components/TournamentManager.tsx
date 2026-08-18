@@ -1,4 +1,13 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
+import {
+  Check, X, Pencil, ArrowUp, ArrowDown, Play, Unlock, Users, Square, Wand2,
+  AlertTriangle, CheckSquare, Trash2, ChevronRight, Circle, MapPin, RefreshCw,
+  Timer, Target, Clock, CalendarDays, Clapperboard, Settings, ClipboardList,
+  FlagTriangleRight, Dices, Hand, MousePointerClick, PartyPopper, EyeOff, Eye,
+  Hourglass, RotateCcw, ChevronDown, Radio, Trophy, Search, Maximize2, Minimize2,
+  Shirt, Lock, Link2, Cloud, Star, Save, Undo2, Award, ArrowRight, ArrowLeftRight,
+  ListChecks, Plus,
+} from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { createPortal } from 'react-dom';
 import { useTournamentStore, pushTournamentDataToHost } from '../stores/tournamentStore';
@@ -7,26 +16,31 @@ import { syncClient } from '../lib/syncClient';
 import { useVmixStore } from '../stores/vmixStore';
 import { ConfirmButton } from './ConfirmButton';
 import { EventPicker, type RemoteEvent } from './EventPicker';
-import { useCanvasStore } from '../stores/canvasStore';
+import { useCanvasStore, formatTime } from '../stores/canvasStore';
 import type { Tournament, SportType, TournamentSettings, TournamentGroup, TournamentPot, GroupListVmixTarget } from '../types/tournament';
-import { SPORT_LABELS, SPORT_POSITIONS, SPORT_DEFAULTS } from '../types/tournament';
+import { SPORT_LABELS, SPORT_POSITIONS, SPORT_DEFAULTS, getRosterPositions } from '../types/tournament';
 import type { Player } from '../types/tournament';
 import { LogoUrlPicker } from './LogoUrlPicker';
 import { InputPickerDropdown } from './WidgetConfigPanel';
 import { BracketView } from './BracketView';
 import { ConfirmModal } from './ConfirmModal';
 import { ExternalRosterLinkBar, PullPlayersButton } from './ExternalRosterPicker';
+import { periodLabel } from './widgets/TimerWidget';
+import { autoLinkedWidget } from '../lib/autoLink';
 import {
   generateRoundRobin, generateDoubleRoundRobin, generateKnockout, generateKnockoutFromSlots,
-  buildGroupKnockoutSlots, buildTieredKnockout, tierRank, offsetRounds, shuffle, ensureTopTeamHomeEarly,
+  buildGroupKnockoutSlots, buildTieredKnockout, buildRankedPlacementKnockout, tierRank, offsetRounds, shuffle,
+  ensureTopTeamHomeEarly, isPlacementRoundLabel, placementRoundRange,
   PLACEHOLDER_COLOR, type ScheduleTeamRef, type GeneratedFixture,
 } from '../lib/scheduleGen';
 import { useTeamDbStore, type SavedTeam } from '../stores/teamDbStore';
 import { useMatchScheduleStore, type ScheduledMatch } from '../stores/matchScheduleStore';
 import { useMatchResultsStore, type SavedMatchResult } from '../stores/matchResultsStore';
+import { useRundownStore, sortRundownSegments, deriveRundownStatus, type RundownSegment } from '../stores/rundownStore';
 import { resolveImageUrl, transparentLogoUrl } from '../lib/imageUrl';
-import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, findDuplicateResult } from '../utils/scoreboardSnapshot';
+import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, useLiveScoreboardConfigs, findDuplicateResult, formatLate, parseScheduledDateTime } from '../utils/scoreboardSnapshot';
 import { pushTournamentNow, computePushDiff, pushResultsOnly, pullResultsOnly, localizeTournamentLogos, type PushDiffItem } from '../lib/cloudSync';
+import { simplifyPlayerName } from '../lib/simpleName';
 import { computeMatchNumbers, useMatchNumbers } from '../utils/matchNumber';
 import { sortResults, RESULT_SORT_LABELS, type ResultSortMode } from '../utils/resultSort';
 
@@ -71,11 +85,28 @@ async function downloadCSV(header: string[], rows: string[][], filename: string)
   await saveTextFile(BOM + csv, filename);
 }
 
-function exportFixturesCSV(matches: ScheduledMatch[], tournamentName: string) {
-  // Same column order the CSV importer expects, so an exported file can be
-  // re-imported (or edited in Excel and brought back in) without remapping.
-  const header = ['Date', 'Time', 'Team A', 'Team B', 'Venue', 'Category', 'Group', 'Round'];
-  const rows = matches.map(m => [m.date, m.time ?? '', m.teamAName, m.teamBName, m.venue ?? '', m.category ?? '', m.group ?? '', m.round ?? '']);
+function exportFixturesCSV(
+  matches: ScheduledMatch[], tournamentName: string,
+  matchNumberPrefix: string | undefined, venuePrefixes: Record<string, string> | undefined,
+) {
+  // Match # and Tier are appended LAST, after the columns the CSV importer
+  // expects (see parseFixtureFile) — it parses columns purely positionally
+  // and ignores anything past the 8th, so a re-imported/edited export still
+  // round-trips cleanly; both trailing columns are read-only/informational
+  // on import. Tier only ever differs from Group/Round for a Cup/Plate/
+  // Bowl/Shield or ranked-placement tournament (see findTierMismatches) —
+  // included so a corrupted tier (a drag/swap leaving the wrong one behind)
+  // is directly visible/diffable in the export instead of only showing up
+  // in the app's own Schedule/Bracket tabs.
+  const header = ['Date', 'Time', 'Team A', 'Team B', 'Venue', 'Category', 'Group', 'Round', 'Match #', 'Tier'];
+  // Same computed "MB1"/"MC1"-style id shown as a badge in the Schedule tab
+  // (see matchNumber.ts) — blank for every row if the tournament hasn't set
+  // a match number prefix, same as the badge not showing there either.
+  const matchNumbers = computeMatchNumbers(matches, matchNumberPrefix, venuePrefixes);
+  const rows = matches.map(m => [
+    m.date, m.time ?? '', m.teamAName, m.teamBName, m.venue ?? '', m.category ?? '', m.group ?? '', m.round ?? '',
+    matchNumbers.get(m.id) ?? '', m.tier ?? '',
+  ]);
   downloadCSV(header, rows, `${tournamentName.replace(/[^a-z0-9]/gi, '_')}_schedule.csv`);
 }
 
@@ -108,14 +139,33 @@ function exportProjectJSON(tournaments: Tournament[], activeTournamentId: string
 }
 
 // Basic quoted-CSV / TSV row splitter, shared by every file importer below.
+// RFC 4180-correct: a doubled quote INSIDE a quoted field ("") is a literal
+// quote character, not a close-then-reopen — e.g. a team name like
+// `Johor "Tigers"` round-trips as `"Johor ""Tigers"""` through downloadCSV's
+// escaper, and naively toggling on every single '"' (the old behavior here)
+// silently dropped both quote characters on reimport instead of restoring
+// the literal `"Tigers"` substring.
 function splitDelimitedRow(line: string, sep: string): string[] {
   if (sep === '\t') return line.split('\t').map(c => c.trim());
   const cols: string[] = [];
   let cur = '', inQ = false;
-  for (const ch of line) {
-    if (ch === '"') { inQ = !inQ; }
-    else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ''; }
-    else { cur += ch; }
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else inQ = false;
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQ = true;
+    } else if (ch === ',') {
+      cols.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
   }
   cols.push(cur.trim());
   return cols;
@@ -228,7 +278,13 @@ function parseFixtureFile(text: string): ParsedFixtureRow[] {
 
   const result: ParsedFixtureRow[] = [];
   for (const line of lines) {
-    const cols = splitDelimitedRow(line, sep).map(c => c.replace(/^"|"$/g, '').trim());
+    // splitDelimitedRow already fully un-quotes/unescapes CSV cells (see its
+    // own doc comment) — stripping a leading/trailing quote again here would
+    // wrongly truncate a value that legitimately ends in one (e.g. a team
+    // name like `Johor "Tigers"`). TSV cells never go through that quoting
+    // logic at all (plain split on tab), so the extra strip is still needed
+    // there as a defensive fallback for a tool (Excel) that quoted them anyway.
+    const cols = splitDelimitedRow(line, sep).map(c => sep === '\t' ? c.replace(/^"|"$/g, '').trim() : c);
     const [dateRaw = '', timeRaw = '', teamAName = '', teamBName = '', venue = '', category = '', group = '', round = ''] = cols;
     if (/^date$/i.test(dateRaw)) continue; // header row
     const date = normalizeDateCell(dateRaw);
@@ -298,8 +354,8 @@ const PLAYER_STAT_FIELDS: { key: keyof Player & ('tries' | 'conversions' | 'pena
 ];
 
 // ── Player row ────────────────────────────────────────────────────────────────
-function PlayerRow({ player, sport, onUpdate, onDelete }: {
-  player: Player; sport: SportType;
+function PlayerRow({ player, positions, onUpdate, onDelete }: {
+  player: Player; positions: string[];
   onUpdate: (patch: Partial<Omit<Player, 'id'>>) => void;
   onDelete: () => void;
 }) {
@@ -310,13 +366,15 @@ function PlayerRow({ player, sport, onUpdate, onDelete }: {
   const [stats, setStats] = useState<Partial<Record<typeof PLAYER_STAT_FIELDS[number]['key'], number | undefined>>>(() =>
     Object.fromEntries(PLAYER_STAT_FIELDS.map(f => [f.key, player[f.key]]))
   );
+  // Simple Names (App Settings) — the read-only row display only; the
+  // edit-mode input above always shows/edits the real stored name.
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const dispName = simplifyPlayerName(player.name, { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker });
 
   const save = () => {
     onUpdate({ jerseyNo: jersey.trim(), name: name.trim() || player.name, position: pos.trim(), ...stats });
     setEditing(false);
   };
-
-  const positions = SPORT_POSITIONS[sport] ?? [];
 
   if (editing) {
     return (
@@ -340,8 +398,8 @@ function PlayerRow({ player, sport, onUpdate, onDelete }: {
           />
         ))}
         <div className="tm-pl-cell tm-pl-cell--actions">
-          <button className="tm-icon-btn tm-icon-btn--save" onClick={save} title="Save">✓</button>
-          <button className="tm-icon-btn" onClick={() => setEditing(false)} title="Cancel">✕</button>
+          <button className="tm-icon-btn tm-icon-btn--save" onClick={save} title="Save"><Check size={14} strokeWidth={2} /></button>
+          <button className="tm-icon-btn" onClick={() => setEditing(false)} title="Cancel"><X size={14} strokeWidth={2} /></button>
         </div>
       </div>
     );
@@ -350,13 +408,13 @@ function PlayerRow({ player, sport, onUpdate, onDelete }: {
   return (
     <div className="tm-pl-row" onDoubleClick={() => setEditing(true)}>
       <span className="tm-pl-cell tm-pl-cell--jersey">{player.jerseyNo || '—'}</span>
-      <span className="tm-pl-cell tm-pl-cell--name">{player.name}</span>
+      <span className="tm-pl-cell tm-pl-cell--name">{dispName}</span>
       <span className="tm-pl-cell tm-pl-cell--pos">{player.position}</span>
       {PLAYER_STAT_FIELDS.map(f => (
         <span key={f.key} className="tm-pl-cell tm-pl-cell--stat">{player[f.key] ?? ''}</span>
       ))}
       <div className="tm-pl-cell tm-pl-cell--actions">
-        <button className="tm-icon-btn tm-icon-btn--edit" onClick={() => setEditing(true)} title="Edit">✎</button>
+        <button className="tm-icon-btn tm-icon-btn--edit" onClick={() => setEditing(true)} title="Edit"><Pencil size={14} strokeWidth={2} /></button>
         <button className="tm-icon-btn tm-icon-btn--del" onClick={e => { e.stopPropagation(); onDelete(); }} title="Delete">×</button>
       </div>
     </div>
@@ -364,8 +422,8 @@ function PlayerRow({ player, sport, onUpdate, onDelete }: {
 }
 
 // ── Add-player row ────────────────────────────────────────────────────────────
-function AddPlayerRow({ sport, onAdd }: {
-  sport: SportType; onAdd: (p: Omit<Player, 'id'>) => void;
+function AddPlayerRow({ positions, onAdd }: {
+  positions: string[]; onAdd: (p: Omit<Player, 'id'>) => void;
 }) {
   const [jersey, setJersey] = useState('');
   const [name, setName] = useState('');
@@ -377,8 +435,6 @@ function AddPlayerRow({ sport, onAdd }: {
     onAdd({ jerseyNo: jersey.trim(), name: name.trim(), position: pos.trim() });
     setJersey(''); setName(''); setPos('');
   };
-
-  const positions = SPORT_POSITIONS[sport] ?? [];
 
   return (
     <form className="tm-pl-row tm-pl-add-row" onSubmit={submit}>
@@ -397,6 +453,93 @@ function AddPlayerRow({ sport, onAdd }: {
         <button className="tm-icon-btn tm-icon-btn--save" type="submit" disabled={!name.trim()} title="Add player">+</button>
       </div>
     </form>
+  );
+}
+
+// ── Jersey sets (alternate kits) ────────────────────────────────────────────
+function JerseySetsPanel({ team }: { team: SavedTeam }) {
+  const { addJerseySet, updateJerseySet, deleteJerseySet, setJerseySetNumber } = useTeamDbStore();
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const disp = (name: string) => simplifyPlayerName(name, { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker });
+  const sets = team.jerseySets ?? [];
+  const [expanded, setExpanded] = useState(sets.length > 0);
+  const [activeSetId, setActiveSetId] = useState(sets[0]?.id ?? '');
+
+  useEffect(() => {
+    if (!sets.find(s => s.id === activeSetId)) setActiveSetId(sets[0]?.id ?? '');
+  }, [sets, activeSetId]);
+
+  const activeSet = sets.find(s => s.id === activeSetId);
+
+  // Only numbered players are meaningful here — a player whose base jerseyNo
+  // is a role marker (MNG/HC) always shows as that role badge in the Player
+  // List widget regardless of any set override, so an override for them
+  // would be inert.
+  const numberedPlayers = [...team.players]
+    .filter(p => p.jerseyNo && !isNaN(parseInt(p.jerseyNo)))
+    .sort((a, b) => (parseInt(a.jerseyNo) || 999) - (parseInt(b.jerseyNo) || 999) || a.name.localeCompare(b.name));
+
+  return (
+    <div className="tm-jersey-sets">
+      <button className="tm-jersey-sets-toggle" onClick={() => setExpanded(v => !v)}>
+        {expanded ? <ChevronDown size={14} strokeWidth={2} /> : <ChevronRight size={14} strokeWidth={2} />}
+        <Shirt size={13} strokeWidth={2} />
+        <span>Jersey Sets{sets.length > 0 ? ` (${sets.length})` : ''}</span>
+      </button>
+      {expanded && (
+        <div className="tm-jersey-sets-body">
+          <div className="tm-jersey-set-tabs">
+            {sets.map(s => (
+              <div
+                key={s.id}
+                className={`tm-jersey-set-tab${s.id === activeSetId ? ' tm-jersey-set-tab--active' : ''}`}
+                onClick={() => setActiveSetId(s.id)}
+              >
+                <EditableText value={s.name} onChange={name => updateJerseySet(team.id, s.id, { name })} placeholder="Set name" />
+                <button
+                  className="tm-jersey-set-tab-del"
+                  title="Delete jersey set"
+                  onClick={e => { e.stopPropagation(); deleteJerseySet(team.id, s.id); }}
+                ><Trash2 size={12} strokeWidth={2} /></button>
+              </div>
+            ))}
+            <button
+              className="tm-jersey-set-add"
+              onClick={() => setActiveSetId(addJerseySet(team.id, `Kit ${sets.length + 1}`))}
+            ><Plus size={12} strokeWidth={2} /> Add set</button>
+          </div>
+          {activeSet ? (
+            numberedPlayers.length === 0 ? (
+              <p className="tm-jersey-sets-hint">Add numbered players to the roster first.</p>
+            ) : (
+              <div className="tm-jersey-set-grid">
+                {numberedPlayers.map(p => (
+                  <div key={p.id} className="tm-jersey-set-row">
+                    <span className="tm-jersey-set-base" title="Base number">{p.jerseyNo}</span>
+                    <input
+                      key={`ov-${p.id}-${activeSet.numbers[p.id] ?? ''}`}
+                      className="tm-input tm-jersey-set-override"
+                      defaultValue={activeSet.numbers[p.id] ?? ''}
+                      placeholder={p.jerseyNo}
+                      maxLength={3}
+                      onBlur={e => setJerseySetNumber(team.id, activeSet.id, p.id, e.target.value.trim())}
+                      onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                    />
+                    <span className="tm-jersey-set-name">{disp(p.name)}</span>
+                  </div>
+                ))}
+              </div>
+            )
+          ) : (
+            <p className="tm-jersey-sets-hint">
+              Add a set (e.g. "Home", "Away") to give this team different numbers per kit — leave a
+              player's box blank to keep their base number. The Player List widget will prompt which
+              set to use once there are 2 or more.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -478,17 +621,30 @@ function SettingsBar({ tournament, onApply }: { tournament: Tournament; onApply:
         />
       </div>
 
+      {(tournament.sport === 'rugby_union' || tournament.sport === 'rugby_league') && (
+        <div className="tm-settings-group">
+          <label className="tm-settings-label" title="Quick-fills Starters/Subs above with each format's usual squad size — the numbers stay freely editable afterward">Format</label>
+          <div className="tm-timer-mode-toggle">
+            <button className="tm-timer-mode-btn" title="7 starters, 5 subs" onClick={() => updateTournamentSettings(tournament.id, { maxOnField: 7, maxSubs: 5 })}>7s</button>
+            <button className="tm-timer-mode-btn" title="10 starters, 5 subs" onClick={() => updateTournamentSettings(tournament.id, { maxOnField: 10, maxSubs: 5 })}>10s</button>
+            <button className="tm-timer-mode-btn" title="15 starters, 8 subs" onClick={() => updateTournamentSettings(tournament.id, { maxOnField: 15, maxSubs: 8 })}>15s</button>
+          </div>
+        </div>
+      )}
+
       <div className="tm-settings-group">
         <label className="tm-settings-label">Timer</label>
         <div className="tm-timer-mode-toggle">
           <button
             className={`tm-timer-mode-btn ${(s.timerMode ?? 'countup') === 'countup' ? 'tm-timer-mode-btn--active' : ''}`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
             onClick={() => updateTournamentSettings(tournament.id, { timerMode: 'countup' })}
-          >▲ Up</button>
+          ><ArrowUp size={14} strokeWidth={2} /> Up</button>
           <button
             className={`tm-timer-mode-btn ${(s.timerMode ?? 'countup') === 'countdown' ? 'tm-timer-mode-btn--active' : ''}`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
             onClick={() => updateTournamentSettings(tournament.id, { timerMode: 'countdown' })}
-          >▼ Down</button>
+          ><ArrowDown size={14} strokeWidth={2} /> Down</button>
         </div>
       </div>
 
@@ -518,8 +674,8 @@ function SettingsBar({ tournament, onApply }: { tournament: Tournament; onApply:
         </div>
       </div>
 
-      <button className="tm-apply-btn" onClick={onApply} title="Push all settings to linked canvas widgets">
-        ▶ Apply to Canvas
+      <button className="tm-apply-btn" onClick={onApply} title="Push all settings to linked canvas widgets" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <Play size={14} strokeWidth={2} /> Apply to Canvas
       </button>
     </div>
   );
@@ -529,7 +685,9 @@ interface ImportPreview { players: Omit<Player, 'id'>[]; }
 
 // ── Players tab: manage a team's roster, scoped to the selected tournament ────
 function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; activeCategory: string }) {
-  const { teams: allTeams, addPlayer, updatePlayer, deletePlayer, replaceTeamPlayers } = useTeamDbStore();
+  const { teams: allTeams, addPlayer, updatePlayer, deletePlayer, replaceTeamPlayers, updateTeam } = useTeamDbStore();
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const dispName = (name: string) => simplifyPlayerName(name, { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker });
   const tournamentId = tournament.id;
   const categories = tournament.categories ?? [];
   const teams = useMemo(() => allTeams.filter(t => t.tournamentId === tournamentId), [allTeams, tournamentId]);
@@ -557,7 +715,7 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
         <ExternalRosterLinkBar tournament={tournament} />
         <div className="tm-win-content" style={{ padding: 16 }}>
           <div className="tm-win-placeholder">
-            <span>No teams in this tournament yet — add one in the 👥 Teams tab first, then manage its roster here.</span>
+            <span>No teams in this tournament yet — add one in the Teams tab first, then manage its roster here.</span>
           </div>
         </div>
       </>
@@ -570,7 +728,7 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
         <ExternalRosterLinkBar tournament={tournament} />
         <div className="tm-win-content" style={{ padding: 16 }}>
           <div className="tm-win-placeholder">
-            <span>No teams in the "{activeCategory}" category — pick a different one from the top bar, or add teams to it in the 👥 Teams tab.</span>
+            <span>No teams in the "{activeCategory}" category — pick a different one from the top bar, or add teams to it in the Teams tab.</span>
           </div>
         </div>
       </>
@@ -583,6 +741,11 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
     const n2 = parseInt(b.jerseyNo) || 999;
     return n1 !== n2 ? n1 - n2 : a.name.localeCompare(b.name);
   }) : [];
+  // Position autocomplete follows the tournament's real sport + format
+  // (Sevens/Tens Starters count swaps in that format's own shorter rugby
+  // position list — see getRosterPositions).
+  const rosterMaxOnField = tournament.settings?.maxOnField ?? SPORT_DEFAULTS[tournament.sport]?.maxOnField ?? 11;
+  const rosterPositions = getRosterPositions(tournament.sport, rosterMaxOnField);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -653,16 +816,17 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
 
             {/* Import / Export toolbar */}
             <div className="tm-io-bar">
-              <button className="tm-io-btn" title="Import players from CSV / TSV / TXT" onClick={() => fileInputRef.current?.click()}>
-                ↑ Import
+              <button className="tm-io-btn" title="Import players from CSV / TSV / TXT" onClick={() => fileInputRef.current?.click()} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <ArrowUp size={14} strokeWidth={2} /> Import
               </button>
               <button
                 className="tm-io-btn"
                 title="Export players as CSV (Excel compatible)"
                 onClick={() => exportTeamCSV(team.players, team.name)}
                 disabled={team.players.length === 0}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
               >
-                ↓ Export CSV
+                <ArrowDown size={14} strokeWidth={2} /> Export CSV
               </button>
               <PullPlayersButton
                 tournament={tournament}
@@ -674,6 +838,26 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
               <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt" style={{ display: 'none' }} onChange={handleFileChange} />
             </div>
 
+            {/* Stats source: API sync vs. app-computed from this team's own
+                saved match history (see src/lib/localPlayerStats.ts) */}
+            <div className="tm-io-bar" style={{ marginTop: 4 }}>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Tries/Conv/Pen/Drop/Cards stats from:</span>
+              <select
+                className="field-input"
+                style={{ fontSize: 11, padding: '2px 6px', width: 'auto' }}
+                value={team.statsSource === 'local' ? 'local' : 'api'}
+                onChange={e => updateTeam(team.id, { statsSource: e.target.value === 'local' ? 'local' : 'api' })}
+              >
+                <option value="api">External API</option>
+                <option value="local">Counted by this app</option>
+              </select>
+            </div>
+            {team.statsSource === 'local' && (
+              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '2px 2px 0' }}>
+                Tries/Conv/Pen/Drop are computed from this team's saved match results (a Scoreboard score event only counts if a scorer was picked in its quick-scorer popup). Yellow/red cards count up live from the Player List widget's card buttons. Appearances still isn't tracked this way.
+              </p>
+            )}
+
             {/* Import preview */}
             {importPreview && (
               <div className="tm-import-preview">
@@ -684,7 +868,7 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
                   {importPreview.players.slice(0, 5).map((p, i) => (
                     <div key={i} className="tm-import-preview-row">
                       <span className="tm-import-preview-jersey">{p.jerseyNo || '—'}</span>
-                      <span className="tm-import-preview-name">{p.name}</span>
+                      <span className="tm-import-preview-name">{dispName(p.name)}</span>
                       {p.position && <span className="tm-import-preview-pos">{p.position}</span>}
                     </div>
                   ))}
@@ -699,6 +883,8 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
                 </div>
               </div>
             )}
+
+            <JerseySetsPanel team={team} />
 
             {/* Players */}
             <div className="tm-pl-list">
@@ -720,7 +906,7 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
                 <PlayerRow
                   key={p.id}
                   player={p}
-                  sport="custom"
+                  positions={rosterPositions}
                   onUpdate={patch => updatePlayer(team.id, p.id, patch)}
                   onDelete={() => deletePlayer(team.id, p.id)}
                 />
@@ -730,7 +916,7 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
 
             {/* Add row pinned at bottom */}
             <div className="tm-pl-add-footer">
-              <AddPlayerRow sport="custom" onAdd={p => addPlayer(team.id, p)} />
+              <AddPlayerRow positions={rosterPositions} onAdd={p => addPlayer(team.id, p)} />
             </div>
           </div>
         )}
@@ -946,9 +1132,10 @@ function TeamsPanel({ tournament }: { tournament: Tournament }) {
         {categories.length > 0 && (
           <button
             className={`tm-io-btn${categoryEditMode ? ' tm-io-btn--active' : ''}`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
             title="Rename existing categories"
             onClick={() => setCategoryEditMode(v => !v)}
-          >{categoryEditMode ? '🔓 Editing' : '✏️ Edit'}</button>
+          >{categoryEditMode ? <><Unlock size={14} strokeWidth={2} /> Editing</> : <><Pencil size={14} strokeWidth={2} /> Edit</>}</button>
         )}
       </div>
 
@@ -961,7 +1148,7 @@ function TeamsPanel({ tournament }: { tournament: Tournament }) {
             <option value="__all__">All Categories</option>
           </select>
           <button className="tm-io-btn" onClick={bulkDuplicate} disabled={!duplicateTarget}>⧉ Duplicate Selected</button>
-          <button className="tm-io-btn" onClick={moveSelected} disabled={!duplicateTarget || duplicateTarget === '__all__'}>→ Move Selected</button>
+          <button className="tm-io-btn" onClick={moveSelected} disabled={!duplicateTarget || duplicateTarget === '__all__'} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowRight size={14} strokeWidth={2} /> Move Selected</button>
           <button className="tm-io-btn" onClick={() => setSelectedIds(new Set())}>Clear Selection</button>
         </div>
       )}
@@ -1117,7 +1304,7 @@ function formatTimeDisplay(time?: string): string {
 // popup nested inside them — a portal escapes that, same fix as TeamPicker.
 function ScheduleTeamPicker({ side, tournamentId, onPick }: {
   side: 'A' | 'B'; tournamentId?: string;
-  onPick: (t: { name: string; shortName?: string; color: string; logo?: string }) => void;
+  onPick: (t: { id: string; name: string; shortName?: string; color: string; logo?: string }) => void;
 }) {
   const { teams: allTeams } = useTeamDbStore();
   const teams = useMemo(() => tournamentId ? allTeams.filter(t => t.tournamentId === tournamentId) : allTeams, [allTeams, tournamentId]);
@@ -1149,7 +1336,7 @@ function ScheduleTeamPicker({ side, tournamentId, onPick }: {
   return (
     <div style={{ position: 'relative', display: 'inline-flex' }}>
       <button ref={anchorRef} className="tm-sched-pick-btn" title={`Pick saved team for side ${side}`}
-        onClick={e => { e.stopPropagation(); toggle(); }}>👥</button>
+        onClick={e => { e.stopPropagation(); toggle(); }}><Users size={14} strokeWidth={2} /></button>
       {open && pos && createPortal(
         <div ref={popupRef} onClick={e => e.stopPropagation()} style={{
           position: 'fixed', left: pos.left, bottom: pos.bottom, zIndex: 10000, minWidth: 180, maxHeight: 220,
@@ -1298,24 +1485,24 @@ function ScoreboardSendButton({ match, scoreboards, onSend, onStop }: {
 
   if (match.sentAt) {
     if (match.completedAt) {
-      return <span className="tm-sched-sent-tag" title="Already sent to a scoreboard">✓ Sent</span>;
+      return <span className="tm-sched-sent-tag" title="Already sent to a scoreboard" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Check size={14} strokeWidth={2} /> Sent</span>;
     }
     return (
       <span className="tm-sched-sent-tag tm-sched-sent-tag--live" title="Currently live on a scoreboard">
-        ✓ Sent
-        <button className="tm-sched-stop-btn" title="Stop this live game (clears its live status — doesn't touch the score)" onClick={onStop}>
-          ■ Stop
+        <Check size={14} strokeWidth={2} /> Sent
+        <button className="tm-sched-stop-btn" title="Stop this live game (clears its live status — doesn't touch the score)" onClick={onStop} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <Square size={14} strokeWidth={2} fill="currentColor" /> Stop
         </button>
       </span>
     );
   }
   if (scoreboards.length === 0) {
-    return <button className="tm-sched-send-btn" disabled title="No scoreboard widget on the canvas">→ Send</button>;
+    return <button className="tm-sched-send-btn" disabled title="No scoreboard widget on the canvas"><ArrowRight size={12} strokeWidth={2} /> Send</button>;
   }
   if (scoreboards.length === 1) {
     return (
       <button className="tm-sched-send-btn" title="Send this fixture to the scoreboard" onClick={() => onSend(scoreboards[0].id)}>
-        → Send
+        <ArrowRight size={12} strokeWidth={2} /> Send
       </button>
     );
   }
@@ -1330,7 +1517,7 @@ function ScoreboardSendButton({ match, scoreboards, onSend, onStop }: {
 
   return (
     <div style={{ position: 'relative', display: 'inline-flex' }}>
-      <button ref={anchorRef} className="tm-sched-send-btn" title="Pick which scoreboard to send to" onClick={toggle}>→ Send</button>
+      <button ref={anchorRef} className="tm-sched-send-btn" title="Pick which scoreboard to send to" onClick={toggle}><ArrowRight size={12} strokeWidth={2} /> Send</button>
       {open && pos && createPortal(
         <div ref={popupRef} style={{
           position: 'fixed', left: pos.left, bottom: pos.bottom, zIndex: 10000, minWidth: 170, maxHeight: 220,
@@ -1384,8 +1571,47 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
   const ALL_CATEGORIES = '__all__';
   const [format, setFormat] = useState<ScheduleFormat>('rr-single');
   const [category, setCategory] = useState<string>(categories.length > 0 ? ALL_CATEGORIES : '');
+  // Only used when generating "All Categories" at once — controls which
+  // category's fixtures come first within each shared calendar round (all
+  // categories still run in parallel, same date/round-by-round, same as
+  // today; this just decides the display/running order, e.g. Men's Round 1
+  // listed before Women's Round 1). One-off for this generation only —
+  // doesn't touch the tournament's own category list/order used elsewhere.
+  const [categoryOrder, setCategoryOrder] = useState<string[]>(categories);
+  // Reconciled against the live category list (self-heals if a category was
+  // added/removed elsewhere while this modal is open) rather than trusting
+  // the state snapshot as-is.
+  const orderedCategories = useMemo(
+    () => categoryOrder.filter(c => categories.includes(c)).concat(categories.filter(c => !categoryOrder.includes(c))),
+    [categoryOrder, categories],
+  );
+  const moveCategoryOrder = (index: number, dir: -1 | 1) => {
+    const target = index + dir;
+    if (target < 0 || target >= orderedCategories.length) return;
+    const next = [...orderedCategories];
+    [next[index], next[target]] = [next[target], next[index]];
+    setCategoryOrder(next);
+  };
   const [advanceCount, setAdvanceCount] = useState(2);
   const [tierCount, setTierCount] = useState(4);
+  // Per-category overrides for how many teams advance (groups-knockout) or
+  // how many tiers deep the bracket goes (groups-tiered) — e.g. Men's runs
+  // Cup/Plate/Bowl/Shield (4 tiers) while Women's only has enough teams for
+  // Cup/Plate (2). Falls back to the plain advanceCount/tierCount above for
+  // any category without its own override — same "default unless
+  // overridden" pattern as categoryOrder above, one-off for this
+  // generation only. Shown/edited whenever a specific category is
+  // selected (not just in "All Categories" mode) so the plain input above
+  // always reflects exactly what generation will actually use for
+  // whichever category is currently in view.
+  const [advanceCountByCategory, setAdvanceCountByCategory] = useState<Record<string, number>>({});
+  const [tierCountByCategory, setTierCountByCategory] = useState<Record<string, number>>({});
+  const [useWildcards, setUseWildcards] = useState(false);
+  // 'named' = today's Cup/Plate/Bowl/Shield reshuffle-pairing (unchanged
+  // default); 'ranked' = only 1st+2nd pair into Cup, every rank below runs
+  // its own independent placement bracket labeled by position instead of a
+  // tier name (see buildRankedPlacementKnockout).
+  const [tieredMode, setTieredMode] = useState<'named' | 'ranked'>('named');
   const [startDate, setStartDate] = useState(() => {
     const t = new Date();
     return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
@@ -1417,6 +1643,10 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
     const warnPrefix = cat ? `[${cat}] ` : '';
     const warnings: string[] = [];
     let fixtures: PreviewFixture[] = [];
+    // Per-category override, falling back to the plain default — see
+    // advanceCountByCategory/tierCountByCategory above.
+    const effectiveAdvanceCount = (cat ? advanceCountByCategory[cat] : undefined) ?? advanceCount;
+    const effectiveTierCount = (cat ? tierCountByCategory[cat] : undefined) ?? tierCount;
 
     if (format === 'rr-single' || format === 'rr-double') {
       const gen = format === 'rr-single' ? generateRoundRobin : generateDoubleRoundRobin;
@@ -1467,7 +1697,11 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
           fixtures = fixtures.concat(f.map(x => ({ ...x, groupName: g.name })));
           if (f.length) maxRoundIdx = Math.max(maxRoundIdx, Math.max(...f.map(x => x.roundIndex)));
         }
-        const slots = buildGroupKnockoutSlots(groupsInScope.map(g => g.name), advanceCount);
+        const poolSizes = groupsInScope.map(g => groupMembers(g.name).length);
+        if (poolSizes.length > 1 && Math.max(...poolSizes) !== Math.min(...poolSizes)) {
+          warnings.push(`${warnPrefix}Pools are uneven in size (${Math.min(...poolSizes)}–${Math.max(...poolSizes)} teams) — some ranks won't exist in every pool.`);
+        }
+        const slots = buildGroupKnockoutSlots(groupsInScope.map(g => ({ name: g.name, size: groupMembers(g.name).length })), effectiveAdvanceCount);
         fixtures = fixtures.concat(offsetRounds(generateKnockoutFromSlots(slots, thirdPlacePlayoff), maxRoundIdx + 1));
       }
     } else if (format === 'groups-tiered') {
@@ -1487,13 +1721,26 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
           fixtures = fixtures.concat(f.map(x => ({ ...x, groupName: g.name })));
           if (f.length) maxRoundIdx = Math.max(maxRoundIdx, Math.max(...f.map(x => x.roundIndex)));
         }
-        // Adjacent tiers share a Quarterfinal (Cup+Plate, Bowl+Shield, …) —
-        // the winner continues in the upper tier's own bracket, the loser
-        // drops to the lower tier's, instead of each tier running fully
-        // independently from round 1 (see buildTieredKnockout). Runs on the
-        // same calendar rounds as every other tier/category, same as how
-        // multiple categories already run side by side today.
-        fixtures = fixtures.concat(offsetRounds(buildTieredKnockout(groupsInScope.map(g => g.name), tierCount, thirdPlacePlayoff), maxRoundIdx + 1));
+        const poolSizes = groupsInScope.map(g => groupMembers(g.name).length);
+        if (poolSizes.length > 1 && Math.max(...poolSizes) !== Math.min(...poolSizes)) {
+          warnings.push(`${warnPrefix}Pools are uneven in size (${Math.min(...poolSizes)}–${Math.max(...poolSizes)} teams)${useWildcards ? ' — shortfalls will be filled with cross-pool "Best Nth-place" wildcards.' : ' — shortfalls will be filled with byes.'}`);
+        }
+        // 'named': adjacent tiers share a Quarterfinal (Cup+Plate,
+        // Bowl+Shield, …) — the winner continues in the upper tier's own
+        // bracket, the loser drops to the lower tier's, instead of each
+        // tier running fully independently from round 1 (see
+        // buildTieredKnockout). 'ranked': only 1st+2nd pair into Cup;
+        // every rank below runs its own independent placement bracket
+        // labeled by position, not a tier name (see
+        // buildRankedPlacementKnockout). Both run on the same calendar
+        // rounds as every other tier/category, same as how multiple
+        // categories already run side by side today.
+        const pools = groupsInScope.map(g => ({ name: g.name, size: groupMembers(g.name).length }));
+        const tiered = tieredMode === 'ranked'
+          ? buildRankedPlacementKnockout(pools, effectiveTierCount, thirdPlacePlayoff, useWildcards)
+          : buildTieredKnockout(pools, effectiveTierCount, thirdPlacePlayoff, useWildcards);
+        fixtures = fixtures.concat(offsetRounds(tiered.fixtures, maxRoundIdx + 1));
+        warnings.push(...tiered.warnings.map(w => `${warnPrefix}${w}`));
       }
     }
 
@@ -1505,8 +1752,11 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
       // here too just meant duplicated text everywhere `round` gets shown.
       // Tier is the one exception: it's not otherwise reflected in the
       // round name at all, so a tiered fixture's stage reads as "Final
-      // Plate"/"Final Cup" rather than an ambiguous plain "Final".
-      round: f.tier ? `${f.round} ${f.tier}` : f.round,
+      // Plate"/"Final Cup" rather than an ambiguous plain "Final" — except
+      // a placement-ladder round ("9th-12th Placing") is already fully
+      // self-descriptive, so appending its own tier (identical text) would
+      // just duplicate it.
+      round: f.tier && !isPlacementRoundLabel(f.tier) ? `${f.round} ${f.tier}` : f.round,
       fixtureCategory: cat,
     }));
 
@@ -1517,7 +1767,7 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
     if (category === ALL_CATEGORIES) {
       let fixtures: PreviewFixture[] = [];
       let warnings: string[] = [];
-      for (const cat of categories) {
+      for (const cat of orderedCategories) {
         const result = generateForCategory(cat);
         fixtures = fixtures.concat(result.fixtures);
         warnings = warnings.concat(result.warnings);
@@ -1526,7 +1776,7 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
     }
     return generateForCategory(categories.length > 0 ? category : undefined);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [format, scopedTeams, tournament.groups, randomize, advanceCount, tierCount, category, categories, thirdPlacePlayoff]);
+  }, [format, scopedTeams, tournament.groups, randomize, advanceCount, tierCount, advanceCountByCategory, tierCountByCategory, useWildcards, tieredMode, category, categories, orderedCategories, thirdPlacePlayoff]);
 
   const matchCount = preview.fixtures.length;
   const roundCount = matchCount ? Math.max(...preview.fixtures.map(f => f.roundIndex)) + 1 : 0;
@@ -1556,7 +1806,7 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
   return (
     <div className="tm-gen-backdrop" onClick={onClose}>
       <div className="tm-gen-modal" onClick={e => e.stopPropagation()}>
-        <div className="tm-gen-title">🪄 Generate Schedule</div>
+        <div className="tm-gen-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Wand2 size={16} strokeWidth={1.75} /> Generate Schedule</div>
 
         <label className="tm-gen-label">Format</label>
         <select className="tm-input" value={format} onChange={e => setFormat(e.target.value as ScheduleFormat)}>
@@ -1575,19 +1825,81 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
           </>
         )}
 
+        {category === ALL_CATEGORIES && orderedCategories.length > 1 && (
+          <>
+            <label className="tm-gen-label">Category order (which starts first each day — all categories still run in parallel on the same dates)</label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {orderedCategories.map((c, i) => (
+                <div key={c} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ flex: 1 }}>{i + 1}. {c}</span>
+                  <button type="button" className="tm-io-btn" disabled={i === 0}
+                    onClick={() => moveCategoryOrder(i, -1)} title={`Move ${c} earlier`}>↑</button>
+                  <button type="button" className="tm-io-btn" disabled={i === orderedCategories.length - 1}
+                    onClick={() => moveCategoryOrder(i, 1)} title={`Move ${c} later`}>↓</button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
         {format === 'groups-knockout' && (
           <>
             <label className="tm-gen-label">Teams advancing per group to knockout stage</label>
-            <input className="tm-input" type="number" min={1} value={advanceCount}
-              onChange={e => setAdvanceCount(Math.max(1, parseInt(e.target.value, 10) || 1))} />
+            {category === ALL_CATEGORIES && orderedCategories.length > 1 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {orderedCategories.map(c => (
+                  <div key={c} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ flex: 1 }}>{c}</span>
+                    <input className="tm-input" style={{ width: 70 }} type="number" min={1}
+                      value={advanceCountByCategory[c] ?? advanceCount}
+                      onChange={e => setAdvanceCountByCategory(prev => ({ ...prev, [c]: Math.max(1, parseInt(e.target.value, 10) || 1) }))} />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <input className="tm-input" type="number" min={1}
+                value={categories.length > 0 && category !== ALL_CATEGORIES ? (advanceCountByCategory[category] ?? advanceCount) : advanceCount}
+                onChange={e => {
+                  const v = Math.max(1, parseInt(e.target.value, 10) || 1);
+                  if (categories.length > 0 && category !== ALL_CATEGORIES) setAdvanceCountByCategory(prev => ({ ...prev, [category]: v }));
+                  else setAdvanceCount(v);
+                }} />
+            )}
           </>
         )}
 
         {format === 'groups-tiered' && (
           <>
             <label className="tm-gen-label">Number of tiers (Cup, Plate, Bowl, Shield, …)</label>
-            <input className="tm-input" type="number" min={1} value={tierCount}
-              onChange={e => setTierCount(Math.max(1, parseInt(e.target.value, 10) || 1))} />
+            {category === ALL_CATEGORIES && orderedCategories.length > 1 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {orderedCategories.map(c => (
+                  <div key={c} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ flex: 1 }}>{c}</span>
+                    <input className="tm-input" style={{ width: 70 }} type="number" min={1}
+                      value={tierCountByCategory[c] ?? tierCount}
+                      onChange={e => setTierCountByCategory(prev => ({ ...prev, [c]: Math.max(1, parseInt(e.target.value, 10) || 1) }))} />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <input className="tm-input" type="number" min={1}
+                value={categories.length > 0 && category !== ALL_CATEGORIES ? (tierCountByCategory[category] ?? tierCount) : tierCount}
+                onChange={e => {
+                  const v = Math.max(1, parseInt(e.target.value, 10) || 1);
+                  if (categories.length > 0 && category !== ALL_CATEGORIES) setTierCountByCategory(prev => ({ ...prev, [category]: v }));
+                  else setTierCount(v);
+                }} />
+            )}
+            <label className="tm-gen-label">Tier naming</label>
+            <select className="tm-input" value={tieredMode} onChange={e => setTieredMode(e.target.value as 'named' | 'ranked')}>
+              <option value="named">Named tiers (Cup, Plate, Bowl, Shield…)</option>
+              <option value="ranked">Ranked placement (1st+2nd → Cup; every rank below runs its own placement bracket, labeled by position)</option>
+            </select>
+            <label className="tm-gen-checkbox">
+              <input type="checkbox" checked={useWildcards} onChange={e => setUseWildcards(e.target.checked)} />
+              Fill uneven bracket shortfalls with cross-pool "Best Nth-place" wildcards instead of byes
+            </label>
           </>
         )}
 
@@ -1620,7 +1932,7 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
 
         {preview.warnings.length > 0 && (
           <div className="tm-gen-warn">
-            {preview.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}
+            {preview.warnings.map((w, i) => <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4 }}><AlertTriangle size={14} strokeWidth={2} /> {w}</div>)}
           </div>
         )}
 
@@ -1643,14 +1955,55 @@ function GenerateScheduleModal({ tournament, scopedTeams, onClose, onGenerate }:
 // picker's "(stage)" fallback option instead of disappearing.
 const KNOCKOUT_STAGE_OPTIONS = ['Quarterfinal', 'Semifinal', 'Final', '3rd Place'];
 
-// A fixture's "stage" for grouping purposes in the Schedule tab — the
+// A user-chosen sort for the Schedule tab, layered on TOP of the store's own
+// sortIndex order (see matchScheduleStore's sortMatches) rather than
+// replacing it — an empty key list ("Manual") falls straight through to
+// today's default (drag-orderable, month/stage-grouped) behavior; any
+// non-empty list applies a multi-column sort (each key breaks ties left by
+// the ones before it) and switches the list to a flat, ungrouped display.
+export type ScheduleSortKey = 'date' | 'time' | 'matchId' | 'category' | 'tier';
+export const SCHEDULE_SORT_KEY_LABELS: Record<ScheduleSortKey, string> = {
+  date: 'Date', time: 'Time', matchId: 'Match #', category: 'Category', tier: 'Tier',
+};
+function compareByScheduleSortKey(a: ScheduledMatch, b: ScheduledMatch, key: ScheduleSortKey): number {
+  switch (key) {
+    case 'date': return a.date.localeCompare(b.date);
+    case 'time': return (a.time ?? '').localeCompare(b.time ?? '');
+    // Match numbers (see matchNumber.ts) are always assigned by walking
+    // fixtures in their current sortIndex order, so sorting by the number
+    // itself is exactly sorting by sortIndex — no string parsing needed to
+    // get "MB2" before "MB10" right.
+    case 'matchId': return (a.sortIndex ?? 0) - (b.sortIndex ?? 0);
+    case 'category': return (a.category ?? '').localeCompare(b.category ?? '');
+    // tierRank (scheduleGen.ts) orders Cup→Plate→Bowl→Shield→Tier N→
+    // placement-range labels sensibly — plain alphabetical would put "Bowl"
+    // before "Cup".
+    case 'tier': return tierRank(a.tier ?? '') - tierRank(b.tier ?? '');
+  }
+}
+function sortScheduleBy(matches: ScheduledMatch[], keys: ScheduleSortKey[]): ScheduledMatch[] {
+  if (keys.length === 0) return matches;
+  return [...matches].sort((a, b) => {
+    for (const key of keys) {
+      const c = compareByScheduleSortKey(a, b, key);
+      if (c !== 0) return c;
+    }
+    return 0;
+  });
+}
+
+// A fixture's "stage" for display purposes in the Schedule tab — the
 // knockout stage name (tier-prefixed when tiered, e.g. "Cup Quarterfinal")
 // for a bracket fixture, or the pool/group name for a round-robin one.
 // Undefined for a plain ungrouped tournament with no pools and no knockout
-// stage at all, in which case no separator renders.
+// stage at all. Used to insert a divider wherever this VALUE changes
+// between one row and the next, in whatever order the rows are already
+// in (match id/sortIndex by default, or a custom sort's order) — never to
+// cluster/reorder rows away from that order, since categories/tiers run in
+// parallel on the same dates and naturally interleave.
 function fixtureStageLabel(m: ScheduledMatch): string | undefined {
   const stage = extractKnockoutStage(m);
-  if (stage) return m.tier ? `${m.tier} ${stage}` : stage;
+  if (stage) return m.tier && !isPlacementRoundLabel(m.tier) ? `${m.tier} ${stage}` : stage;
   // extractKnockoutStage deliberately doesn't recognize '3rd Place' (it's fed
   // by Semifinal LOSERS, not a normal bracket round) — group it with the
   // tier's own Final instead of falling through to "Group Stage" below,
@@ -1662,6 +2015,257 @@ function fixtureStageLabel(m: ScheduledMatch): string | undefined {
   return m.group ? 'Group Stage' : undefined;
 }
 
+export interface TierMismatch {
+  match: ScheduledMatch;
+  side: 'A' | 'B';
+  /** True when exactly one candidate tier value fits this fixture's own
+   *  content — offered as a one-click fix, even when that value is
+   *  `undefined` (a plain, untiered bracket). False when the reference
+   *  resolves against more than one differently-tiered candidate — needs a
+   *  human to look, not a guess, so `suggestedTier` is meaningless then. */
+  resolvable: boolean;
+  suggestedTier?: string;
+  reason: string;
+  /** The specific tier value(s) THIS check actually found evidence for —
+   *  one value when unambiguous (same as suggestedTier), several when it's
+   *  a genuine conflict (e.g. two different fixtures elsewhere both claim
+   *  to be what this one is downstream of, under different tiers) — powers
+   *  the repair picker's buttons so an operator picks between the actual
+   *  candidates the mismatch itself surfaced, not an unrelated dropdown of
+   *  every tier in the category. */
+  candidates: (string | undefined)[];
+  /** Every distinct tier value currently in use anywhere in this fixture's
+   *  own category's bracket — a broader fallback button set for the picker
+   *  below so there's always something to click even when `candidates`
+   *  comes up empty (an entire ladder corrupted to the same wrong tier
+   *  leaves nothing else to point to it) — never requires typing. */
+  categoryTierOptions: string[];
+}
+
+// A knockout fixture's "Winner of X"/"Loser of X" entrant reveals exactly
+// which bracket it's downstream of — this checks that against the
+// fixture's own stored `tier`, catching mismatches in BOTH directions
+// (tagged Cup but content says Plate, or vice versa; tagged a placement
+// range but content says Cup; etc.), not just the "should be Cup" case.
+// Two reference shapes, both produced by scheduleGen.ts's generators:
+//  - A shared-QF-pair reference ("Cup/Plate Quarterfinal 1") carries the
+//    tier directly in its own text — Winner implies the pair's upper tier,
+//    Loser implies the lower, no lookup needed (buildPairedTierQuarterfinal).
+//  - A bare reference ("Semifinal 1", "9th-10th Placing 1") carries no
+//    tier at all by itself — ANY tier's own internal bracket can produce
+//    "Winner of Semifinal 1" (buildTieredKnockout/buildRankedPlacementKnockout
+//    both reuse the same generic runBracket/buildPlacementLadder machinery
+//    per tier) — so this looks up whichever OTHER fixture in the same
+//    tournament+category actually has that as its own bare round (via
+//    bareStageLabel, which already reverses the "{stage} {tier}" suffix
+//    format) and expects this fixture's tier to match that source's.
+// A drag/swap performed before matchContentOf carried `tier` along with
+// the rest of a swapped fixture's content (fixed earlier this session) is
+// the most likely real-world cause — the content correctly moved, but
+// tier stayed pinned to the slot it was swapped INTO.
+export function findTierMismatches(allMatches: ScheduledMatch[]): TierMismatch[] {
+  const out: TierMismatch[] = [];
+  const categories = Array.from(new Set(allMatches.map(m => m.category ?? '')));
+  for (const cat of categories) {
+    // extractKnockoutStage deliberately doesn't recognize group === '3rd
+    // Place' (see fixtureStageLabel above) — included explicitly here so a
+    // 3rd Place Playoff/Bronze Final fixture (exactly the shape of fixture
+    // this check exists to catch — see the earlier "5th-8th Placing Final"
+    // report) isn't silently skipped.
+    const bracket = allMatches.filter(m => (m.category ?? '') === cat && (!!extractKnockoutStage(m) || m.group === '3rd Place'));
+    const pairTierValues = Array.from(new Set(bracket.map(m => m.tier).filter((t): t is string => !!t && t.includes('/'))));
+    const categoryTierOptions = Array.from(new Set(bracket.map(m => m.tier).filter((t): t is string => !!t)))
+      .sort((a, b) => tierRank(a) - tierRank(b));
+    for (const m of bracket) {
+      (['A', 'B'] as const).forEach(side => {
+        const name = side === 'A' ? m.teamAName : m.teamBName;
+        const refMatch = name?.match(/^(Winner|Loser) of (.+)$/);
+        if (!refMatch) return;
+        const [, kind, ref] = refMatch;
+
+        const matchedPair = pairTierValues.find(p => ref === p || ref.startsWith(p + ' '));
+        if (matchedPair) {
+          const [upper, lower] = matchedPair.split('/');
+          const expectedTier = kind === 'Winner' ? upper : lower;
+          if (m.tier !== expectedTier) {
+            out.push({ match: m, side, resolvable: true, suggestedTier: expectedTier, reason: `"${kind} of ${ref}" implies tier "${expectedTier}"`, candidates: [expectedTier], categoryTierOptions });
+          }
+          return;
+        }
+
+        // A reference into a ranked-placement ladder ("Winner of 9th-12th
+        // Placing 1") is self-describing — the range it names ("9th-12th
+        // Placing") IS the expected tier directly, with no need to look up
+        // the referenced sibling's OWN tier (the sibling-lookup fallback
+        // below trusts that fixture's current tier field, which can itself
+        // be wrong and silently "agree" with an equally-wrong referencer —
+        // exactly how a corrupted top-of-ladder fixture like "9th-12th
+        // Placing 1" could go on masking every fixture that refers to it).
+        const refBare = ref.replace(/\s+\d+$/, '');
+        if (isPlacementRoundLabel(refBare) && m.tier !== refBare) {
+          out.push({ match: m, side, resolvable: true, suggestedTier: refBare, reason: `"${kind} of ${ref}" implies tier "${refBare}"`, candidates: [refBare], categoryTierOptions });
+          return;
+        }
+
+        const candidateMatches = bracket.filter(s => s.id !== m.id && bareStageLabel(s) === ref);
+        if (candidateMatches.length === 0) return; // nothing to compare against yet — don't guess
+        if (candidateMatches.some(c => (c.tier ?? '') === (m.tier ?? ''))) return; // consistent
+        const distinctTiers = Array.from(new Set(candidateMatches.map(c => c.tier)));
+        const resolvable = distinctTiers.length === 1;
+        out.push({
+          match: m, side, resolvable,
+          suggestedTier: resolvable ? distinctTiers[0] : undefined,
+          reason: resolvable
+            ? `"${kind} of ${ref}" only exists tagged tier "${distinctTiers[0] ?? '(none)'}"`
+            : `"${kind} of ${ref}" exists under multiple different tiers (${distinctTiers.map(t => t ?? '(none)').join(', ')})`,
+          candidates: distinctTiers,
+          categoryTierOptions,
+        });
+      });
+    }
+
+    // A first-round placement-ladder fixture (buildPlacementLadder's own
+    // top round — fed directly by pool-rank placeholders like "3rd GROUP A",
+    // never a "Winner/Loser of" reference, which is exactly what
+    // distinguishes it from every later round in the same tree) always gets
+    // its OWN bare round text as its tier — the tree's top round IS the
+    // tree's root, by construction. Purely self-derived from the fixture's
+    // own round text, so — unlike the Winner/Loser check above, which
+    // trusts a referenced sibling's tier field — it can't be fooled by two
+    // equally-wrong fixtures agreeing with each other.
+    for (const m of bracket) {
+      const isWinnerLoserRef = (name?: string) => !!name?.match(/^(Winner|Loser) of /);
+      if (isWinnerLoserRef(m.teamAName) || isWinnerLoserRef(m.teamBName)) continue;
+      const afterCategory = m.round?.includes(' · ') ? m.round.split(' · ').pop()! : (m.round ?? '');
+      const bareRound = afterCategory.replace(/\s+\d+$/, '');
+      if (!isPlacementRoundLabel(bareRound)) continue;
+      if (m.tier === bareRound) continue; // consistent
+      out.push({
+        match: m, side: 'A', // no natural per-side split for this check — one flag per fixture
+        resolvable: true,
+        suggestedTier: bareRound,
+        reason: `First round of its own ladder — tier should be "${bareRound}"`,
+        candidates: [bareRound],
+        categoryTierOptions,
+      });
+    }
+
+    // A shared Quarterfinal fixture (buildPairedTierQuarterfinal) is fed
+    // directly by pool-rank placeholders ("1st GROUP A", not "Winner/Loser
+    // of..."), so the two checks above never look at it at all — it always
+    // gets a NAMED tier (a combined pair like "Cup/5th-8th Placing" when it
+    // splits into Cup and a lower placement ladder, or a plain "Cup"/"Plate"
+    // for the older non-ranked format), never a bare placement-range value,
+    // which belongs exclusively to the separate, independent lower
+    // placement ladder. When this drifts wrong, it cascades hard: a
+    // Semifinal's own "Winner of Cup/5th-8th Placing Quarterfinal 1"
+    // reference can no longer resolve against anything (pairTierValues
+    // above comes up empty), so Semifinal/Final end up unverifiable too.
+    // The fixture's own round text still carries whatever tier was baked in
+    // at generation time as a "{stage} {tier}" suffix (see the round-
+    // suffix-append rule in GenerateScheduleModal) — never rewritten later
+    // even if the separate tier field gets corrupted afterward — so the
+    // original, correct value is recoverable directly, with no need for a
+    // surviving clean sibling to compare against.
+    for (const m of bracket) {
+      if (extractKnockoutStage(m) !== 'Quarterfinal') continue;
+      if (!m.tier || !isPlacementRoundLabel(m.tier)) continue; // already fine
+
+      const afterCategory = m.round?.includes(' · ') ? m.round.split(' · ').pop()! : (m.round ?? '');
+      const recovered = afterCategory.match(/^Quarterfinal(?:\s+\d+)?\s*(.*)$/)?.[1]?.trim();
+      out.push({
+        match: m, side: 'A', // no natural per-side split for this check — one flag per fixture
+        resolvable: !!recovered,
+        suggestedTier: recovered || undefined,
+        reason: recovered
+          ? `Its own round text still carries the original tier "${recovered}"`
+          : `Tagged "${m.tier}" — a placement-range value that can never belong on a Quarterfinal`,
+        candidates: recovered ? [recovered] : [],
+        categoryTierOptions,
+      });
+    }
+
+  }
+  return out;
+}
+
+// One mismatched fixture's row in the banner below — never asks for typing.
+// Buttons are the union of the ACTUAL candidate tiers the mismatch found
+// evidence for (see TierMismatch.candidates — one when unambiguous, several
+// when it's a genuine conflict) plus every other tier value already in use
+// in this fixture's own category, so there's always something to click
+// even when the smart check comes up with nothing (an entire ladder
+// corrupted to the same wrong tier leaves nothing else to point to it).
+function TierMismatchRow({ entries, matchNumbers, onFix }: {
+  entries: TierMismatch[];
+  matchNumbers: Map<string, string>;
+  onFix: (id: string, tier: string | undefined) => void;
+}) {
+  const m = entries[0].match;
+  const options = Array.from(new Set([
+    ...entries.flatMap(e => e.candidates),
+    ...entries.flatMap(e => e.categoryTierOptions),
+  ]));
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ flex: 1, minWidth: 160 }}>
+          {matchNumbers.get(m.id) ? `${matchNumbers.get(m.id)} — ` : ''}{m.teamAName} vs {m.teamBName}{' '}
+          <span style={{ color: 'var(--text-muted)' }}>(currently "{m.tier ?? '(none)'}")</span>
+        </span>
+        {options.map(c => (
+          <button key={c ?? '__none__'} className="tm-io-btn" onClick={() => onFix(m.id, c)}>
+            {c ?? '(none)'}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 2 }}>{entries.map(e => e.reason).join('; ')}</div>
+    </div>
+  );
+}
+
+// Shared by SchedulePanel and BracketPanel — a fixture tagged with the wrong
+// tier (see findTierMismatches) is wrong no matter which tab you're looking
+// at it from, so both surface the exact same detection + repair picker.
+function TierMismatchBanner({ mismatches, matchNumbers, onFix }: {
+  mismatches: TierMismatch[];
+  matchNumbers: Map<string, string>;
+  onFix: (id: string, tier: string | undefined) => void;
+}) {
+  if (mismatches.length === 0) return null;
+  const byMatch = new Map<string, TierMismatch[]>();
+  for (const tm of mismatches) {
+    if (!byMatch.has(tm.match.id)) byMatch.set(tm.match.id, []);
+    byMatch.get(tm.match.id)!.push(tm);
+  }
+  const grouped = Array.from(byMatch.values());
+  const resolvedOk = (entries: TierMismatch[]) => !entries.some(e => !e.resolvable) &&
+    new Set(entries.map(e => e.suggestedTier)).size === 1;
+  const fixableCount = grouped.filter(resolvedOk).length;
+  return (
+    <div className="tm-gen-warn" style={{ marginBottom: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontWeight: 600 }}>
+        <AlertTriangle size={14} strokeWidth={2} /> {grouped.length} fixture{grouped.length !== 1 ? 's' : ''} with a tier that doesn't match their own content
+      </div>
+      <div style={{ fontSize: 11, margin: '2px 0 6px' }}>
+        Each one's own bracket content reveals which tier it's actually under — likely left behind by a drag/swap that carried Tier along too. Click the correct tier below to apply it. Corrects Tier only; nothing else about the fixture changes.
+      </div>
+      {grouped.map(entries => (
+        <TierMismatchRow key={entries[0].match.id} entries={entries} matchNumbers={matchNumbers} onFix={onFix} />
+      ))}
+      {fixableCount > 1 && (
+        <button className="tm-io-btn tm-io-btn--ok" onClick={() => grouped.forEach(entries => {
+          if (!resolvedOk(entries)) return;
+          const tier = entries[0].suggestedTier;
+          onFix(entries[0].match.id, tier);
+        })}>
+          Fix all {fixableCount} auto-resolvable
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SchedulePanel({ tournament, activeCategory, editMode }: {
   tournament: Tournament; activeCategory: string; editMode: boolean;
 }) {
@@ -1669,11 +2273,41 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
   const { updateTournament } = useTournamentStore();
   const { teams: allTeams } = useTeamDbStore();
   const { pages, updateWidgetConfig, resetWidgetTimer } = useCanvasStore();
-  const { results: savedResults, addResult, deleteResult } = useMatchResultsStore();
+  const { results: savedResults, addResult, deleteResult, updateResult } = useMatchResultsStore();
+  const periodsTotal = (tournament.settings ?? SPORT_DEFAULTS[tournament.sport]).periods;
+  // Empty = "Manual" (today's default: drag-orderable, month/stage-grouped).
+  // Non-empty = a multi-column sort, priority-ordered — see sortScheduleBy.
+  const [sortKeys, setSortKeys] = useState<ScheduleSortKey[]>([]);
+  const addSortKey = (key: ScheduleSortKey) => setSortKeys(prev => prev.includes(key) ? prev : [...prev, key]);
+  const removeSortKey = (key: ScheduleSortKey) => setSortKeys(prev => prev.filter(k => k !== key));
+  const moveSortKey = (index: number, dir: -1 | 1) => setSortKeys(prev => {
+    const target = index + dir;
+    if (target < 0 || target >= prev.length) return prev;
+    const next = [...prev];
+    [next[index], next[target]] = [next[target], next[index]];
+    return next;
+  });
+  // Manual drag/move-slot reordering only makes sense for the default order
+  // — with a custom sort active, clicking "move up" would change the
+  // fixture's sortIndex without visibly moving the row (since display order
+  // now follows the chosen sort keys instead), so it's hidden rather than
+  // silently doing something the operator can't see happen.
+  const canReorder = editMode && sortKeys.length === 0;
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const toggleExpanded = (id: string) => setExpandedIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   // Confirming "Stop" for a live fixture that already has a saved result —
   // undoing sentAt would otherwise silently orphan it (same guard as the
   // Upcoming Matches widget's own undo-sent flow).
   const [stopTarget, setStopTarget] = useState<{ matchId: string; resultId?: string } | null>(null);
+  // Deleting a fixture is permanent and one misclick away (the × sits right
+  // in the row) — confirm first, same as every other destructive action in
+  // this window (native window.confirm() was already found unreliable in
+  // the packaged Tauri webview, hence the shared ConfirmModal instead).
+  const [deleteFixtureTarget, setDeleteFixtureTarget] = useState<ScheduledMatch | null>(null);
   const handleStopLive = (m: ScheduledMatch) => {
     const existing = findDuplicateResult(savedResults, {
       linkedScheduleMatchId: m.id, linkedTournamentId: m.tournamentId,
@@ -1688,6 +2322,15 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
     () => allMatches.filter(m => m.tournamentId === tournament.id),
     [allMatches, tournament.id]
   );
+  // Flags fixtures whose own content is inconsistent with their stored
+  // tier (see findTierMismatches) — most often a leftover from a pre-fix
+  // drag/swap — surfaced as a repairable banner instead of requiring a
+  // manual hunt through every fixture's Tier field.
+  const tierMismatches = useMemo(
+    () => findTierMismatches(allTournamentMatches),
+    [allTournamentMatches]
+  );
+  const fixTierMismatch = (id: string, tier: string | undefined) => updateMatch(id, { tier });
   // Counted independently per venue in schedule order (allTournamentMatches
   // is already kept sorted by the store) — two venues running in parallel
   // number their own matches "which match at this venue", rising together
@@ -1724,7 +2367,8 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
     const allWidgets = pages.flatMap(p => p.widgets);
     const target = allWidgets.find(w => w.id === targetId);
     if (!target) return;
-    if (!guardScoreboardOverwrite(target.config, addResult)) return;
+    const targetTimerCfg = autoLinkedWidget(pages, target.id, target.config.linkedTimerWidgetId, 'timer')?.config;
+    if (!guardScoreboardOverwrite(target.config, addResult, targetTimerCfg)) return;
     updateWidgetConfig(target.id, buildLoadMatchPatch(m));
     // A new match starting means the previous one's clock shouldn't carry over.
     if (target.config.linkedTimerWidgetId) resetWidgetTimer(target.config.linkedTimerWidgetId);
@@ -1738,7 +2382,7 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
   const [importPreview, setImportPreview] = useState<ParsedFixtureRow[] | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showGenerate, setShowGenerate] = useState(false);
-  // Two-step swap: click 🔄 Swap on one fixture to arm it, then click ↔ Swap
+  // Two-step swap: click Swap on one fixture to arm it, then click ↔ Swap
   // Here on the target fixture to complete it — a distinct button on the
   // target row rather than a dropdown, so it's obvious which click does what.
   const [armedSwapId, setArmedSwapId] = useState<string | null>(null);
@@ -1755,6 +2399,24 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
     updateTournament(tournament.id, { venues: venues.filter(v => v !== name) });
     for (const m of matches) {
       if (m.venue === name) updateMatch(m.id, { venue: undefined });
+    }
+  };
+  // Renames a venue in place and cascades the new name everywhere it's
+  // stored by name — every fixture in the tournament (not just the current
+  // category filter) plus its own match-number prefix letter — instead of
+  // the old remove-then-re-add-a-new-one workflow, which unassigned every
+  // fixture using it (same "rename cascades, doesn't just remove" reasoning
+  // as the Teams tab's renameCategory).
+  const renameVenue = (oldName: string, newName: string) => {
+    const name = newName.trim();
+    if (!name || name === oldName || venues.includes(name)) return;
+    const { [oldName]: oldPrefix, ...restPrefixes } = venuePrefixes;
+    updateTournament(tournament.id, {
+      venues: venues.map(v => v === oldName ? name : v),
+      venuePrefixes: oldPrefix !== undefined ? { ...restPrefixes, [name]: oldPrefix } : venuePrefixes,
+    });
+    for (const m of allTournamentMatches) {
+      if (m.venue === oldName) updateMatch(m.id, { venue: name });
     }
   };
   // The letter used for this venue's fixtures in the auto match number
@@ -1815,30 +2477,57 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const dragStateRef = useRef<{ id: string; startX: number; startY: number; active: boolean } | null>(null);
   const matchContentOf = (m: ScheduledMatch) => ({
-    teamAName: m.teamAName, teamAShortName: m.teamAShortName, teamALogo: m.teamALogo, teamAColor: m.teamAColor,
-    teamBName: m.teamBName, teamBShortName: m.teamBShortName, teamBLogo: m.teamBLogo, teamBColor: m.teamBColor,
-    round: m.round, category: m.category, group: m.group,
+    teamAId: m.teamAId, teamAName: m.teamAName, teamAShortName: m.teamAShortName, teamALogo: m.teamALogo, teamAColor: m.teamAColor,
+    teamBId: m.teamBId, teamBName: m.teamBName, teamBShortName: m.teamBShortName, teamBLogo: m.teamBLogo, teamBColor: m.teamBColor,
+    round: m.round, category: m.category, group: m.group, tier: m.tier,
     matchType: m.matchType, walkoverLoser: m.walkoverLoser, scoreA: m.scoreA, scoreB: m.scoreB,
     sentAt: m.sentAt, completedAt: m.completedAt,
   });
+  // A group-stage (round-robin) fixture's "Round N" is meant to track
+  // whichever numbered slot it's actually running in — not travel with the
+  // match content on a swap like every other field does — so bracket
+  // auto-advance's group-completion gating and the Standings/Bracket tabs
+  // keep seeing round numbers that match the real running order. Scoped to
+  // two fixtures in the SAME group+category (a swap across different
+  // groups/categories has no shared round sequence to reconcile, so keeps
+  // the plain full-content swap below).
+  const isGroupStageFixture = (m: ScheduledMatch) => !extractKnockoutStage(m) && m.group !== '3rd Place' && !!m.group;
+  const [pendingRoundSwap, setPendingRoundSwap] = useState<{ fromId: string; toId: string; fromRound?: string; toRound?: string } | null>(null);
+  // A true swap — only these two slots' content exchanges; every fixture in
+  // between keeps its own slot (date/time/count/venue) exactly as it was.
+  // Matches what the drag/move-button tooltips already promise ("that
+  // slot's count/time stays put") — a splice-based reorder would instead
+  // shift everything between the two positions by one. `keepRound` additionally
+  // leaves each slot's own `round` value in place instead of swapping it too
+  // (see isGroupStageFixture above) — only ever true after the operator has
+  // confirmed it via the modal below, since it also shifts Match # numbering.
+  const applyFixtureSwap = (fromId: string, toId: string, keepRound: boolean) => {
+    const ordered = matches;
+    const fromIdx = ordered.findIndex(m => m.id === fromId);
+    const toIdx = ordered.findIndex(m => m.id === toId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    const fromContent = matchContentOf(ordered[fromIdx]);
+    const toContent = matchContentOf(ordered[toIdx]);
+    if (keepRound) {
+      updateMatch(ordered[fromIdx].id, { ...toContent, round: fromContent.round });
+      updateMatch(ordered[toIdx].id, { ...fromContent, round: toContent.round });
+    } else {
+      updateMatch(ordered[fromIdx].id, toContent);
+      updateMatch(ordered[toIdx].id, fromContent);
+    }
+  };
   const moveFixture = (draggedId: string, targetId: string) => {
     if (draggedId === targetId) return;
-    const ordered = matches; // already ordered by sortIndex (the count number)
-    const fromIdx = ordered.findIndex(m => m.id === draggedId);
-    const toIdx = ordered.findIndex(m => m.id === targetId);
-    if (fromIdx === -1 || toIdx === -1) return;
-    // Simulate moving the CONTENT (not the slot) from fromIdx to toIdx —
-    // everything between shifts by one, same as a normal list reorder —
-    // then hand each slot whichever content should now sit in it.
-    const contents = ordered.map(matchContentOf);
-    const reorderedContents = [...contents];
-    const [movedContent] = reorderedContents.splice(fromIdx, 1);
-    reorderedContents.splice(toIdx, 0, movedContent);
-    const lo = Math.min(fromIdx, toIdx);
-    const hi = Math.max(fromIdx, toIdx);
-    for (let k = lo; k <= hi; k++) {
-      updateMatch(ordered[k].id, reorderedContents[k]);
+    const fromM = matches.find(m => m.id === draggedId);
+    const toM = matches.find(m => m.id === targetId);
+    if (!fromM || !toM) return;
+    const roundsDiffer = isGroupStageFixture(fromM) && isGroupStageFixture(toM) &&
+      fromM.group === toM.group && fromM.category === toM.category && fromM.round !== toM.round;
+    if (roundsDiffer) {
+      setPendingRoundSwap({ fromId: draggedId, toId: targetId, fromRound: fromM.round, toRound: toM.round });
+      return;
     }
+    applyFixtureSwap(draggedId, targetId, false);
   };
   const moveFixtureBy = (id: string, direction: -1 | 1) => {
     const idx = matches.findIndex(m => m.id === id);
@@ -1961,11 +2650,22 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
   // updating them.
   const findImportMatch = (row: ParsedFixtureRow) => {
     const norm = (s: string) => s.trim().toLowerCase();
-    return allTournamentMatches.find(m =>
+    const candidates = allTournamentMatches.filter(m =>
       norm(m.teamAName) === norm(row.teamAName) &&
       norm(m.teamBName) === norm(row.teamBName) &&
       norm(m.round ?? '') === norm(row.round ?? '')
     );
+    if (candidates.length <= 1) return candidates[0];
+    // More than one fixture shares this exact team pair + round text — e.g.
+    // "Round 1" repeated across categories, or the same club fielding teams
+    // (same display name) in both Men's and Women's. Round-tripping the
+    // export unmodified would otherwise silently update whichever one
+    // happened to come first, potentially applying a Men's row's date/venue
+    // edit to the Women's fixture instead. Category still isn't REQUIRED to
+    // match (a CSV edit is allowed to move a fixture between categories,
+    // same as it's allowed to edit date/venue/group) — it's only used here
+    // to break a genuine tie when one exists.
+    return candidates.find(m => norm(m.category ?? '') === norm(row.category ?? '')) ?? candidates[0];
   };
 
   const importClassified = useMemo(
@@ -2005,6 +2705,12 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
   };
 
   const groups = useMemo(() => {
+    // A custom sort (see sortKeys) drops the month grouping entirely — it
+    // reorders across dates by design (e.g. "all of one Category together"),
+    // so a month-by-month split would just fight the very thing it's for.
+    // The empty-string label renders no header at all (see below), giving a
+    // flat, fully re-ordered list.
+    if (sortKeys.length > 0) return [['', sortScheduleBy(matches, sortKeys)]] as [string, typeof matches][];
     const map = new Map<string, typeof matches>();
     for (const m of matches) {
       const d = new Date(m.date + 'T00:00:00');
@@ -2013,7 +2719,7 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
       map.get(key)!.push(m);
     }
     return Array.from(map.entries());
-  }, [matches]);
+  }, [matches, sortKeys]);
 
   // Sequential fixture numbers in the same order they're displayed, spanning
   // every month group — not reset per group.
@@ -2026,10 +2732,40 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
   return (
     <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-        <button className="tm-io-btn" title="Export the WHOLE tournament's fixtures as CSV (every category, regardless of the current filter) — Excel compatible"
-          onClick={() => exportFixturesCSV(allTournamentMatches, tournament.name)} disabled={allTournamentMatches.length === 0}>
-          ↓ Export CSV
+        <button className="tm-io-btn" title="Export the WHOLE tournament's fixtures as CSV (every category, regardless of the current filter), including each fixture's Match # — Excel compatible"
+          onClick={() => exportFixturesCSV(allTournamentMatches, tournament.name, tournament.matchNumberPrefix, tournament.venuePrefixes)} disabled={allTournamentMatches.length === 0} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <ArrowDown size={14} strokeWidth={2} /> Export CSV
         </button>
+      </div>
+
+      <TierMismatchBanner mismatches={tierMismatches} matchNumbers={matchNumbers} onFix={fixTierMismatch} />
+
+      <div className="tm-groups-bar" style={{ marginBottom: 12 }}>
+        <span className="tm-groups-label">Sort by:</span>
+        {sortKeys.length === 0 ? (
+          <span style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Manual (drag order)</span>
+        ) : (
+          sortKeys.map((k, i) => (
+            <span key={k} className="tm-group-chip">
+              {i + 1}. {SCHEDULE_SORT_KEY_LABELS[k]}
+              <button onClick={() => moveSortKey(i, -1)} disabled={i === 0} title="Higher sort priority" style={{ marginLeft: 4 }}>↑</button>
+              <button onClick={() => moveSortKey(i, 1)} disabled={i === sortKeys.length - 1} title="Lower sort priority">↓</button>
+              <button onClick={() => removeSortKey(k)} title={`Remove ${SCHEDULE_SORT_KEY_LABELS[k]} from the sort`}>×</button>
+            </span>
+          ))
+        )}
+        <select
+          className="tm-input" style={{ width: 'auto' }} value=""
+          onChange={e => { if (e.target.value) addSortKey(e.target.value as ScheduleSortKey); }}
+        >
+          <option value="">+ Add sort key…</option>
+          {(Object.keys(SCHEDULE_SORT_KEY_LABELS) as ScheduleSortKey[]).filter(k => !sortKeys.includes(k)).map(k => (
+            <option key={k} value={k}>{SCHEDULE_SORT_KEY_LABELS[k]}</option>
+          ))}
+        </select>
+        {sortKeys.length > 0 && (
+          <button className="tm-io-btn" onClick={() => setSortKeys([])} title="Clear all sort keys — back to manual drag order">Reset to manual</button>
+        )}
       </div>
 
       {editMode && (
@@ -2037,7 +2773,14 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
           <span className="tm-groups-label">Venues:</span>
           {venues.map(v => (
             <span key={v} className="tm-group-chip tm-group-chip--editable">
-              {v}
+              <input
+                className="tm-group-chip-input"
+                defaultValue={v}
+                title="Rename venue"
+                onClick={e => e.stopPropagation()}
+                onBlur={e => renameVenue(v, e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+              />
               <input
                 className="tm-group-chip-input"
                 value={venuePrefixes[v] ?? ''}
@@ -2082,19 +2825,20 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
       {editMode && (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginTop: 10, marginBottom: 12 }}>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="tm-io-btn" onClick={selectAll} disabled={matches.length === 0 || allSelected}>☑ Select All</button>
-            <button className="tm-io-btn" onClick={deselectAll} disabled={selectedIds.size === 0}>☐ Deselect All</button>
+            <button className="tm-io-btn" onClick={selectAll} disabled={matches.length === 0 || allSelected} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><CheckSquare size={14} strokeWidth={2} /> Select All</button>
+            <button className="tm-io-btn" onClick={deselectAll} disabled={selectedIds.size === 0} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Square size={14} strokeWidth={2} /> Deselect All</button>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="tm-io-btn" title="Auto-generate fixtures (round robin, knockout, groups + knockout)" onClick={() => setShowGenerate(true)}>
-              🪄 Generate Schedule
+            <button className="tm-io-btn" title="Auto-generate fixtures (round robin, knockout, groups + knockout)" onClick={() => setShowGenerate(true)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <Wand2 size={14} strokeWidth={2} /> Generate Schedule
             </button>
             <button
               className="tm-io-btn"
               title={`Import fixtures from CSV / TSV / TXT — matched back to existing fixtures across the whole tournament (any category), so only what actually changed gets updated. A row with no Category column falls back to${activeCategory ? ` the current "${activeCategory}" filter` : ' none'}.`}
               onClick={() => fileInputRef.current?.click()}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
             >
-              ↑ Import
+              <ArrowUp size={14} strokeWidth={2} /> Import
             </button>
             <button className="tm-sidebar-new-btn" onClick={handleAdd}>＋ Add Fixture</button>
             <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt" style={{ display: 'none' }} onChange={handleFileChange} />
@@ -2129,7 +2873,8 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
           <button className="tm-io-btn" onClick={applyBulkGroup} disabled={!bulkGroup}>Apply Group</button>
           <ConfirmButton
             className="tm-io-btn tm-io-btn--danger"
-            label={`🗑 Delete ${selectedIds.size}`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            label={<><Trash2 size={14} strokeWidth={2} /> Delete {selectedIds.size}</>}
             confirmLabel="Delete"
             message={`Delete ${selectedIds.size} selected fixture${selectedIds.size !== 1 ? 's' : ''}?`}
             onConfirm={deleteSelected}
@@ -2175,53 +2920,59 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
 
       {matches.length === 0 ? (
         <div className="tm-win-placeholder">
-          <span>No fixtures in this tournament yet — add one here, then pick it from a scoreboard's "📅 Load Match" button.</span>
+          <span>No fixtures in this tournament yet — add one here, then pick it from a scoreboard's "Load Match" button.</span>
         </div>
       ) : (
-        groups.map(([label, rows]) => {
-          // Sub-group by stage within this month — a plain "July 2026" list
-          // otherwise reads as one undifferentiated block once pool play and
-          // several knockout stages are all mixed together.
-          const byStage = new Map<string, typeof rows>();
-          for (const m of rows) {
-            const key = fixtureStageLabel(m) ?? '';
-            if (!byStage.has(key)) byStage.set(key, []);
-            byStage.get(key)!.push(m);
-          }
-          return (
+        // No longer sub-grouped by stage — the default view follows match id
+        // (sortIndex) order straight through a month, same order whether or
+        // not it happens to cross stage/tier boundaries. A divider (below)
+        // marks wherever the stage/tier VALUE changes from one row to the
+        // next in that same order — it never clusters/reorders rows to
+        // group them, since categories/tiers run in parallel on the same
+        // dates and naturally interleave; "Tier"/"Category" remain
+        // available as explicit sort keys (see sortKeys above) for anyone
+        // who wants same-tier rows walked consecutively.
+        groups.map(([label, rows]) => (
           <div key={label} className="tm-sched-group">
-            <div className="tm-sched-group-title">{label}</div>
-            {Array.from(byStage.entries()).map(([stage, stageRows]) => (
-            <div key={stage || '__none__'}>
-              {stage && <div className="tm-sched-stage-title">{stage}</div>}
-              <div className="tm-sched-rows">
-              {stageRows.map(m => {
+            {label && <div className="tm-sched-group-title">{label}</div>}
+            <div className="tm-sched-rows">
+              {rows.map((m, i) => {
                 const idxInAll = matches.findIndex(x => x.id === m.id);
                 const isLive = liveFixtureIds.has(m.id);
+                const stageLabel = fixtureStageLabel(m);
+                const prevStageLabel = i > 0 ? fixtureStageLabel(rows[i - 1]) : undefined;
+                const showDivider = !!stageLabel && stageLabel !== prevStageLabel;
                 return (
+                <Fragment key={m.id}>
+                {showDivider && <div className="tm-sched-stage-title">{stageLabel}</div>}
+                <div className="tm-sched-row-wrap">
                 <div
-                  key={m.id}
                   data-fixture-row={m.id}
-                  className={`tm-sched-row${m.completedAt ? ' tm-sched-row--completed' : ''}${selectedIds.has(m.id) ? ' tm-sched-row--selected' : ''}${editMode ? ' tm-sched-row--draggable' : ''}${draggedFixtureId === m.id ? ' tm-sched-row--dragging' : ''}${dragOverFixtureId === m.id && draggedFixtureId !== m.id ? ' tm-sched-row--drag-over' : ''}${isLive ? ' tm-sched-row--live' : ''}`}
-                  onMouseDown={editMode ? startFixtureDrag(m) : undefined}
-                  title={editMode ? 'Drag onto another slot to swap which match plays there — that slot\'s count/time stays put' : undefined}
+                  className={`tm-sched-row${m.completedAt ? ' tm-sched-row--completed' : ''}${selectedIds.has(m.id) ? ' tm-sched-row--selected' : ''}${canReorder ? ' tm-sched-row--draggable' : ''}${draggedFixtureId === m.id ? ' tm-sched-row--dragging' : ''}${dragOverFixtureId === m.id && draggedFixtureId !== m.id ? ' tm-sched-row--drag-over' : ''}${isLive ? ' tm-sched-row--live' : ''}`}
+                  onMouseDown={canReorder ? startFixtureDrag(m) : undefined}
+                  title={canReorder ? 'Drag onto another slot to swap which match plays there — that slot\'s count/time stays put' : undefined}
                 >
-                  {editMode && (
+                  {canReorder && (
                     <div className="tm-sched-row-move">
                       <button
                         className="tm-sched-row-move-btn"
                         disabled={idxInAll <= 0}
                         title="Swap into the slot above (count/time stays with the slot)"
                         onClick={() => moveFixtureBy(m.id, -1)}
-                      >▲</button>
+                      ><ArrowUp size={12} strokeWidth={2} /></button>
                       <button
                         className="tm-sched-row-move-btn"
                         disabled={idxInAll < 0 || idxInAll >= matches.length - 1}
                         title="Swap into the slot below (count/time stays with the slot)"
                         onClick={() => moveFixtureBy(m.id, 1)}
-                      >▼</button>
+                      ><ArrowDown size={12} strokeWidth={2} /></button>
                     </div>
                   )}
+                  <button
+                    className={`tm-result-expand-btn${expandedIds.has(m.id) ? ' tm-result-expand-btn--open' : ''}`}
+                    title={expandedIds.has(m.id) ? 'Hide details' : 'Show details (score events, cards)'}
+                    onClick={() => toggleExpanded(m.id)}
+                  ><ChevronRight size={14} strokeWidth={2} /></button>
                   <input
                     type="checkbox"
                     className="tm-sched-row-check"
@@ -2237,18 +2988,25 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
                     </span>
                   )}
                   <div className="tm-sched-divider" />
-                  {isLive && <span className="tm-sched-live-badge">● LIVE</span>}
-                  {m.completedAt && <span className="tm-sched-completed-badge">✓ Completed</span>}
+                  {isLive && <span className="tm-sched-live-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Circle size={8} fill="currentColor" stroke="none" /> LIVE</span>}
+                  {m.completedAt && <span className="tm-sched-completed-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Check size={11} strokeWidth={2} /> Completed</span>}
                   <EditableDate value={m.date} onChange={date => updateMatch(m.id, { date })} disabled={!editMode} />
                   <div className="tm-sched-divider" />
 
                   <div className="tm-sched-matchup">
                     <div className="tm-sched-team">
                       <EditableText className="tm-sched-team-name" value={m.teamAName} placeholder="Team A"
-                        onChange={v => updateMatch(m.id, { teamAName: v })} disabled={!editMode} />
+                        // Typing a name directly can't confirm it still
+                        // matches whatever team teamAId used to point at
+                        // (the ScheduleTeamPicker above is the only source
+                        // that knows for sure) — clearing it here instead
+                        // of leaving it stale is what the backfill/repair
+                        // banner then re-resolves from this new name, same
+                        // as any other never-set id.
+                        onChange={v => updateMatch(m.id, { teamAName: v, teamAId: undefined })} disabled={!editMode} />
                       <LogoUrlPicker compact value={m.teamALogo ?? ''} onChange={logo => updateMatch(m.id, { teamALogo: logo })}
                         thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamALogo} color={m.teamAColor} />} tournamentId={tournament.id} disabled={!editMode} />
-                      {editMode && <ScheduleTeamPicker side="A" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamAName: t.name, teamAShortName: t.shortName, teamAColor: t.color, teamALogo: t.logo })} />}
+                      {editMode && <ScheduleTeamPicker side="A" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamAId: t.id, teamAName: t.name, teamAShortName: t.shortName, teamAColor: t.color, teamALogo: t.logo })} />}
                     </div>
                     <div className="tm-sched-vs-col">
                       {m.matchType && (
@@ -2259,7 +3017,7 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
                         }>{m.matchType === 'bye' ? 'BYE' : 'W/O'}</span>
                       )}
                       {hasMultipleVenues && m.venueLabel && (
-                        <span className="tm-sched-venue-badge" title={`Synced from venue: ${m.venueLabel}`}>📍 {m.venueLabel}</span>
+                        <span className="tm-sched-venue-badge" title={`Synced from venue: ${m.venueLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><MapPin size={11} strokeWidth={2} /> {m.venueLabel}</span>
                       )}
                       {m.matchType && m.completedAt ? (
                         <span className="tm-sched-vs tm-sched-score">
@@ -2270,6 +3028,20 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
                       ) : (
                         <span className="tm-sched-vs">VS</span>
                       )}
+                      {editMode && (
+                        <button
+                          className="tm-sched-swap-sides-btn"
+                          title="Swap Team A / Team B (home/away)"
+                          onClick={() => updateMatch(m.id, {
+                            teamAId: m.teamBId, teamAName: m.teamBName, teamAShortName: m.teamBShortName,
+                            teamAColor: m.teamBColor, teamALogo: m.teamBLogo,
+                            teamBId: m.teamAId, teamBName: m.teamAName, teamBShortName: m.teamAShortName,
+                            teamBColor: m.teamAColor, teamBLogo: m.teamALogo,
+                            scoreA: m.scoreB, scoreB: m.scoreA,
+                            walkoverLoser: m.walkoverLoser === 'A' ? 'B' : m.walkoverLoser === 'B' ? 'A' : m.walkoverLoser,
+                          })}
+                        ><ArrowLeftRight size={11} strokeWidth={2} /></button>
+                      )}
                       {editMode ? (
                         <EditableText className="tm-sched-round" value={m.round ?? ''} placeholder="Round"
                           onChange={v => updateMatch(m.id, { round: v })} />
@@ -2278,11 +3050,11 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
                       )}
                     </div>
                     <div className="tm-sched-team tm-sched-team--b">
-                      {editMode && <ScheduleTeamPicker side="B" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamBName: t.name, teamBShortName: t.shortName, teamBColor: t.color, teamBLogo: t.logo })} />}
+                      {editMode && <ScheduleTeamPicker side="B" tournamentId={tournament.id} onPick={t => updateMatch(m.id, { teamBId: t.id, teamBName: t.name, teamBShortName: t.shortName, teamBColor: t.color, teamBLogo: t.logo })} />}
                       <LogoUrlPicker compact value={m.teamBLogo ?? ''} onChange={logo => updateMatch(m.id, { teamBLogo: logo })}
                         thumbSize={{ w: 36, h: 36 }} thumbContent={<ScheduleBadge logo={m.teamBLogo} color={m.teamBColor} />} tournamentId={tournament.id} disabled={!editMode} />
                       <EditableText className="tm-sched-team-name" value={m.teamBName} placeholder="Team B"
-                        onChange={v => updateMatch(m.id, { teamBName: v })} disabled={!editMode} />
+                        onChange={v => updateMatch(m.id, { teamBName: v, teamBId: undefined })} disabled={!editMode} />
                     </div>
                   </div>
 
@@ -2386,27 +3158,38 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
                   <div className="tm-sched-send-col">
                     {editMode ? (
                       armedSwapId === m.id ? (
-                        <button className="tm-sched-send-btn tm-sched-send-btn--cancel" title="Cancel swap" onClick={() => setArmedSwapId(null)}>✕ Cancel</button>
+                        <button className="tm-sched-send-btn tm-sched-send-btn--cancel" title="Cancel swap" onClick={() => setArmedSwapId(null)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><X size={12} strokeWidth={2} /> Cancel</button>
                       ) : armedSwapId ? (
-                        <button className="tm-sched-send-btn tm-sched-send-btn--swap-here" title="Complete the swap with this fixture" onClick={() => { moveFixture(armedSwapId, m.id); setArmedSwapId(null); }}>↔ Swap Here</button>
+                        <button className="tm-sched-send-btn tm-sched-send-btn--swap-here" title="Complete the swap with this fixture" onClick={() => { moveFixture(armedSwapId, m.id); setArmedSwapId(null); }}><ArrowLeftRight size={12} strokeWidth={2} /> Swap Here</button>
                       ) : (
-                        <button className="tm-sched-send-btn" title="Pick this fixture to swap, then click Swap Here on the target" onClick={() => setArmedSwapId(m.id)}>🔄 Swap</button>
+                        <button className="tm-sched-send-btn" title="Pick this fixture to swap, then click Swap Here on the target" onClick={() => setArmedSwapId(m.id)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><RefreshCw size={12} strokeWidth={2} /> Swap</button>
                       )
                     ) : (
                       <ScoreboardSendButton match={m} scoreboards={scoreboards} onSend={id => sendToScoreboard(m, id)} onStop={() => handleStopLive(m)} />
                     )}
                   </div>
 
-                  {editMode && <button className="tm-sched-del" title="Delete fixture" onClick={() => deleteMatch(m.id)}>×</button>}
+                  {editMode && <button className="tm-sched-del" title="Delete fixture" onClick={() => setDeleteFixtureTarget(m)}>×</button>}
                 </div>
+                {expandedIds.has(m.id) && (
+                  <FixtureDetail
+                    m={m}
+                    result={savedResults.find(r => r.sourceScheduleId === m.id)}
+                    editMode={editMode}
+                    periodsTotal={periodsTotal}
+                    onUpdateResult={patch => {
+                      const existing = savedResults.find(r => r.sourceScheduleId === m.id);
+                      if (existing) updateResult(existing.id, patch);
+                    }}
+                  />
+                )}
+                </div>
+                </Fragment>
                 );
               })}
-              </div>
             </div>
-            ))}
           </div>
-          );
-        })
+        ))
       )}
       {draggedFixtureId && dragPos && createPortal(
         (() => {
@@ -2432,12 +3215,336 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
           onCancel={() => setStopTarget(null)}
         />
       )}
+      {deleteFixtureTarget && (
+        <ConfirmModal
+          title="Delete fixture?"
+          message={`This removes "${deleteFixtureTarget.teamAName} vs ${deleteFixtureTarget.teamBName || 'TBD'}" from the schedule permanently. This can't be undone.`}
+          confirmLabel="Delete"
+          danger
+          onConfirm={() => { deleteMatch(deleteFixtureTarget.id); setDeleteFixtureTarget(null); }}
+          onCancel={() => setDeleteFixtureTarget(null)}
+        />
+      )}
+      {pendingRoundSwap && (
+        <ConfirmModal
+          title="Swap fixtures?"
+          message={`"${pendingRoundSwap.fromRound ?? '(no round)'}" and "${pendingRoundSwap.toRound ?? '(no round)'}" will also relabel to match each match's new slot, so round numbering stays in running order — this can shift each fixture's Match # too.`}
+          confirmLabel="Swap"
+          onConfirm={() => { applyFixtureSwap(pendingRoundSwap.fromId, pendingRoundSwap.toId, true); setPendingRoundSwap(null); }}
+          onCancel={() => setPendingRoundSwap(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Quick-start titles for "+ Add Segment" — common non-match items on an
+// event day's running order. Purely a convenience prefill: a segment is
+// just free text (RundownSegment.title), so picking one here is no
+// different from typing it by hand, and the title stays fully editable
+// afterward either way. "Custom…" adds the same blank "New segment" the
+// button used to add unconditionally.
+const RUNDOWN_SEGMENT_PRESETS = [
+  'Break', 'Setup Day', 'Opening Ceremony', 'Warm-up', 'Briefing',
+  'Lunch Break', 'Technical Meeting', 'Medal Ceremony', 'Closing Ceremony', 'End of Day',
+];
+
+// ── Rundown tab: a broadcast-style running order for the whole event day —
+// segments can be freeform (title/time/notes typed in directly) or linked
+// to a real fixture from the Schedule (status/teams/score then follow that
+// fixture automatically — see deriveRundownStatus in rundownStore.ts).
+// Deliberately NOT tournament-scoped, unlike every other tab here — a
+// rundown spans the whole day, which may cross several tournaments.
+function RundownPanel() {
+  const { segments: allSegments, addSegment, updateSegment, deleteSegment } = useRundownStore();
+  const { matches } = useMatchScheduleStore();
+  const [editMode, setEditMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  const segments = useMemo(() => [...allSegments].sort(sortRundownSegments), [allSegments]);
+  const matchById = useMemo(() => new Map(matches.map(m => [m.id, m])), [matches]);
+  const statusOf = (s: RundownSegment) =>
+    deriveRundownStatus(s, s.linkedScheduleMatchId ? matchById.get(s.linkedScheduleMatchId) : undefined);
+
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Group by date only when more than one date is actually in play — a
+  // single-day rundown (the common case) just reads as one flat list.
+  const dateGroups = useMemo(() => {
+    const map = new Map<string, RundownSegment[]>();
+    for (const s of segments) {
+      if (!map.has(s.date)) map.set(s.date, []);
+      map.get(s.date)!.push(s);
+    }
+    return Array.from(map.entries());
+  }, [segments]);
+  const showDateHeaders = dateGroups.length > 1;
+
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  const dragStateRef = useRef<{ id: string; startX: number; startY: number; active: boolean } | null>(null);
+
+  // Plain splice reorder (not SchedulePanel's content-preserving slot swap —
+  // a segment's own time/notes/link should travel WITH it when moved, there's
+  // no fixed-slot concept here).
+  const moveSegment = (draggedId: string, targetId: string) => {
+    if (draggedId === targetId) return;
+    const ordered = segments;
+    const fromIdx = ordered.findIndex(s => s.id === draggedId);
+    const toIdx = ordered.findIndex(s => s.id === targetId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    const reordered = [...ordered];
+    const [moved] = reordered.splice(fromIdx, 1);
+    reordered.splice(toIdx, 0, moved);
+    reordered.forEach((s, i) => { if (s.sortIndex !== i) updateSegment(s.id, { sortIndex: i }); });
+  };
+  const moveSegmentBy = (id: string, direction: -1 | 1) => {
+    const idx = segments.findIndex(s => s.id === id);
+    const neighbor = segments[idx + direction];
+    if (idx === -1 || !neighbor) return;
+    moveSegment(id, neighbor.id);
+  };
+
+  // Native HTML5 drag-and-drop doesn't fire reliably in this app's WebView
+  // (same finding as SchedulePanel's own fixture drag) — plain mouse events
+  // instead: press, move past a small threshold to arm it, hit-test whatever
+  // row is under the cursor via elementFromPoint.
+  const startSegmentDrag = (s: RundownSegment) => (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('input, button, select, textarea, a')) return;
+    const startX = e.clientX, startY = e.clientY;
+    dragStateRef.current = { id: s.id, startX, startY, active: false };
+    const onMove = (ev: MouseEvent) => {
+      const st = dragStateRef.current;
+      if (!st) return;
+      if (!st.active) {
+        if (Math.hypot(ev.clientX - st.startX, ev.clientY - st.startY) < 6) return;
+        st.active = true;
+        setDraggedId(st.id);
+        document.body.style.userSelect = 'none';
+      }
+      ev.preventDefault();
+      setDragPos({ x: ev.clientX, y: ev.clientY });
+      const under = document.elementFromPoint(ev.clientX, ev.clientY);
+      const rowEl = under?.closest('[data-rundown-row]') as HTMLElement | null;
+      const overId = rowEl?.getAttribute('data-rundown-row') ?? null;
+      setDragOverId(overId && overId !== st.id ? overId : null);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+      const st = dragStateRef.current;
+      if (st?.active) {
+        setDragOverId(overId => {
+          if (overId) moveSegment(st.id, overId);
+          return null;
+        });
+      }
+      dragStateRef.current = null;
+      setDraggedId(null);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  const toggleSelected = (id: string) => setSelectedIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const selectAll = () => setSelectedIds(new Set(segments.map(s => s.id)));
+  const deselectAll = () => setSelectedIds(new Set());
+  const deleteSelected = () => { for (const id of selectedIds) deleteSegment(id); setSelectedIds(new Set()); };
+  const allSelected = segments.length > 0 && selectedIds.size === segments.length;
+
+  const handleAdd = (title: string) => {
+    const today = new Date();
+    const date = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    addSegment({ date, title });
+  };
+
+  const renderRow = (s: RundownSegment) => {
+    const linkedMatch = s.linkedScheduleMatchId ? matchById.get(s.linkedScheduleMatchId) : undefined;
+    const orphaned = !!s.linkedScheduleMatchId && !linkedMatch;
+    const status = statusOf(s);
+    const idx = segments.findIndex(x => x.id === s.id);
+    const scheduledTs = parseScheduledDateTime(s.date, s.time);
+    const isLate = status === 'upcoming' && scheduledTs !== null && now > scheduledTs;
+
+    return (
+      <div key={s.id} className="tm-sched-row-wrap">
+        <div
+          data-rundown-row={s.id}
+          className={`tm-sched-row${status === 'done' ? ' tm-sched-row--completed' : ''}${selectedIds.has(s.id) ? ' tm-sched-row--selected' : ''}${editMode ? ' tm-sched-row--draggable' : ''}${draggedId === s.id ? ' tm-sched-row--dragging' : ''}${dragOverId === s.id && draggedId !== s.id ? ' tm-sched-row--drag-over' : ''}${status === 'live' ? ' tm-sched-row--live' : ''}`}
+          onMouseDown={editMode ? startSegmentDrag(s) : undefined}
+          title={editMode ? 'Drag onto another slot to reorder' : undefined}
+        >
+          {editMode && (
+            <div className="tm-sched-row-move">
+              <button className="tm-sched-row-move-btn" disabled={idx <= 0} title="Move up" onClick={() => moveSegmentBy(s.id, -1)}><ArrowUp size={12} strokeWidth={2} /></button>
+              <button className="tm-sched-row-move-btn" disabled={idx < 0 || idx >= segments.length - 1} title="Move down" onClick={() => moveSegmentBy(s.id, 1)}><ArrowDown size={12} strokeWidth={2} /></button>
+            </div>
+          )}
+          <input
+            type="checkbox"
+            className="tm-sched-row-check"
+            checked={selectedIds.has(s.id)}
+            onChange={() => toggleSelected(s.id)}
+            title="Select for bulk delete"
+            style={editMode ? undefined : { visibility: 'hidden' }}
+          />
+          <EditableDate value={s.date} onChange={date => updateSegment(s.id, { date })} disabled={!editMode} />
+          <EditableTime value={s.time} onChange={time => updateSegment(s.id, { time })} disabled={!editMode} />
+          <div className="tm-sched-divider" />
+
+          {status === 'live' && <span className="tm-sched-live-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Circle size={8} fill="currentColor" stroke="none" /> LIVE</span>}
+          {status === 'done' && <span className="tm-sched-completed-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><Check size={11} strokeWidth={2} /> Done</span>}
+          {isLate && <span className="tm-sched-venue-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, color: '#ff6b5b' }}><AlertTriangle size={11} strokeWidth={2} /> {formatLate(now - scheduledTs!)} late</span>}
+
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {linkedMatch ? (
+                <span style={{ fontWeight: 700, fontSize: 12 }}>{linkedMatch.teamAName} vs {linkedMatch.teamBName}</span>
+              ) : (
+                <EditableText className="tm-sched-team-name" value={s.title} placeholder="Segment title" onChange={v => updateSegment(s.id, { title: v })} disabled={!editMode} />
+              )}
+              {s.linkedScheduleMatchId && (
+                orphaned
+                  ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, color: '#ff6b5b', flexShrink: 0 }}><AlertTriangle size={11} strokeWidth={2} /> fixture missing</span>
+                  : <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}><Link2 size={11} strokeWidth={2} /> linked</span>
+              )}
+            </div>
+            {editMode && (
+              <EditableText value={s.notes ?? ''} placeholder="Notes" onChange={v => updateSegment(s.id, { notes: v })} />
+            )}
+          </div>
+
+          {editMode && (
+            <input
+              type="number" min={0} className="tm-input" style={{ width: 56 }}
+              value={s.durationMin ?? ''} placeholder="min"
+              title="Planned duration in minutes"
+              onChange={e => updateSegment(s.id, { durationMin: e.target.value ? Number(e.target.value) : undefined })}
+            />
+          )}
+
+          {editMode && (
+            s.linkedScheduleMatchId ? (
+              <button className="tm-io-btn" onClick={() => updateSegment(s.id, { linkedScheduleMatchId: undefined })}>Unlink</button>
+            ) : (
+              <select
+                className="tm-input" style={{ width: 150 }} value=""
+                title="Link this segment to a real fixture — its status/teams/score will then follow that fixture automatically"
+                onChange={e => {
+                  const m = matches.find(x => x.id === e.target.value);
+                  if (m) updateSegment(s.id, { linkedScheduleMatchId: m.id, title: `${m.teamAName} vs ${m.teamBName}` });
+                }}
+              >
+                <option value="">Link to fixture…</option>
+                {matches.map(m => <option key={m.id} value={m.id}>{m.date}{m.time ? ` ${m.time}` : ''} — {m.teamAName} vs {m.teamBName}</option>)}
+              </select>
+            )
+          )}
+
+          <button
+            className="tm-result-expand-btn"
+            title="Delete segment"
+            onClick={() => deleteSegment(s.id)}
+            style={editMode ? undefined : { visibility: 'hidden' }}
+          ><X size={14} strokeWidth={2} /></button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="tm-win-content" style={{ padding: 16, overflowY: 'auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          A running order for the whole event day — spans every tournament, not just one.
+        </div>
+        <button
+          className={`tm-io-btn${editMode ? ' tm-io-btn--ok' : ''}`}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          onClick={() => setEditMode(v => !v)}
+        >
+          {editMode ? <><Check size={14} strokeWidth={2} /> Done Editing</> : <><Pencil size={14} strokeWidth={2} /> Edit</>}
+        </button>
+      </div>
+
+      {editMode && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="tm-io-btn" onClick={selectAll} disabled={segments.length === 0 || allSelected} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><CheckSquare size={14} strokeWidth={2} /> Select All</button>
+            <button className="tm-io-btn" onClick={deselectAll} disabled={selectedIds.size === 0} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Square size={14} strokeWidth={2} /> Deselect All</button>
+          </div>
+          <select
+            className="tm-sidebar-new-btn"
+            value=""
+            title="Add a rundown item — pick a common one or add a custom segment"
+            onChange={e => { if (e.target.value) handleAdd(e.target.value === '__custom__' ? 'New segment' : e.target.value); }}
+          >
+            <option value="" disabled>＋ Add Segment</option>
+            <option value="__custom__">Custom…</option>
+            {RUNDOWN_SEGMENT_PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </div>
+      )}
+
+      {editMode && selectedIds.size > 0 && (
+        <div className="tm-draw-vmix-cfg" style={{ marginBottom: 12 }}>
+          <span className="tm-groups-label">{selectedIds.size} selected —</span>
+          <ConfirmButton
+            className="tm-io-btn tm-io-btn--danger"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            label={<><Trash2 size={14} strokeWidth={2} /> Delete {selectedIds.size}</>}
+            confirmLabel="Delete"
+            message={`Delete ${selectedIds.size} selected segment${selectedIds.size !== 1 ? 's' : ''}?`}
+            onConfirm={deleteSelected}
+          />
+          <button className="tm-io-btn" onClick={deselectAll}>Clear Selection</button>
+        </div>
+      )}
+
+      {segments.length === 0 ? (
+        <div className="tm-win-placeholder">
+          <span>No rundown segments yet — add one to start planning the day.</span>
+        </div>
+      ) : (
+        dateGroups.map(([date, rows]) => (
+          <div key={date} className="tm-sched-group">
+            {showDateHeaders && <div className="tm-sched-group-title">{date}</div>}
+            <div className="tm-sched-rows">
+              {rows.map(renderRow)}
+            </div>
+          </div>
+        ))
+      )}
+
+      {draggedId && dragPos && createPortal(
+        (() => {
+          const ds = segments.find(x => x.id === draggedId);
+          if (!ds) return null;
+          return (
+            <div className="tm-sched-drag-ghost" style={{ left: dragPos.x, top: dragPos.y }}>
+              {ds.title}
+            </div>
+          );
+        })(),
+        document.body
+      )}
     </div>
   );
 }
 
 // ── Results tab: saved match results belonging to the selected tournament ─────
-// Populated by a scoreboard's "💾 Save Result" (or the auto-save-on-overwrite
+// Populated by a scoreboard's "Save Result" (or the auto-save-on-overwrite
 // guard) — this tab just surfaces what's already been recorded.
 function formatSavedAt(ms: number): string {
   const d = new Date(ms);
@@ -2458,13 +3565,147 @@ function mergeCountRows(a: Record<string, number>, b: Record<string, number>): {
     .sort((x, y) => (y.a + y.b) - (x.a + x.b));
 }
 
+type ScoreLogEntry = NonNullable<SavedMatchResult['scoreLog']>[number];
+type CardEntry = NonNullable<SavedMatchResult['cards']>[number];
+
+// Per-event editable list for a result's scoreLog (who scored what, and
+// when) and cards — the aggregate breakdown table above only ever showed
+// counts per action type, never which player actually scored, so this is
+// the only place "who made the score" can be seen or corrected at all.
+// Read-only when editMode is off, matching every other field in these two
+// tabs (Schedule/Results share the same edit-mode convention).
+function ScoreEventsEditor({ r, editMode, onUpdate, periodsTotal }: {
+  r: SavedMatchResult; editMode: boolean; onUpdate: (patch: Partial<SavedMatchResult>) => void; periodsTotal: number;
+}) {
+  const scoreLog = r.scoreLog ?? [];
+  const cards = r.cards ?? [];
+  const teamLabel = (team: 'A' | 'B') => team === 'A' ? (r.teamAShortName || r.teamAName) : (r.teamBShortName || r.teamBName);
+  const teamColor = (team: 'A' | 'B') => team === 'A' ? r.teamAColor : r.teamBColor;
+
+  const updateLog = (i: number, patch: Partial<ScoreLogEntry>) =>
+    onUpdate({ scoreLog: scoreLog.map((e, idx) => idx === i ? { ...e, ...patch } : e) });
+  const addLog = () => onUpdate({ scoreLog: [...scoreLog, { team: 'A', action: 'Try', points: 5, period: periodsTotal >= 1 ? 1 : undefined }] });
+
+  const updateCard = (i: number, patch: Partial<CardEntry>) =>
+    onUpdate({ cards: cards.map((c, idx) => idx === i ? { ...c, ...patch } : c) });
+  const addCard = () => onUpdate({ cards: [...cards, { team: 'A', type: 'yellow' }] });
+
+  // Delete is always available regardless of editMode — fixing a wrongly
+  // attributed/duplicate event shouldn't require first toggling the tab's
+  // broader field-edit mode. But it's still permanent, so it goes through
+  // the same confirm step as every other destructive action here.
+  const [pendingDelete, setPendingDelete] = useState<{ type: 'log' | 'card'; index: number } | null>(null);
+  const confirmDelete = () => {
+    if (!pendingDelete) return;
+    if (pendingDelete.type === 'log') onUpdate({ scoreLog: scoreLog.filter((_, idx) => idx !== pendingDelete.index) });
+    else onUpdate({ cards: cards.filter((_, idx) => idx !== pendingDelete.index) });
+    setPendingDelete(null);
+  };
+
+  if (!editMode && scoreLog.length === 0 && cards.length === 0) return null;
+
+  return (
+    <>
+      {(editMode || scoreLog.length > 0) && (
+        <div className="tm-result-log">
+          <div className="tm-result-log-hdr">
+            <span>Score Events</span>
+            {editMode && <button className="tm-io-btn" onClick={addLog}>+ Add</button>}
+          </div>
+          {scoreLog.length === 0 && <div className="tm-result-detail-empty">No score events recorded.</div>}
+          {scoreLog.map((e, i) => (
+            <div key={i} className="tm-result-log-row">
+              {editMode ? (
+                <>
+                  <select className="field-input" style={{ width: 'auto' }} value={e.team} onChange={ev => updateLog(i, { team: ev.target.value as 'A' | 'B' })}>
+                    <option value="A">{r.teamAShortName || r.teamAName}</option>
+                    <option value="B">{r.teamBShortName || r.teamBName}</option>
+                  </select>
+                  <input className="field-input" style={{ width: 90 }} value={e.action} placeholder="Action"
+                    onChange={ev => updateLog(i, { action: ev.target.value })} />
+                  <input className="field-input" style={{ width: 48 }} type="number" value={e.points} placeholder="Pts"
+                    onChange={ev => updateLog(i, { points: Number(ev.target.value) || 0 })} />
+                  <input className="field-input" style={{ width: 130 }} value={e.scorer ?? ''} placeholder="Scorer name"
+                    onChange={ev => updateLog(i, { scorer: ev.target.value })} />
+                  <input className="field-input" style={{ width: 48 }} value={e.jerseyNo ?? ''} placeholder="#"
+                    onChange={ev => updateLog(i, { jerseyNo: ev.target.value })} />
+                  <input className="field-input" style={{ width: 64 }} value={e.timeStr ?? ''} placeholder="Time"
+                    onChange={ev => updateLog(i, { timeStr: ev.target.value })} />
+                  <input className="field-input" style={{ width: 44 }} type="number" min={1} max={periodsTotal || undefined}
+                    value={e.period ?? ''} placeholder="Per." title="Period (half/quarter) this happened in"
+                    onChange={ev => updateLog(i, { period: ev.target.value ? Number(ev.target.value) : undefined })} />
+                </>
+              ) : (
+                <>
+                  <span className="tm-result-log-team" style={{ color: teamColor(e.team) }}>{teamLabel(e.team)}</span>
+                  <span className="tm-result-log-action">{e.action}</span>
+                  <span className="tm-result-log-pts">{e.points}pt</span>
+                  <span className="tm-result-log-scorer">{e.scorer ? `#${e.jerseyNo ?? '—'} ${e.scorer}` : '— no scorer picked —'}</span>
+                  {e.period !== undefined && <span className="tm-result-log-period">{periodLabel(e.period, periodsTotal || 2)}</span>}
+                  {e.timeStr && <span className="tm-result-log-time">{e.timeStr}</span>}
+                </>
+              )}
+              <button className="tm-result-log-del" title="Remove event" onClick={() => setPendingDelete({ type: 'log', index: i })}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {(editMode || cards.length > 0) && (
+        <div className="tm-result-log">
+          <div className="tm-result-log-hdr">
+            <span>Cards</span>
+            {editMode && <button className="tm-io-btn" onClick={addCard}>+ Add</button>}
+          </div>
+          {cards.length === 0 && <div className="tm-result-detail-empty">No cards recorded.</div>}
+          {cards.map((c, i) => (
+            <div key={i} className="tm-result-log-row">
+              {editMode ? (
+                <>
+                  <select className="field-input" style={{ width: 'auto' }} value={c.team} onChange={ev => updateCard(i, { team: ev.target.value as 'A' | 'B' })}>
+                    <option value="A">{r.teamAShortName || r.teamAName}</option>
+                    <option value="B">{r.teamBShortName || r.teamBName}</option>
+                  </select>
+                  <select className="field-input" style={{ width: 'auto' }} value={c.type} onChange={ev => updateCard(i, { type: ev.target.value as CardEntry['type'] })}>
+                    <option value="yellow">Yellow</option>
+                    <option value="orange">Orange</option>
+                    <option value="red">Red</option>
+                  </select>
+                </>
+              ) : (
+                <>
+                  <span className="tm-result-log-team" style={{ color: teamColor(c.team) }}>{teamLabel(c.team)}</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><CardSquare type={c.type} /> {c.type === 'yellow' ? 'Yellow' : c.type === 'orange' ? 'Orange' : 'Red'}</span>
+                </>
+              )}
+              <button className="tm-result-log-del" title="Remove card" onClick={() => setPendingDelete({ type: 'card', index: i })}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {pendingDelete && (
+        <ConfirmModal
+          title={pendingDelete.type === 'log' ? 'Remove score event?' : 'Remove card?'}
+          message="This can't be undone."
+          confirmLabel="Remove"
+          danger
+          onConfirm={confirmDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
+    </>
+  );
+}
+
 // Expanded detail for a single result — point-type breakdown, shootout
-// outcome, and card counts, whichever were actually captured for that match
-// (older/manually-entered results may have none of this, hence the empty
-// state). Reuses the scoreboard widget's `.wgt-h2h-table` styling so the
-// "two teams either side of a bordered label column" look stays consistent
-// across the app.
-function ResultDetail({ r }: { r: SavedMatchResult }) {
+// outcome, card counts, and (below that) the full editable list of
+// individual score events/cards, whichever were actually captured for that
+// match (older/manually-entered results may have none of this, hence the
+// empty state). Reuses the scoreboard widget's `.wgt-h2h-table` styling so
+// the "two teams either side of a bordered label column" look stays
+// consistent across the app.
+function ResultDetail({ r, editMode, onUpdate, periodsTotal }: {
+  r: SavedMatchResult; editMode: boolean; onUpdate: (patch: Partial<SavedMatchResult>) => void; periodsTotal: number;
+}) {
   const aBreakdown: Record<string, number> = {};
   const bBreakdown: Record<string, number> = {};
   for (const e of r.scoreLog ?? []) {
@@ -2483,15 +3724,23 @@ function ResultDetail({ r }: { r: SavedMatchResult }) {
   const hasCards = aCards.yellow + aCards.orange + aCards.red + bCards.yellow + bCards.orange + bCards.red > 0;
   const hasTable = rows.length > 0 || hasCards;
 
-  if (!hasTable && !r.shootout) {
+  if (!hasTable && !r.shootout && !r.timerSummary && !(r.lineup?.length) && !editMode && (r.scoreLog ?? []).length === 0 && (r.cards ?? []).length === 0) {
     return <div className="tm-result-detail"><div className="tm-result-detail-empty">No further detail captured for this match.</div></div>;
   }
 
   return (
     <div className="tm-result-detail">
+      {r.timerSummary && (
+        <div className="tm-result-detail-timer" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <Timer size={12} strokeWidth={2} /> {formatTime(r.timerSummary.elapsedMs, 'mm:ss')} played
+          {r.timerSummary.periodsPlayed > 1 && ` · ${r.timerSummary.periodsPlayed} periods`}
+          {r.timerSummary.wentToExtraTime && ' · went to extra time'}
+          {r.timerSummary.wentToAfterEt && ' · decided after ET'}
+        </div>
+      )}
       {r.shootout && (
-        <div className="tm-result-detail-shootout">
-          🥅 Decided on penalties: <span style={{ color: r.teamAColor }}>{r.shootout.scoreA}</span>
+        <div className="tm-result-detail-shootout" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <Target size={12} strokeWidth={2} /> Decided on penalties: <span style={{ color: r.teamAColor }}>{r.shootout.scoreA}</span>
           {' – '}
           <span style={{ color: r.teamBColor }}>{r.shootout.scoreB}</span>
         </div>
@@ -2507,24 +3756,115 @@ function ResultDetail({ r }: { r: SavedMatchResult }) {
               </tr>
             ))}
             {aCards.yellow + bCards.yellow > 0 && (
-              <tr className="wgt-h2h-row"><td className="wgt-h2h-cell--a" style={{ color: r.teamAColor }}>{aCards.yellow}</td><td className="wgt-h2h-cell--label">🟨 Yellow</td><td className="wgt-h2h-cell--b" style={{ color: r.teamBColor }}>{bCards.yellow}</td></tr>
+              <tr className="wgt-h2h-row"><td className="wgt-h2h-cell--a" style={{ color: r.teamAColor }}>{aCards.yellow}</td><td className="wgt-h2h-cell--label" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><CardSquare type="yellow" /> Yellow</td><td className="wgt-h2h-cell--b" style={{ color: r.teamBColor }}>{bCards.yellow}</td></tr>
             )}
             {aCards.orange + bCards.orange > 0 && (
-              <tr className="wgt-h2h-row"><td className="wgt-h2h-cell--a" style={{ color: r.teamAColor }}>{aCards.orange}</td><td className="wgt-h2h-cell--label">🟧 Orange</td><td className="wgt-h2h-cell--b" style={{ color: r.teamBColor }}>{bCards.orange}</td></tr>
+              <tr className="wgt-h2h-row"><td className="wgt-h2h-cell--a" style={{ color: r.teamAColor }}>{aCards.orange}</td><td className="wgt-h2h-cell--label" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><CardSquare type="orange" /> Orange</td><td className="wgt-h2h-cell--b" style={{ color: r.teamBColor }}>{bCards.orange}</td></tr>
             )}
             {aCards.red + bCards.red > 0 && (
-              <tr className="wgt-h2h-row"><td className="wgt-h2h-cell--a" style={{ color: r.teamAColor }}>{aCards.red}</td><td className="wgt-h2h-cell--label">🟥 Red</td><td className="wgt-h2h-cell--b" style={{ color: r.teamBColor }}>{bCards.red}</td></tr>
+              <tr className="wgt-h2h-row"><td className="wgt-h2h-cell--a" style={{ color: r.teamAColor }}>{aCards.red}</td><td className="wgt-h2h-cell--label" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><CardSquare type="red" /> Red</td><td className="wgt-h2h-cell--b" style={{ color: r.teamBColor }}>{bCards.red}</td></tr>
             )}
           </tbody>
         </table>
       )}
+      {(r.lineup?.length ?? 0) > 0 && <LineupSection r={r} />}
+      <ScoreEventsEditor r={r} editMode={editMode} onUpdate={onUpdate} periodsTotal={periodsTotal} />
+    </div>
+  );
+}
+
+const CARD_COLORS: Record<'yellow' | 'orange' | 'red', string> = { yellow: '#f1c40f', orange: '#e67e22', red: '#e74c3c' };
+function CardSquare({ type }: { type: 'yellow' | 'orange' | 'red' }) {
+  return <Square size={11} fill={CARD_COLORS[type]} stroke="none" />;
+}
+
+// Who actually played, per side — captured from the linked Player List
+// widget(s) at save time (see buildResultFromConfig's `lineup` field).
+// Starters and subs-used are listed separately; a card icon is appended to
+// any player who also appears in `r.cards` for that same jersey.
+function LineupSection({ r }: { r: SavedMatchResult }) {
+  const { simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker } = useAppSettings();
+  const dispName = (name: string) => simplifyPlayerName(name, { simplifyMuhammad: simplifyMuhammadNames, firstNameOnly: simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker });
+  const cardsByPlayer = new Map<string, ('yellow' | 'orange' | 'red')[]>();
+  for (const c of r.cards ?? []) {
+    if (!c.playerId) continue;
+    cardsByPlayer.set(c.playerId, [...(cardsByPlayer.get(c.playerId) ?? []), c.type]);
+  }
+  const side = (team: 'A' | 'B') => {
+    const players = (r.lineup ?? []).filter(p => p.team === team);
+    const starters = players.filter(p => p.section === 'starter');
+    const subs = players.filter(p => p.section === 'sub');
+    return (
+      <div className="tm-result-lineup-col">
+        <div className="tm-result-lineup-team" style={{ color: team === 'A' ? r.teamAColor : r.teamBColor }}>
+          {team === 'A' ? r.teamAName : r.teamBName}
+        </div>
+        {starters.length > 0 && (
+          <>
+            <div className="tm-result-lineup-section">Starters</div>
+            {starters.map(p => (
+              <div className="tm-result-lineup-player" key={p.playerId}>
+                <span className="tm-result-lineup-no">{p.jerseyNo || '—'}</span>
+                <span>{dispName(p.name)}</span>
+                {(cardsByPlayer.get(p.playerId) ?? []).map((t, i) => <CardSquare key={i} type={t} />)}
+              </div>
+            ))}
+          </>
+        )}
+        {subs.filter(p => p.subbedOn).length > 0 && (
+          <>
+            <div className="tm-result-lineup-section">Subs used</div>
+            {subs.filter(p => p.subbedOn).map(p => (
+              <div className="tm-result-lineup-player" key={p.playerId}>
+                <span className="tm-result-lineup-no">{p.jerseyNo || '—'}</span>
+                <span>{dispName(p.name)}</span>
+                {(cardsByPlayer.get(p.playerId) ?? []).map((t, i) => <CardSquare key={i} type={t} />)}
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    );
+  };
+  return (
+    <div className="tm-result-lineup">
+      {side('A')}
+      {side('B')}
+    </div>
+  );
+}
+
+// Expanded detail for a single Schedule-tab fixture — a scheduled fixture
+// itself has no scoreLog/cards (those only exist once a result is saved),
+// so this looks up that fixture's saved result (if any) via
+// sourceScheduleId and reuses the exact same editable score-events/cards
+// list Results uses, so "who scored" can be corrected from either tab
+// without having to go find the same match in the other one.
+function FixtureDetail({ result, editMode, onUpdateResult, periodsTotal }: {
+  m: ScheduledMatch; result: SavedMatchResult | undefined; editMode: boolean;
+  onUpdateResult: (patch: Partial<SavedMatchResult>) => void; periodsTotal: number;
+}) {
+  if (!result) {
+    return (
+      <div className="tm-result-detail">
+        <div className="tm-result-detail-empty">Not completed yet — score events and cards will show here once a result is saved for this fixture.</div>
+      </div>
+    );
+  }
+  return (
+    <div className="tm-result-detail">
+      <ScoreEventsEditor r={result} editMode={editMode} onUpdate={onUpdateResult} periodsTotal={periodsTotal} />
     </div>
   );
 }
 
 function ResultsPanel({ tournament }: { tournament: Tournament }) {
   const { results: allResults, updateResult, deleteResult } = useMatchResultsStore();
+  const periodsTotal = (tournament.settings ?? SPORT_DEFAULTS[tournament.sport]).periods;
   const [editMode, setEditMode] = useState(false);
+  // Same reasoning as the Schedule tab's fixture delete — a permanent,
+  // one-click-away destructive action gets a confirm step.
+  const [deleteResultTarget, setDeleteResultTarget] = useState<SavedMatchResult | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const toggleExpanded = (id: string) => setExpandedIds(prev => {
     const next = new Set(prev);
@@ -2572,33 +3912,33 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
           ))}
         </select>
         {resultsSyncState !== 'idle' && (
-          <span style={{ fontSize: 11, color: resultsSyncState === 'error' ? 'var(--red)' : 'var(--text-muted)' }}>
-            {resultsSyncState === 'busy' ? '…' : resultsSyncState === 'error' ? `⚠ ${resultsSyncMsg}` : `✓ ${resultsSyncMsg}`}
+          <span style={{ fontSize: 11, color: resultsSyncState === 'error' ? 'var(--red)' : 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            {resultsSyncState === 'busy' ? '…' : resultsSyncState === 'error' ? <><AlertTriangle size={12} strokeWidth={2} /> {resultsSyncMsg}</> : <><Check size={12} strokeWidth={2} /> {resultsSyncMsg}</>}
           </span>
         )}
         <button className="tm-io-btn" disabled={resultsSyncState === 'busy'} title="Pull just this tournament's results from the cloud (doesn't touch fixtures/teams)"
-          onClick={() => runResultsSync('pull')}>
-          ⬇ Pull Results
+          onClick={() => runResultsSync('pull')} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <ArrowDown size={14} strokeWidth={2} /> Pull Results
         </button>
         <button className="tm-io-btn" disabled={resultsSyncState === 'busy'} title="Push just this tournament's results to the cloud (doesn't touch fixtures/teams)"
-          onClick={() => runResultsSync('push')}>
-          ⬆ Push Results
+          onClick={() => runResultsSync('push')} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <ArrowUp size={14} strokeWidth={2} /> Push Results
         </button>
         {results.length > 0 && (
           <>
-            <button className={`tm-io-btn${editMode ? ' tm-io-btn--ok' : ''}`} onClick={() => setEditMode(v => !v)}>
-              {editMode ? '✓ Done Editing' : '✏️ Edit'}
+            <button className={`tm-io-btn${editMode ? ' tm-io-btn--ok' : ''}`} onClick={() => setEditMode(v => !v)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              {editMode ? <><Check size={14} strokeWidth={2} /> Done Editing</> : <><Pencil size={14} strokeWidth={2} /> Edit</>}
             </button>
             <button className="tm-io-btn" title="Export results as CSV (Excel compatible)"
-              onClick={() => exportResultsCSV(results, tournament.name)}>
-              ↓ Export CSV
+              onClick={() => exportResultsCSV(results, tournament.name)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <ArrowDown size={14} strokeWidth={2} /> Export CSV
             </button>
           </>
         )}
       </div>
       {results.length === 0 ? (
         <div className="tm-win-placeholder">
-          <span>No saved results yet for this tournament — use "💾 Save Result" on a linked scoreboard widget.</span>
+          <span>No saved results yet for this tournament — use "Save Result" on a linked scoreboard widget.</span>
         </div>
       ) : (
       <div className="tm-sched-rows">
@@ -2609,7 +3949,7 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
               className={`tm-result-expand-btn${expandedIds.has(r.id) ? ' tm-result-expand-btn--open' : ''}`}
               title={expandedIds.has(r.id) ? 'Hide details' : 'Show details (score breakdown, shootout, cards)'}
               onClick={() => toggleExpanded(r.id)}
-            >▸</button>
+            ><ChevronRight size={14} strokeWidth={2} /></button>
             {r.sourceScheduleId && matchNumbers.get(r.sourceScheduleId) && (
               <span className="tm-sched-matchnum-badge" title="Auto match number (Match # Prefix + venue letter + running sequence) — same as the Schedule tab">
                 {matchNumbers.get(r.sourceScheduleId)}
@@ -2629,7 +3969,7 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
                   <span className="tm-sched-type-badge">{r.matchType === 'bye' ? 'BYE' : 'W/O'}</span>
                 )}
                 {hasMultipleVenues && r.venueLabel && (
-                  <span className="tm-sched-venue-badge" title={`Synced from venue: ${r.venueLabel}`}>📍 {r.venueLabel}</span>
+                  <span className="tm-sched-venue-badge" title={`Synced from venue: ${r.venueLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}><MapPin size={11} strokeWidth={2} /> {r.venueLabel}</span>
                 )}
                 <span className="tm-sched-vs tm-sched-score">
                   <EditableText value={String(r.scoreA)} onChange={v => updateResult(r.id, { scoreA: Number(v) || 0 })} disabled={!editMode} />
@@ -2665,12 +4005,22 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
               <span className="tm-sched-time-tz">End Time</span>
             </div>
 
-            {editMode && <button className="tm-sched-del" title="Delete result" onClick={() => deleteResult(r.id)}>×</button>}
+            {editMode && <button className="tm-sched-del" title="Delete result" onClick={() => setDeleteResultTarget(r)}>×</button>}
           </div>
-          {expandedIds.has(r.id) && <ResultDetail r={r} />}
+          {expandedIds.has(r.id) && <ResultDetail r={r} editMode={editMode} onUpdate={patch => updateResult(r.id, patch)} periodsTotal={periodsTotal} />}
           </div>
         ))}
       </div>
+      )}
+      {deleteResultTarget && (
+        <ConfirmModal
+          title="Delete result?"
+          message={`This permanently removes the saved result for "${deleteResultTarget.teamAName} vs ${deleteResultTarget.teamBName}" (${deleteResultTarget.scoreA}–${deleteResultTarget.scoreB}), including its score log and cards. This can't be undone.`}
+          confirmLabel="Delete"
+          danger
+          onConfirm={() => { deleteResult(deleteResultTarget.id); setDeleteResultTarget(null); }}
+          onCancel={() => setDeleteResultTarget(null)}
+        />
       )}
     </div>
   );
@@ -2746,6 +4096,23 @@ export function computeStandings(teams: SavedTeam[], results: SavedMatchResult[]
   return Array.from(rows.values()).sort((a, b) =>
     b.pts - a.pts || (b.pf - b.pa) - (a.pf - a.pa) || b.pf - a.pf
   );
+}
+
+// A result whose originating fixture was a knockout-stage/bracket match
+// (Semifinal, Final, 3rd Place Playoff, a ranked-placement decider, etc.)
+// must never count toward GROUP standings — otherwise two group-mates who
+// happen to meet again later in the bracket (or a wildcard placement match)
+// would have that later result silently double as a group-stage result too.
+// Reuses extractKnockoutStage's own group/round parsing rather than
+// duplicating it — SavedMatchResult carries the same group/round shape as
+// ScheduledMatch. A result with no group/tier at all (saved before those
+// fields existed, or never linked to a fixture) falls through to
+// extractKnockoutStage's round-text fallback, which already recognizes
+// most knockout stages by their round text alone; the one residual gap is a
+// legacy 3rd-place result with no round-text equivalent for that marker,
+// which stays (incorrectly) classified as pool-stage.
+export function isPoolStageResult(r: SavedMatchResult): boolean {
+  return !extractKnockoutStage(r) && r.group !== '3rd Place';
 }
 
 export function StandingsTable({ title, rows, onTeamClick }: { title: string; rows: StandingRow[]; onTeamClick?: (name: string) => void }) {
@@ -2833,7 +4200,8 @@ function TeamInfoModal({ tournament, teamName, category, onClose }: { tournament
     const scopeTeams = allTeams.filter(t => t.tournamentId === tournament.id &&
       (team.group ? t.group === team.group : true) &&
       (team.category ? t.category === team.category : true));
-    return computeStandings(scopeTeams, results, settings).find(row => row.teamId === team.id) ?? null;
+    // Only pool-stage results count toward this team's standing row — see isPoolStageResult.
+    return computeStandings(scopeTeams, results.filter(isPoolStageResult), settings).find(row => row.teamId === team.id) ?? null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [team, allTeams, tournament.id, tournament.settings, tournament.sport, results]);
 
@@ -2886,7 +4254,7 @@ function TeamInfoModal({ tournament, teamName, category, onClose }: { tournament
           </div>
         )}
 
-        <div className="tm-team-info-section-title">🕐 Match History{history.length > 0 ? ` (${history.length})` : ''}</div>
+        <div className="tm-team-info-section-title" style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Clock size={14} strokeWidth={2} /> Match History{history.length > 0 ? ` (${history.length})` : ''}</div>
         {history.length === 0 ? (
           <div className="tm-team-info-empty">No completed matches yet.</div>
         ) : (
@@ -2916,7 +4284,7 @@ function TeamInfoModal({ tournament, teamName, category, onClose }: { tournament
 
         {upcoming.length > 0 && (
           <>
-            <div className="tm-team-info-section-title">📅 Upcoming ({upcoming.length})</div>
+            <div className="tm-team-info-section-title" style={{ display: 'flex', alignItems: 'center', gap: 4 }}><CalendarDays size={14} strokeWidth={2} /> Upcoming ({upcoming.length})</div>
             <div className="tm-team-info-list">
               {upcoming.map(m => {
                 const isA = isTeam(m.teamAName, m.teamAShortName);
@@ -2999,11 +4367,13 @@ export function findMatchWinner(m: ScheduledMatch, results: SavedMatchResult[], 
 }
 
 // Placeholder entrant names generated by the schedule generator for
-// not-yet-known bracket slots — "Winner of Quarterfinal 2", "1st Group A".
-// A slot only auto-fills while it still holds one of these; once an
-// operator manually picks a real team, it's left alone.
+// not-yet-known bracket slots — "Winner of Quarterfinal 2", "1st Group A",
+// "2nd Best 3rd" (a cross-pool "Best Nth-place" wildcard — see
+// buildBestNthWildcardSlots). A slot only auto-fills while it still holds
+// one of these; once an operator manually picks a real team, it's left alone.
 export function isPlaceholderTeamName(name: string): boolean {
-  return /^(Winner|Loser) of /.test(name) || /^\d+(st|nd|rd|th) /.test(name);
+  return /^(Winner|Loser) of /.test(name) || /^\d+(st|nd|rd|th) /.test(name) ||
+    /^(?:\d+(?:st|nd|rd|th) )?Best \d+(?:st|nd|rd|th)$/.test(name);
 }
 
 // A knockout-generated fixture's `group` is auto-set to its bracket stage
@@ -3015,17 +4385,20 @@ export function knockoutStageSize(stage: string): number {
   if (stage === 'Semifinal') return 4;
   if (stage === 'Quarterfinal') return 8;
   const m = stage.match(/^Round of (\d+)$/);
-  return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+  if (m) return parseInt(m[1], 10);
+  const p = placementRoundRange(stage);
+  if (p) return p.hi - p.lo + 1;
+  return Number.MAX_SAFE_INTEGER;
 }
 function isKnockoutStage(group?: string): boolean {
-  return !!group && (group === 'Final' || group === 'Semifinal' || group === 'Quarterfinal' || /^Round of \d+$/.test(group));
+  return !!group && (group === 'Final' || group === 'Semifinal' || group === 'Quarterfinal' || /^Round of \d+$/.test(group) || isPlacementRoundLabel(group));
 }
 
 // A knockout fixture's stage normally lives on `group` (auto-tagged at
 // generation time). Fall back to parsing `round` — "[Category · ]Stage[
 // N]" — so fixtures from a "Groups + Knockout" run generated before that
 // tagging existed (or any hand-typed knockout fixture) still show up.
-export function extractKnockoutStage(m: ScheduledMatch): string | null {
+export function extractKnockoutStage(m: { group?: string; round?: string }): string | null {
   if (m.group && isKnockoutStage(m.group)) return m.group;
   if (m.round) {
     const afterCategory = m.round.includes(' · ') ? m.round.split(' · ').pop()! : m.round;
@@ -3079,12 +4452,29 @@ export function computeBracketCenters(stageCounts: number[]): number[][] {
 // (see GenerateScheduleModal) — which one to display is the shared Category
 // picker in the top TournamentScopeHeader bar, not a picker local to this tab.
 function BracketPanel({ tournament, activeCategory }: { tournament: Tournament; activeCategory: string }) {
-  const { matches: allMatches, addMatch } = useMatchScheduleStore();
+  const { matches: allMatches, addMatch, updateMatch } = useMatchScheduleStore();
   const { results: allResults } = useMatchResultsStore();
   const categories = tournament.categories ?? [];
   const category = activeCategory;
   const [selectedTeamName, setSelectedTeamName] = useState<string | null>(null);
   const [activeTier, setActiveTier] = useState<string | undefined>(undefined);
+  const matchNumbers = useMatchNumbers();
+  const fixTierMismatch = (id: string, tier: string | undefined) => updateMatch(id, { tier });
+  // Same detector the Schedule tab's banner uses (see findTierMismatches) —
+  // a fixture tagged with the wrong tier shows up under the wrong tier tab
+  // here (or is missing from the right one), so this needs the same
+  // visibility from the Bracket tab too, not just the Schedule tab. Scoped
+  // to the whole tournament (findTierMismatches groups by category
+  // internally) then filtered down to this tab's active category, same as
+  // categoryMatches below — shown regardless of which tier chip is active,
+  // since the mismatch itself may be exactly why a fixture isn't showing
+  // under the tier the operator is currently looking at.
+  const tierMismatches = useMemo(
+    () => findTierMismatches(allMatches.filter(m => m.tournamentId === tournament.id))
+      .filter(tm => categories.length === 0 || (tm.match.category ?? (tm.match.round?.includes(' · ') ? tm.match.round.split(' · ')[0] : undefined)) === category),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allMatches, tournament.id, category, categories.length]
+  );
 
   // A fixture's category may only live in the `round` prefix ("Men ·
   // Quarterfinal 2") on data generated before the dedicated category field
@@ -3166,6 +4556,7 @@ function BracketPanel({ tournament, activeCategory }: { tournament: Tournament; 
 
   return (
     <div className="tm-win-content" style={{ padding: 16, overflow: 'auto' }}>
+      <TierMismatchBanner mismatches={tierMismatches} matchNumbers={matchNumbers} onFix={fixTierMismatch} />
       {tiers.length > 1 && (
         <div className="tm-scope-cat-bar" style={{ marginBottom: 12 }}>
           {tiers.map(t => (
@@ -3184,7 +4575,7 @@ function BracketPanel({ tournament, activeCategory }: { tournament: Tournament; 
         </div>
       ) : matches.length === 0 ? (
         <div className="tm-win-placeholder">
-          No knockout-stage fixtures found{categories.length > 0 ? ' for this category' : ''} — generate one via 🪄 Generate Schedule (Knockout, Groups + Knockout, or Groups + Tiered Knockout) in the Schedule tab.
+          No knockout-stage fixtures found{categories.length > 0 ? ' for this category' : ''} — generate one via Generate Schedule (Knockout, Groups + Knockout, or Groups + Tiered Knockout) in the Schedule tab.
         </div>
       ) : (
         <BracketView
@@ -3214,7 +4605,9 @@ function StandingsPanel({ tournament, activeCategory }: { tournament: Tournament
   const { results: allResults } = useMatchResultsStore();
   const settings = tournament.settings ?? SPORT_DEFAULTS[tournament.sport];
   const teams = useMemo(() => allTeams.filter(t => t.tournamentId === tournament.id), [allTeams, tournament.id]);
-  const results = useMemo(() => allResults.filter(r => r.tournamentId === tournament.id), [allResults, tournament.id]);
+  const allTournamentResults = useMemo(() => allResults.filter(r => r.tournamentId === tournament.id), [allResults, tournament.id]);
+  // Group standings must only count pool-stage results — see isPoolStageResult.
+  const results = useMemo(() => allTournamentResults.filter(isPoolStageResult), [allTournamentResults]);
   const groups = normalizeGroups(tournament.groups);
   const categories = tournament.categories ?? [];
   const [selectedTeam, setSelectedTeam] = useState<{ name: string; category?: string } | null>(null);
@@ -3223,7 +4616,7 @@ function StandingsPanel({ tournament, activeCategory }: { tournament: Tournament
     return (
       <div className="tm-win-content" style={{ padding: 16 }}>
         <div className="tm-win-placeholder">
-          <span>Add teams in the 👥 Teams tab to see standings.</span>
+          <span>Add teams in the Teams tab to see standings.</span>
         </div>
       </div>
     );
@@ -3602,9 +4995,10 @@ function DrawPanel({ tournament, activeCategory }: { tournament: Tournament; act
         <div className="tm-draw-vmix-cfg">
           <button
             className={`tm-io-btn${liveSyncDraw ? ' tm-io-btn--active' : ''}`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
             title="Auto-push every draw change to the host as it happens, instead of needing a manual Save to Host"
             onClick={() => setLiveSyncDraw(!liveSyncDraw)}
-          >{liveSyncDraw ? '🔴 Live Sync: On' : '⚪ Live Sync: Off'}</button>
+          >{liveSyncDraw ? <><Circle size={9} fill="currentColor" stroke="none" /> Live Sync: On</> : <><Circle size={9} fill="none" /> Live Sync: Off</>}</button>
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             {liveSyncDraw ? 'Every draw change is pushed to the host automatically.' : 'Turn on to auto-push draw changes to the host as you make them.'}
           </span>
@@ -3614,25 +5008,27 @@ function DrawPanel({ tournament, activeCategory }: { tournament: Tournament; act
       <div className="tm-draw-group-tabs">
         <button
           className={`tm-draw-group-tab${drawSubTab === 'live' ? ' tm-draw-group-tab--active' : ''}`}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
           onClick={() => setDrawSubTab('live')}
-        >🎬 Live Draw</button>
+        ><Clapperboard size={14} strokeWidth={2} /> Live Draw</button>
         <button
           className={`tm-draw-group-tab${drawSubTab === 'settings' ? ' tm-draw-group-tab--active' : ''}`}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
           onClick={() => setDrawSubTab('settings')}
-        >⚙️ Settings</button>
+        ><Settings size={14} strokeWidth={2} /> Settings</button>
       </div>
 
       {drawSubTab === 'settings' && (
       <>
       <div className="tm-draw-section">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div className="tm-draw-section-title">⚙️ Setup — Groups &amp; Pots</div>
+        <div className="tm-draw-section-title" style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Settings size={14} strokeWidth={2} /> Setup — Groups &amp; Pots</div>
         <button
           className={`tm-io-btn${setupEditMode ? ' tm-io-btn--active' : ''}`}
           style={{ flex: 'none' }}
           title="Unlock renaming group/pot names"
           onClick={() => setSetupEditMode(e => !e)}
-        >{setupEditMode ? '🔓 Editing' : '✏️ Edit'}</button>
+        >{setupEditMode ? <><Unlock size={14} strokeWidth={2} /> Editing</> : <><Pencil size={14} strokeWidth={2} /> Edit</>}</button>
       </div>
       <div className="tm-groups-bar">
         <span className="tm-groups-label">Pools/Groups:</span>
@@ -3753,7 +5149,7 @@ function DrawPanel({ tournament, activeCategory }: { tournament: Tournament; act
 
       {teams.length > 0 && (
         <div className="tm-draw-section">
-          <div className="tm-draw-section-title">📋 Assignments</div>
+          <div className="tm-draw-section-title" style={{ display: 'flex', alignItems: 'center', gap: 4 }}><ClipboardList size={14} strokeWidth={2} /> Assignments</div>
 
           {assignSelectedIds.size > 0 && (
             <div className="tm-draw-vmix-cfg">
@@ -3851,7 +5247,7 @@ function DrawPanel({ tournament, activeCategory }: { tournament: Tournament; act
       <>
       {groups.length > 0 && (
         <div className="tm-draw-section">
-          <div className="tm-draw-section-title">🏁 Final Group List</div>
+          <div className="tm-draw-section-title" style={{ display: 'flex', alignItems: 'center', gap: 4 }}><FlagTriangleRight size={14} strokeWidth={2} /> Final Group List</div>
           {(categories.length > 0
             ? [...categories.map(c => ({ label: c, items: groups.filter(g => g.category === c) })), { label: 'Uncategorized', items: groups.filter(g => !g.category) }]
             : [{ label: null as string | null, items: groups }]
@@ -3909,22 +5305,24 @@ function DrawPanel({ tournament, activeCategory }: { tournament: Tournament; act
 
       {pots.length === 0 || groups.length === 0 ? (
         <div className="tm-win-placeholder">
-          <span>Add at least one Group and one Pot in the ⚙️ Settings tab, then assign each team to a pot there.</span>
+          <span>Add at least one Group and one Pot in the Settings tab, then assign each team to a pot there.</span>
         </div>
       ) : (
       <div className="tm-draw-section">
-      <div className="tm-draw-section-title">🎬 Live Draw</div>
+      <div className="tm-draw-section-title" style={{ display: 'flex', alignItems: 'center', gap: 4 }}><Clapperboard size={14} strokeWidth={2} /> Live Draw</div>
       <div className="tm-draw-vmix-cfg">
         <span className="tm-groups-label" title="'Manual' lets you click a team chip in the current pot to draw it yourself, instead of the system picking blindly">Team Draw:</span>
         <div className="tm-timer-mode-toggle">
           <button
             className={`tm-timer-mode-btn ${drawTeamMode === 'random' ? 'tm-timer-mode-btn--active' : ''}`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
             onClick={() => updateTournament(tournament.id, { drawTeamMode: 'random' })}
-          >🎲 Random</button>
+          ><Dices size={14} strokeWidth={2} /> Random</button>
           <button
             className={`tm-timer-mode-btn ${drawTeamMode === 'manual' ? 'tm-timer-mode-btn--active' : ''}`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
             onClick={() => updateTournament(tournament.id, { drawTeamMode: 'manual' })}
-          >✋ Manual (click team)</button>
+          ><Hand size={14} strokeWidth={2} /> Manual (click team)</button>
         </div>
       </div>
 
@@ -3936,13 +5334,13 @@ function DrawPanel({ tournament, activeCategory }: { tournament: Tournament; act
             </div>
             <div className="tm-draw-hero-info">
               <span className="tm-draw-hero-name">{armedTeam.team.name}</span>
-              <span className="tm-draw-hero-detail">⏳ Pick a group below…</span>
+              <span className="tm-draw-hero-detail" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Hourglass size={12} strokeWidth={2} /> Pick a group below…</span>
             </div>
           </>
         ) : armedSlot ? (
           <div className="tm-draw-hero-info">
             <span className="tm-draw-hero-name">{armedSlot.group} — {(groups.find(g => g.name === armedSlot.group)?.prefix || armedSlot.group.charAt(0).toUpperCase())}{armedSlot.position}</span>
-            <span className="tm-draw-hero-detail">⏳ Pick a team below…</span>
+            <span className="tm-draw-hero-detail" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Hourglass size={12} strokeWidth={2} /> Pick a team below…</span>
           </div>
         ) : lastDrawn ? (
           <>
@@ -3961,27 +5359,30 @@ function DrawPanel({ tournament, activeCategory }: { tournament: Tournament; act
 
       <div style={{ display: 'flex', gap: 8 }}>
         {drawTeamMode === 'manual' ? (
-          <div className="tm-draw-manual-hint" style={{ flex: 1 }}>
-            {armedTeam ? '⏳ Pick a slot below' : armedSlot ? `⏳ Pick a team below for ${armedSlot.group}` : '👆 Click any team or empty slot to pair them — pick either first, click again to cancel'}
+          <div className="tm-draw-manual-hint" style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 4 }}>
+            {armedTeam ? <><Hourglass size={12} strokeWidth={2} /> Pick a slot below</> : armedSlot ? <><Hourglass size={12} strokeWidth={2} /> Pick a team below for {armedSlot.group}</> : <><MousePointerClick size={12} strokeWidth={2} /> Click any team or empty slot to pair them — pick either first, click again to cancel</>}
           </div>
         ) : (
-          <button className="tm-sidebar-new-btn" onClick={drawNext} disabled={!canDraw && !armedSlot} style={{ flex: 1 }}>
-            {armedSlot ? `🎲 Draw Next → ${armedSlot.group}` : canDraw ? `🎲 Draw Next (${currentPot})` : '🎉 Draw Complete'}
+          <button className="tm-sidebar-new-btn" onClick={drawNext} disabled={!canDraw && !armedSlot} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+            {armedSlot ? <><Dices size={14} strokeWidth={2} /> Draw Next → {armedSlot.group}</> : canDraw ? <><Dices size={14} strokeWidth={2} /> Draw Next ({currentPot})</> : <><PartyPopper size={14} strokeWidth={2} /> Draw Complete</>}
           </button>
         )}
         <button
           className={`tm-io-btn${editMode ? ' tm-io-btn--active' : ''}`}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
           title="Unlock filled slots so a mistake can be cleared with a click"
           onClick={() => setEditMode(e => !e)}
-        >{editMode ? '🔓 Editing' : '✏️ Edit'}</button>
+        >{editMode ? <><Unlock size={14} strokeWidth={2} /> Editing</> : <><Pencil size={14} strokeWidth={2} /> Edit</>}</button>
         <button
           className={`tm-io-btn${hideAssignedTeams ? ' tm-io-btn--active' : ''}`}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
           title="Hide already-placed teams from the pot lists below, instead of leaving them pickable to re-draw/move"
           onClick={() => setHideAssignedTeams(v => !v)}
-        >{hideAssignedTeams ? '🙈 Hiding Placed' : '👁 Show All'}</button>
+        >{hideAssignedTeams ? <><EyeOff size={14} strokeWidth={2} /> Hiding Placed</> : <><Eye size={14} strokeWidth={2} /> Show All</>}</button>
         <ConfirmButton
           className="tm-io-btn"
-          label="↺ Reset Draw"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+          label={<><RotateCcw size={14} strokeWidth={2} /> Reset Draw</>}
           confirmLabel="Reset"
           message="Clear every team's group assignment from this draw?"
           onConfirm={resetDraw}
@@ -4085,7 +5486,7 @@ function DrawPanel({ tournament, activeCategory }: { tournament: Tournament; act
 
       <div className="tm-draw-section">
         <button className="tm-draw-section-toggle" onClick={() => setVmixCfgOpen(o => !o)}>
-          <span className="tm-draw-section-title" style={{ margin: 0 }}>{vmixCfgOpen ? '▼' : '▶'} 📡 vMix Output</span>
+          <span className="tm-draw-section-title" style={{ margin: 0, display: 'inline-flex', alignItems: 'center', gap: 4 }}>{vmixCfgOpen ? <ChevronDown size={14} strokeWidth={2} /> : <ChevronRight size={14} strokeWidth={2} />} <Radio size={14} strokeWidth={2} /> vMix Output</span>
         </button>
         {vmixCfgOpen && (
           <>
@@ -4152,7 +5553,7 @@ function DrawPanel({ tournament, activeCategory }: { tournament: Tournament; act
                       <input type="checkbox" checked={target.autoSync ?? false} onChange={e => updateGroupListTarget(target.id, { autoSync: e.target.checked })} />
                       Auto-sync
                     </label>
-                    <button className="tm-io-btn" onClick={() => pushGroupListToVmix(target)} disabled={!target.group || !target.inputKey}>📡 Push List</button>
+                    <button className="tm-io-btn" onClick={() => pushGroupListToVmix(target)} disabled={!target.group || !target.inputKey} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Radio size={14} strokeWidth={2} /> Push List</button>
                   </div>
                 </div>
               ))}
@@ -4179,7 +5580,7 @@ function TournamentScopeHeader({ tournaments, selectedId, onSelect, categories, 
 }) {
   return (
     <div className="tm-scope-header">
-      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>🏆 Tournament:</span>
+      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Trophy size={14} strokeWidth={2} /> Tournament:</span>
       <select className="tm-input" style={{ fontSize: 15, padding: '6px 10px', height: 34, maxWidth: 360, flex: 'none' }}
         value={selectedId} onChange={e => onSelect(e.target.value)}>
         {tournaments.length === 0 && <option value="">— none —</option>}
@@ -4328,8 +5729,8 @@ function LoadEventDiffModal({ eventName, items, checking, onConfirm, onCancel }:
         <h3 className="modal-title">Link to "{eventName}"?</h3>
 
         {checking ? (
-          <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4 }}>
-            🔍 Checking for differences against the cloud…
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Search size={13} strokeWidth={2} /> Checking for differences against the cloud…
           </p>
         ) : items === null ? (
           <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4 }}>
@@ -4463,7 +5864,15 @@ export function TournamentManager({ onClose }: Props) {
   const [editTournName, setEditTournName] = useState(false);
   const [tournNameVal, setTournNameVal] = useState('');
   const [confirmDeleteTournament, setConfirmDeleteTournament] = useState(false);
-  const [applyStatus, setApplyStatus] = useState('');
+  // The window's own × close button used to confirm in place (ConfirmButton)
+  // right next to the maximize button in a tight 4px-gap row — the
+  // confirm text + Close/Cancel buttons it expands into there don't fit
+  // that tiny space and visually overlap the maximize button. A full
+  // ConfirmModal (same pattern as every other destructive action in this
+  // window) pops up centered instead, so the close button stays exactly where it
+  // belongs and never expands in place.
+  const [confirmCloseWindow, setConfirmCloseWindow] = useState(false);
+  const [applyStatus, setApplyStatus] = useState<React.ReactNode>('');
   // Manual "push now" feedback — separate from the automatic debounced sync
   // in cloudSync.ts, which runs silently with no UI at all.
   const [pushNowState, setPushNowState] = useState<'idle' | 'checking' | 'pushing' | 'done' | 'error'>('idle');
@@ -4552,7 +5961,7 @@ export function TournamentManager({ onClose }: Props) {
     setEventLinkDiff(null);
   };
   const cancelEventLink = () => { setPendingEventLink(null); setEventLinkDiff(null); };
-  const [tab, setTab] = useState<'tournaments' | 'teams' | 'players' | 'schedule' | 'results' | 'standings' | 'bracket' | 'draw'>('tournaments');
+  const [tab, setTab] = useState<'tournaments' | 'teams' | 'players' | 'schedule' | 'results' | 'rundown' | 'standings' | 'bracket' | 'draw'>('tournaments');
   // Single category selector shared by every tournament-scoped tab (Schedule,
   // Standings, Bracket, Draw) — lives here instead of each tab having its own,
   // so switching category in one place scopes the whole window consistently.
@@ -4568,10 +5977,11 @@ export function TournamentManager({ onClose }: Props) {
   const { teams } = useTeamDbStore();
   const { matches: scheduledMatches, updateMatch } = useMatchScheduleStore();
   const { results: savedResults, addResult, updateResult, deleteResult } = useMatchResultsStore();
+  const { segments: rundownSegments } = useRundownStore();
 
   // Apply-to-Canvas now only resets a linked TIMER's period/duration/mode —
   // team/roster population for scoreboards and player-lists happens per-fixture
-  // (Schedule tab's "Send to Scoreboard", and each widget's own 👥 team picker)
+  // (Schedule tab's "Send to Scoreboard", and each widget's own team picker)
   // since a tournament can hold many teams, not a fixed Team A/B pair.
   const applyToCanvas = () => {
     if (!selected) return;
@@ -4632,7 +6042,7 @@ export function TournamentManager({ onClose }: Props) {
     });
 
     const msg = count > 0
-      ? `Applied to ${count} widget${count !== 1 ? 's' : ''} ✓`
+      ? <><Check size={12} strokeWidth={2} /> Applied to {count} widget{count !== 1 ? 's' : ''}</>
       : 'No linked widgets found on canvas';
     setApplyStatus(msg);
     setTimeout(() => setApplyStatus(''), 3000);
@@ -4689,21 +6099,19 @@ export function TournamentManager({ onClose }: Props) {
       >
         {/* Title bar */}
         <div className="tm-titlebar" onMouseDown={startDrag} onDoubleClick={toggleMaximize}>
-          <span className="tm-titlebar-icon">🏆</span>
+          <span className="tm-titlebar-icon" style={{ display: 'inline-flex' }}><Trophy size={15} strokeWidth={2} /></span>
           <span className="tm-titlebar-title">Tournament Database</span>
           <div className="tm-win-ctrls">
             <button
               className="tm-win-ctrl"
               onClick={toggleMaximize}
               title={isMaximized ? 'Restore' : 'Maximize'}
-            >{isMaximized ? '🗗' : '⛶'}</button>
-            <ConfirmButton
+            >{isMaximized ? <Minimize2 size={14} strokeWidth={2} /> : <Maximize2 size={14} strokeWidth={2} />}</button>
+            <button
               className="tm-win-ctrl tm-win-ctrl--close"
-              label="×"
-              confirmLabel="Close"
-              message="Close this window?"
-              onConfirm={onClose}
-            />
+              onClick={e => { e.stopPropagation(); setConfirmCloseWindow(true); }}
+              title="Close"
+            >×</button>
           </div>
         </div>
 
@@ -4716,7 +6124,7 @@ export function TournamentManager({ onClose }: Props) {
               background: 'transparent', color: tab === 'tournaments' ? 'var(--text-primary)' : 'var(--text-muted)',
               borderBottom: tab === 'tournaments' ? '2px solid var(--accent)' : '2px solid transparent',
             }}
-          >🏆 Tournaments</button>
+          ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Trophy size={14} strokeWidth={2} /> Tournaments</span></button>
           <button
             onClick={() => setTab('teams')}
             style={{
@@ -4724,7 +6132,7 @@ export function TournamentManager({ onClose }: Props) {
               background: 'transparent', color: tab === 'teams' ? 'var(--text-primary)' : 'var(--text-muted)',
               borderBottom: tab === 'teams' ? '2px solid var(--accent)' : '2px solid transparent',
             }}
-          >👥 Teams{scopedTeams.length > 0 ? ` (${scopedTeams.length})` : ''}</button>
+          ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Users size={14} strokeWidth={2} /> Teams{scopedTeams.length > 0 ? ` (${scopedTeams.length})` : ''}</span></button>
           <button
             onClick={() => setTab('players')}
             style={{
@@ -4732,7 +6140,7 @@ export function TournamentManager({ onClose }: Props) {
               background: 'transparent', color: tab === 'players' ? 'var(--text-primary)' : 'var(--text-muted)',
               borderBottom: tab === 'players' ? '2px solid var(--accent)' : '2px solid transparent',
             }}
-          >🎽 Players{scopedPlayerCount > 0 ? ` (${scopedPlayerCount})` : ''}</button>
+          ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Shirt size={14} strokeWidth={2} /> Players{scopedPlayerCount > 0 ? ` (${scopedPlayerCount})` : ''}</span></button>
           <button
             onClick={() => setTab('schedule')}
             style={{
@@ -4740,7 +6148,7 @@ export function TournamentManager({ onClose }: Props) {
               background: 'transparent', color: tab === 'schedule' ? 'var(--text-primary)' : 'var(--text-muted)',
               borderBottom: tab === 'schedule' ? '2px solid var(--accent)' : '2px solid transparent',
             }}
-          >📅 Schedule{scopedMatches.length > 0 ? ` (${scopedMatches.length})` : ''}</button>
+          ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><CalendarDays size={14} strokeWidth={2} /> Schedule{scopedMatches.length > 0 ? ` (${scopedMatches.length})` : ''}</span></button>
           <button
             onClick={() => setTab('results')}
             style={{
@@ -4748,7 +6156,16 @@ export function TournamentManager({ onClose }: Props) {
               background: 'transparent', color: tab === 'results' ? 'var(--text-primary)' : 'var(--text-muted)',
               borderBottom: tab === 'results' ? '2px solid var(--accent)' : '2px solid transparent',
             }}
-          >🏁 Results{scopedResults.length > 0 ? ` (${scopedResults.length})` : ''}</button>
+          ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><FlagTriangleRight size={14} strokeWidth={2} /> Results{scopedResults.length > 0 ? ` (${scopedResults.length})` : ''}</span></button>
+          <button
+            onClick={() => setTab('rundown')}
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
+              background: 'transparent', color: tab === 'rundown' ? 'var(--text-primary)' : 'var(--text-muted)',
+              borderBottom: tab === 'rundown' ? '2px solid var(--accent)' : '2px solid transparent',
+            }}
+            title="A running order for the whole event day — spans every tournament, not just this one"
+          ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ListChecks size={14} strokeWidth={2} /> Rundown{rundownSegments.length > 0 ? ` (${rundownSegments.length})` : ''}</span></button>
           <button
             onClick={() => setTab('standings')}
             style={{
@@ -4756,7 +6173,7 @@ export function TournamentManager({ onClose }: Props) {
               background: 'transparent', color: tab === 'standings' ? 'var(--text-primary)' : 'var(--text-muted)',
               borderBottom: tab === 'standings' ? '2px solid var(--accent)' : '2px solid transparent',
             }}
-          >🏅 Standings</button>
+          ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Award size={14} strokeWidth={2} /> Standings</span></button>
           <button
             onClick={() => setTab('bracket')}
             style={{
@@ -4764,7 +6181,7 @@ export function TournamentManager({ onClose }: Props) {
               background: 'transparent', color: tab === 'bracket' ? 'var(--text-primary)' : 'var(--text-muted)',
               borderBottom: tab === 'bracket' ? '2px solid var(--accent)' : '2px solid transparent',
             }}
-          >🏆 Bracket</button>
+          ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Trophy size={14} strokeWidth={2} /> Bracket</span></button>
           <button
             onClick={() => setTab('draw')}
             style={{
@@ -4772,7 +6189,7 @@ export function TournamentManager({ onClose }: Props) {
               background: 'transparent', color: tab === 'draw' ? 'var(--text-primary)' : 'var(--text-muted)',
               borderBottom: tab === 'draw' ? '2px solid var(--accent)' : '2px solid transparent',
             }}
-          >🎲 Draw</button>
+          ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Dices size={14} strokeWidth={2} /> Draw</span></button>
         </div>
 
         {/* Remote-only (not host, not the deliberately view-only readonly client):
@@ -4781,21 +6198,25 @@ export function TournamentManager({ onClose }: Props) {
           <div className="tm-remote-edit-bar">
             {remoteEditMode ? (
               <>
-                <span className="tm-remote-edit-status tm-remote-edit-status--editing">✏️ Editing locally — not synced to host yet</span>
-                <button className="tm-io-btn tm-io-btn--ok" onClick={handleSaveToHost}>💾 Save to Host</button>
-                <button className="tm-io-btn" onClick={handleDiscardAndResync}>↩ Discard &amp; Resync</button>
+                <span className="tm-remote-edit-status tm-remote-edit-status--editing" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Pencil size={12} strokeWidth={2} /> Editing locally — not synced to host yet</span>
+                <button className="tm-io-btn tm-io-btn--ok" onClick={handleSaveToHost} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Save size={14} strokeWidth={2} /> Save to Host</button>
+                <button className="tm-io-btn" onClick={handleDiscardAndResync} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Undo2 size={14} strokeWidth={2} /> Discard &amp; Resync</button>
               </>
             ) : (
               <>
-                <span className="tm-remote-edit-status">🔒 Live view — synced from host</span>
-                <button className="tm-io-btn" onClick={() => setRemoteEditMode(true)}>✏️ Edit</button>
+                <span className="tm-remote-edit-status" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Lock size={12} strokeWidth={2} /> Live view — synced from host</span>
+                <button className="tm-io-btn" onClick={() => setRemoteEditMode(true)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Pencil size={14} strokeWidth={2} /> Edit</button>
               </>
             )}
           </div>
         )}
 
         {/* Main area */}
-        {tab === 'teams' || tab === 'players' || tab === 'schedule' || tab === 'results' || tab === 'standings' || tab === 'bracket' || tab === 'draw' ? (
+        {tab === 'rundown' ? (
+          <div className="tm-win-body--scoped">
+            <RundownPanel />
+          </div>
+        ) : tab === 'teams' || tab === 'players' || tab === 'schedule' || tab === 'results' || tab === 'standings' || tab === 'bracket' || tab === 'draw' ? (
           <div className="tm-win-body--scoped">
             <TournamentScopeHeader
               tournaments={tournaments} selectedId={selectedId} onSelect={selectTournament}
@@ -4804,16 +6225,16 @@ export function TournamentManager({ onClose }: Props) {
               {tab === 'schedule' && selected && (
                 <button
                   className={`tm-io-btn${scheduleEditMode ? ' tm-io-btn--ok' : ''}`}
-                  style={{ marginLeft: 'auto' }}
+                  style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4 }}
                   onClick={() => setScheduleEditMode(v => !v)}
                 >
-                  {scheduleEditMode ? '✓ Done Editing' : '✏️ Edit'}
+                  {scheduleEditMode ? <><Check size={14} strokeWidth={2} /> Done Editing</> : <><Pencil size={14} strokeWidth={2} /> Edit</>}
                 </button>
               )}
             </TournamentScopeHeader>
             {!selected ? (
               <div className="tm-win-placeholder">
-                <span>Create a tournament first in the 🏆 Tournaments tab.</span>
+                <span>Create a tournament first in the Tournaments tab.</span>
               </div>
             ) : tab === 'teams' ? (
               <TeamsPanel tournament={selected} />
@@ -4844,7 +6265,7 @@ export function TournamentManager({ onClose }: Props) {
                 className="tm-btn"
                 title="Export every tournament and all related data (teams, rosters, schedules, results) as one JSON file"
                 onClick={() => exportProjectJSON(tournaments, selectedId, teams, scheduledMatches, savedResults)}
-              >⬇ Export Project</button>
+              ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowDown size={14} strokeWidth={2} /> Export Project</span></button>
             </div>
             <div className="tm-sidebar-list">
               {tournaments.map(t => (
@@ -4856,8 +6277,8 @@ export function TournamentManager({ onClose }: Props) {
                   <span className="tm-tourn-sport-tag">{SPORT_LABELS[t.sport]?.split('/')[0].trim()}</span>
                   <span className="tm-tourn-item-name">{t.name}</span>
                   {t.foreignVendor && (
-                    <span className="tm-tourn-foreign-badge" title="Shared by another organisation via a cross-venue event link — read-only, never pushed from here">
-                      🔗 shared
+                    <span className="tm-tourn-foreign-badge" title="Shared by another organisation via a cross-venue event link — read-only, never pushed from here" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <Link2 size={11} strokeWidth={2} /> shared
                     </span>
                   )}
                 </div>
@@ -4912,19 +6333,19 @@ export function TournamentManager({ onClose }: Props) {
                       ? 'Cloud Sync is ON — this tournament\'s fixtures/results push to and pull from every other venue on the same account'
                       : 'Cloud Sync is OFF — this tournament stays local to this device only'}
                     onClick={() => updateTournament(selected.id, { cloudSyncEnabled: !selected.cloudSyncEnabled })}
-                  >{selected.cloudSyncEnabled ? '☁ Cloud Sync On' : '☁ Cloud Sync Off'}</button>
+                  ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Cloud size={14} strokeWidth={2} /> {selected.cloudSyncEnabled ? 'Cloud Sync On' : 'Cloud Sync Off'}</span></button>
                   <button
                     className="tm-btn"
                     disabled={pushNowState === 'checking' || pushNowState === 'pushing'}
                     title={pushNowState === 'error' ? pushNowError : "Push this tournament's fixtures, results and settings to the cloud right now, instead of waiting for the next automatic sync"}
                     onClick={() => handlePushNow(selected.id)}
-                  >{
-                    pushNowState === 'checking' ? '🔍 Checking…'
-                    : pushNowState === 'pushing' ? '⏳ Pushing…'
-                    : pushNowState === 'done' ? '✓ Pushed'
-                    : pushNowState === 'error' ? '⚠ Push Failed'
-                    : '⬆ Push Now'
-                  }</button>
+                  ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>{
+                    pushNowState === 'checking' ? <><Search size={14} strokeWidth={2} /> Checking…</>
+                    : pushNowState === 'pushing' ? <><Hourglass size={14} strokeWidth={2} /> Pushing…</>
+                    : pushNowState === 'done' ? <><Check size={14} strokeWidth={2} /> Pushed</>
+                    : pushNowState === 'error' ? <><AlertTriangle size={14} strokeWidth={2} /> Push Failed</>
+                    : <><ArrowUp size={14} strokeWidth={2} /> Push Now</>
+                  }</span></button>
                   <button
                     className="tm-btn"
                     disabled={localizeLogosState === 'running'}
@@ -4932,32 +6353,32 @@ export function TournamentManager({ onClose }: Props) {
                       ? localizeLogosMsg
                       : "Download any cloud-hosted team logo this tournament still points at back to this device, and switch back to using it locally — fixes logos left pointing at the cloud from before local URLs were no longer overwritten by a push"}
                     onClick={() => handleLocalizeLogos(selected.id)}
-                  >{
-                    localizeLogosState === 'running' ? '⏳ Localizing…'
-                    : localizeLogosState === 'done' ? '✓ Done'
-                    : localizeLogosState === 'error' ? '⚠ Failed'
-                    : '⬇ Localize Logos'
-                  }</button>
+                  ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>{
+                    localizeLogosState === 'running' ? <><Hourglass size={14} strokeWidth={2} /> Localizing…</>
+                    : localizeLogosState === 'done' ? <><Check size={14} strokeWidth={2} /> Done</>
+                    : localizeLogosState === 'error' ? <><AlertTriangle size={14} strokeWidth={2} /> Failed</>
+                    : <><ArrowDown size={14} strokeWidth={2} /> Localize Logos</>
+                  }</span></button>
                   <EventPicker
                     defaultName={selected.name}
                     defaultDateRange={scopedDateRange}
                     onPick={(ev, shareKey) => handleLoadEvent(selected.id, ev, shareKey)}
                   />
                   {selected.eventId && (
-                    <span className="tm-event-linked-badge" title={`Linked to event: ${selected.eventName ?? selected.eventId}`}>
-                      🔗 {selected.eventName ?? 'Linked event'}
+                    <span className="tm-event-linked-badge" title={`Linked to event: ${selected.eventName ?? selected.eventId}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <Link2 size={11} strokeWidth={2} /> {selected.eventName ?? 'Linked event'}
                     </span>
                   )}
                   <button
                     className="tm-btn"
                     title={defaultTournamentId === selected.id ? 'Unset as default (Tournament Database will open to the first tournament instead)' : 'Set as default — the Tournament Database opens to this tournament automatically'}
                     onClick={() => setDefaultTournament(selected.id)}
-                  >{defaultTournamentId === selected.id ? '⭐ Default' : '☆ Set Default'}</button>
+                  ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>{defaultTournamentId === selected.id ? <><Star size={14} strokeWidth={2} fill="currentColor" /> Default</> : <><Star size={14} strokeWidth={2} /> Set Default</>}</span></button>
                   <button
                     className="tm-btn"
                     title="Export this tournament and everything related to it (teams, rosters, schedule, results) as a JSON file"
                     onClick={() => exportTournamentJSON(selected, scopedTeams, scopedMatches, scopedResults)}
-                  >⬇ Export Tournament</button>
+                  ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowDown size={14} strokeWidth={2} /> Export Tournament</span></button>
                   {confirmDeleteTournament ? (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                       <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Delete? Teams/fixtures/results stay saved.</span>
@@ -4977,7 +6398,7 @@ export function TournamentManager({ onClose }: Props) {
                     <button
                       className="tm-btn tm-btn--danger"
                       onClick={() => setConfirmDeleteTournament(true)}
-                    >🗑 Delete</button>
+                    ><span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Trash2 size={14} strokeWidth={2} /> Delete</span></button>
                   )}
                 </div>
 
@@ -5004,17 +6425,17 @@ export function TournamentManager({ onClose }: Props) {
 
                 {/* Quick summary + jump-to links for this tournament's related data */}
                 <div style={{ display: 'flex', gap: 8, padding: '12px 16px', flexWrap: 'wrap' }}>
-                  <button className="tm-sidebar-new-btn" onClick={() => setTab('teams')}>
-                    👥 {scopedTeams.length} team{scopedTeams.length !== 1 ? 's' : ''}
+                  <button className="tm-sidebar-new-btn" onClick={() => setTab('teams')} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <Users size={14} strokeWidth={2} /> {scopedTeams.length} team{scopedTeams.length !== 1 ? 's' : ''}
                   </button>
-                  <button className="tm-sidebar-new-btn" onClick={() => setTab('players')}>
-                    🎽 {scopedPlayerCount} player{scopedPlayerCount !== 1 ? 's' : ''}
+                  <button className="tm-sidebar-new-btn" onClick={() => setTab('players')} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <Shirt size={14} strokeWidth={2} /> {scopedPlayerCount} player{scopedPlayerCount !== 1 ? 's' : ''}
                   </button>
-                  <button className="tm-sidebar-new-btn" onClick={() => setTab('schedule')}>
-                    📅 {scopedMatches.length} fixture{scopedMatches.length !== 1 ? 's' : ''}
+                  <button className="tm-sidebar-new-btn" onClick={() => setTab('schedule')} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <CalendarDays size={14} strokeWidth={2} /> {scopedMatches.length} fixture{scopedMatches.length !== 1 ? 's' : ''}
                   </button>
-                  <button className="tm-sidebar-new-btn" onClick={() => setTab('results')}>
-                    🏁 {scopedResults.length} result{scopedResults.length !== 1 ? 's' : ''}
+                  <button className="tm-sidebar-new-btn" onClick={() => setTab('results')} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <FlagTriangleRight size={14} strokeWidth={2} /> {scopedResults.length} result{scopedResults.length !== 1 ? 's' : ''}
                   </button>
                 </div>
               </div>
@@ -5042,12 +6463,21 @@ export function TournamentManager({ onClose }: Props) {
           ) : (
             <>
               <span>{tournaments.length} tournament{tournaments.length !== 1 ? 's' : ''}</span>
-              {applyStatus && <span className="tm-apply-status">{applyStatus}</span>}
+              {applyStatus && <span className="tm-apply-status" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>{applyStatus}</span>}
               <span style={{ marginLeft: 'auto', opacity: 0.4, fontSize: 10 }}>double-click row to edit</span>
             </>
           )}
         </div>
       </div>
+      {confirmCloseWindow && (
+        <ConfirmModal
+          title="Close window?"
+          message="Close the Tournament Database window?"
+          confirmLabel="Close"
+          onConfirm={() => { setConfirmCloseWindow(false); onClose(); }}
+          onCancel={() => setConfirmCloseWindow(false)}
+        />
+      )}
     </>
   );
 }

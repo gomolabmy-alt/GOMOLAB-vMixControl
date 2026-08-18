@@ -6,14 +6,15 @@ interface Props {
 
 export function SplashScreen({ onDone }: Props) {
   const [buildNumber, setBuildNumber] = useState('');
+  const [pid, setPid] = useState<number | null>(null);
   const [phase, setPhase] = useState<'in' | 'hold' | 'out'>('in');
 
   useEffect(() => {
     if ('__TAURI_INTERNALS__' in window) {
-      import('@tauri-apps/api/core')
-        .then(({ invoke }) => invoke<string>('get_build_number'))
-        .then(setBuildNumber)
-        .catch(() => {});
+      import('@tauri-apps/api/core').then(({ invoke }) => {
+        invoke<string>('get_build_number').then(setBuildNumber).catch(() => {});
+        invoke<number>('get_pid').then(setPid).catch(() => {});
+      });
     }
   }, []);
 
@@ -31,7 +32,7 @@ export function SplashScreen({ onDone }: Props) {
         <img src="/icon.png" alt="GOMOLAB" className="splash-logo" onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
         <div className="splash-brand">GOMOLAB</div>
         <div className="splash-product">vMix Control</div>
-        {buildNumber && <div className="splash-build">Build {buildNumber}</div>}
+        {buildNumber && <div className="splash-build">Build {buildNumber}{pid !== null ? ` · PID ${pid}` : ''}</div>}
       </div>
     </div>
   );

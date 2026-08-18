@@ -10,6 +10,16 @@ export function isAppFn(fn: string) { return fn?.startsWith('App.'); }
 // handler or from a global hotkey callback with no component mounted.
 export async function dispatchAction(fn: string, params: Record<string, string>) {
   if (!fn) return;
+  // Special-cased here rather than in executeAppFunction's switch: this is
+  // the ONLY caller of executeAppFunction (grep-verified), and it's the one
+  // that's actually async/awaited by runActions' for-loop below — a real
+  // delay only holds up the next action in the list if it happens here,
+  // before delegating to that synchronous switch.
+  if (fn === 'App.Wait') {
+    const seconds = parseFloat(params.Seconds ?? '1');
+    if (seconds > 0) await new Promise(resolve => setTimeout(resolve, seconds * 1000));
+    return;
+  }
   if (isAppFn(fn)) useCanvasStore.getState().executeAppFunction(fn, params);
   else await useVmixStore.getState().getClient()?.sendFunction(fn, params);
 }

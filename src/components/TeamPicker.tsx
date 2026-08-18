@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { Users, X } from 'lucide-react';
 import { useTeamDbStore, type SavedTeam } from '../stores/teamDbStore';
 import { resolveImageUrl } from '../lib/imageUrl';
 
@@ -74,8 +75,8 @@ export function TeamPicker({ onPick, current, tournamentId, category }: Props) {
         className="btn btn--ghost btn--small"
         title="Pick a saved team"
         onClick={(e) => { e.stopPropagation(); toggle(); }}
-        style={{ fontSize: 12, padding: '2px 5px' }}
-      >👥</button>
+        style={{ fontSize: 12, padding: '2px 5px', display: 'inline-flex', alignItems: 'center' }}
+      ><Users size={14} strokeWidth={2} /></button>
       {open && pos && createPortal(
         <div
           ref={popupRef}
@@ -128,8 +129,8 @@ export function TeamPicker({ onPick, current, tournamentId, category }: Props) {
                 <button
                   title="Delete saved team"
                   onClick={e => { e.stopPropagation(); deleteTeam(t.id); }}
-                  style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 13, padding: '0 2px' }}
-                >×</button>
+                  style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 13, padding: '0 2px', display: 'inline-flex', alignItems: 'center' }}
+                ><X size={12} strokeWidth={2} /></button>
               </div>
             ))
           )}

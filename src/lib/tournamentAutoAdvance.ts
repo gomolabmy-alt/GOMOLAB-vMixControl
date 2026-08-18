@@ -4,10 +4,11 @@ import { useMatchResultsStore } from '../stores/matchResultsStore';
 import { useTeamDbStore } from '../stores/teamDbStore';
 import { useCanvasStore } from '../stores/canvasStore';
 import { SPORT_DEFAULTS } from '../types/tournament';
-import { tierRank } from './scheduleGen';
+import { tierRank, isPlacementRoundLabel } from './scheduleGen';
+import { computeLocalStatsForTeam } from './localPlayerStats';
 import {
   computeStandings, findMatchWinner, isPlaceholderTeamName, extractKnockoutStage,
-  knockoutStageSize, normalizeGroups, bareStageLabel,
+  knockoutStageSize, normalizeGroups, bareStageLabel, isPoolStageResult,
 } from '../components/TournamentManager';
 
 const _isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -169,6 +170,52 @@ export function runTournamentAutoAdvance() {
           }
         }
 
+        // Placement-ladder rounds (see buildPlacementLadder / groups-tiered's
+        // "ranked placement" mode) — every completed match whose bare stage
+        // is an "Nth-Mth Placing" label writes its winner/loser into any
+        // placeholder matching that exact text, category-scoped. No tier/'/'
+        // gate needed (unlike pairedQfMatches above): these labels are
+        // structurally unique to this generator and never reused by the old
+        // tiered format, so there's no cross-format text-collision risk, and
+        // it's idempotent (a slot already resolved no longer matches
+        // isPlaceholderTeamName).
+        const placementMatches = catBracketMatches.filter(m => isPlacementRoundLabel(extractKnockoutStage(m) ?? ''));
+        for (const pm of placementMatches) {
+          const win = findMatchWinner(pm, scopedResults, t.id);
+          if (!win) continue;
+          const winner = win.side === 'A'
+            ? { id: pm.teamAId, name: pm.teamAName, shortName: pm.teamAShortName, color: pm.teamAColor, logo: pm.teamALogo }
+            : { id: pm.teamBId, name: pm.teamBName, shortName: pm.teamBShortName, color: pm.teamBColor, logo: pm.teamBLogo };
+          const loser = win.side === 'A'
+            ? { id: pm.teamBId, name: pm.teamBName, shortName: pm.teamBShortName, color: pm.teamBColor, logo: pm.teamBLogo }
+            : { id: pm.teamAId, name: pm.teamAName, shortName: pm.teamAShortName, color: pm.teamAColor, logo: pm.teamALogo };
+          const matchLabel = bareStageLabel(pm);
+          const winnerPh = `Winner of ${matchLabel}`;
+          const loserPh = `Loser of ${matchLabel}`;
+          for (const target of catMatches) {
+            if (winner.name) {
+              if (target.teamAName === winnerPh && isPlaceholderTeamName(target.teamAName)) {
+                updateMatch(target.id, { teamAId: winner.id, teamAName: winner.name, teamAShortName: winner.shortName, teamAColor: winner.color, teamALogo: winner.logo });
+                useCanvasStore.getState().syncScoreboardTeamForFixture(target.id, 'A', winnerPh, winner);
+              }
+              if (target.teamBName === winnerPh && isPlaceholderTeamName(target.teamBName)) {
+                updateMatch(target.id, { teamBId: winner.id, teamBName: winner.name, teamBShortName: winner.shortName, teamBColor: winner.color, teamBLogo: winner.logo });
+                useCanvasStore.getState().syncScoreboardTeamForFixture(target.id, 'B', winnerPh, winner);
+              }
+            }
+            if (loser.name) {
+              if (target.teamAName === loserPh && isPlaceholderTeamName(target.teamAName)) {
+                updateMatch(target.id, { teamAId: loser.id, teamAName: loser.name, teamAShortName: loser.shortName, teamAColor: loser.color, teamALogo: loser.logo });
+                useCanvasStore.getState().syncScoreboardTeamForFixture(target.id, 'A', loserPh, loser);
+              }
+              if (target.teamBName === loserPh && isPlaceholderTeamName(target.teamBName)) {
+                updateMatch(target.id, { teamBId: loser.id, teamBName: loser.name, teamBShortName: loser.shortName, teamBColor: loser.color, teamBLogo: loser.logo });
+                useCanvasStore.getState().syncScoreboardTeamForFixture(target.id, 'B', loserPh, loser);
+              }
+            }
+          }
+        }
+
         // A Cup/Plate/Bowl/Shield tournament has several parallel brackets
         // reusing the exact same stage names ("Quarterfinal 1"..."Quarterfinal
         // N" in every tier) — advancing by stage alone would cross-advance a
@@ -192,6 +239,12 @@ export function runTournamentAutoAdvance() {
           const stages = Array.from(byStage.entries()).sort((a, b) => knockoutStageSize(b[0]) - knockoutStageSize(a[0]));
           for (let r = 0; r < stages.length - 1; r++) {
             const stageName = stages[r][0];
+            // Placement-ladder stages ("9th-12th Placing"...) are fully
+            // resolved by the dedicated pass above — this generic
+            // winner-only/position-based routing has no concept of a loser
+            // ALSO continuing to a different next stage, so it would
+            // misroute a placement bracket's sibling finals if left to run.
+            if (isPlacementRoundLabel(stageName)) continue;
             const curMatches = stages[r][1];
             const nextMatches = stages[r + 1][1];
             const nextByIndex = new Map(nextMatches.map(m => [matchIndexOf(m), m]));
@@ -246,6 +299,14 @@ export function runTournamentAutoAdvance() {
       const buckets: (string | undefined)[] = categories.length > 0 ? categories : [undefined];
       const settings = t.settings ?? SPORT_DEFAULTS[t.sport];
       const placeholderRe = /^(\d+)(?:st|nd|rd|th) (.+)$/;
+      // A "Best Nth-place" wildcard (see buildBestNthWildcardSlots) — e.g.
+      // "Best 3rd", "2nd Best 3rd" — cross-ranks every pool's Nth-place
+      // finisher instead of naming one specific pool. Checked BEFORE
+      // placeholderRe below: a leading-ordinal wildcard like "2nd Best 3rd"
+      // would otherwise partially match placeholderRe (group captured as
+      // the literal text "Best 3rd", which is never a real group name) and
+      // silently dead-end forever instead of falling into this branch.
+      const wildcardRe = /^(?:(\d+)(?:st|nd|rd|th) )?Best (\d+)(?:st|nd|rd|th)$/;
 
       for (const cat of buckets) {
         const catGroups = allGroups.filter(g => cat === undefined || !g.category || g.category === cat);
@@ -263,14 +324,43 @@ export function runTournamentAutoAdvance() {
           // the knockout stage.
           if (!groupMatches.every(m => !!m.completedAt)) continue;
           const groupTeams = scopedTeams.filter(x => x.group === g.name && (cat === undefined || x.category === cat));
-          standingsByGroup.set(g.name, computeStandings(groupTeams, scopedResults, settings));
+          // Only pool-stage results decide who advances — a same-group
+          // rematch inside the bracket/wildcard stage must not count twice.
+          standingsByGroup.set(g.name, computeStandings(groupTeams, scopedResults.filter(isPoolStageResult), settings));
         }
         if (standingsByGroup.size === 0) continue;
 
         for (const m of bracketMatches) {
           for (const side of ['A', 'B'] as const) {
             const curName = side === 'A' ? m.teamAName : m.teamBName;
-            const placeholderMatch = curName?.match(placeholderRe);
+            if (!curName) continue;
+
+            const wildcardMatch = curName.match(wildcardRe);
+            if (wildcardMatch) {
+              const wildcardRank = wildcardMatch[1] ? parseInt(wildcardMatch[1], 10) : 1;
+              const sourceRank = parseInt(wildcardMatch[2], 10);
+              // Only the pools that actually have an Nth-place team are
+              // candidates — and every one of THOSE must be fully decided
+              // (present in standingsByGroup) before ranking them, so a
+              // still-in-progress pool can't lock in a wrong wildcard.
+              const eligibleGroups = catGroups.filter(g =>
+                scopedTeams.filter(x => x.group === g.name && (cat === undefined || x.category === cat)).length >= sourceRank
+              );
+              if (eligibleGroups.length === 0 || !eligibleGroups.every(g => standingsByGroup.has(g.name))) continue;
+              const candidates = eligibleGroups
+                .map(g => standingsByGroup.get(g.name)![sourceRank - 1])
+                .filter((s): s is NonNullable<typeof s> => !!s)
+                .sort((a, b) => b.pts - a.pts || (b.pf - b.pa) - (a.pf - a.pa) || b.pf - a.pf);
+              const standing = candidates[wildcardRank - 1];
+              if (!standing) continue;
+              updateMatch(m.id, side === 'A'
+                ? { teamAId: standing.teamId, teamAName: standing.name, teamAShortName: standing.shortName, teamAColor: standing.color, teamALogo: standing.logo }
+                : { teamBId: standing.teamId, teamBName: standing.name, teamBShortName: standing.shortName, teamBColor: standing.color, teamBLogo: standing.logo });
+              useCanvasStore.getState().syncScoreboardTeamForFixture(m.id, side, curName, { id: standing.teamId, name: standing.name, shortName: standing.shortName, color: standing.color, logo: standing.logo });
+              continue;
+            }
+
+            const placeholderMatch = curName.match(placeholderRe);
             if (!placeholderMatch) continue;
             const rank = parseInt(placeholderMatch[1], 10);
             const groupName = placeholderMatch[2];
@@ -279,7 +369,32 @@ export function runTournamentAutoAdvance() {
             updateMatch(m.id, side === 'A'
               ? { teamAId: standing.teamId, teamAName: standing.name, teamAShortName: standing.shortName, teamAColor: standing.color, teamALogo: standing.logo }
               : { teamBId: standing.teamId, teamBName: standing.name, teamBShortName: standing.shortName, teamBColor: standing.color, teamBLogo: standing.logo });
-            useCanvasStore.getState().syncScoreboardTeamForFixture(m.id, side, curName!, { id: standing.teamId, name: standing.name, shortName: standing.shortName, color: standing.color, logo: standing.logo });
+            useCanvasStore.getState().syncScoreboardTeamForFixture(m.id, side, curName, { id: standing.teamId, name: standing.name, shortName: standing.shortName, color: standing.color, logo: standing.logo });
+          }
+        }
+      }
+    }
+
+    // ── 5. Local player stats recompute ────────────────────────────────
+    // Only for teams explicitly switched to statsSource:'local' (a toggle in
+    // the Team Database's Players tab) — every other team keeps whatever
+    // the external roster API last set, or a manual edit, exactly as
+    // before this existed. A full recompute from this team's own saved
+    // match history each time (see localPlayerStats.ts), so it's always
+    // safe to re-run — dirty-checked below so it doesn't just keep
+    // rewriting identical numbers (and re-triggering this very loop) every
+    // cycle once the numbers are already correct.
+    {
+      for (const team of scopedTeams) {
+        if (team.statsSource !== 'local') continue;
+        const totals = computeLocalStatsForTeam(team, scopedResults);
+        for (const player of team.players) {
+          const stat = totals.get(player.id)!;
+          if (
+            (player.tries ?? 0) !== stat.tries || (player.conversions ?? 0) !== stat.conversions ||
+            (player.penalties ?? 0) !== stat.penalties || (player.dropGoals ?? 0) !== stat.dropGoals
+          ) {
+            useTeamDbStore.getState().updatePlayer(team.id, player.id, stat);
           }
         }
       }
