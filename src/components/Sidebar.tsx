@@ -18,6 +18,7 @@ import { TournamentManager } from './TournamentManager';
 import { AppSettingsModal } from './AppSettingsModal';
 import { VmixStatsPanel } from './VmixStatsPanel';
 import { UndoControl } from './UndoControl';
+import { UpdateChecker } from './UpdateChecker';
 import type { VmixConnectionEntry } from '../types/vmix';
 import type { SavedConnection } from '../types/vmix';
 
@@ -650,6 +651,7 @@ export function Sidebar() {
         <div className="sb-wordmark" data-tauri-drag-region>
           <div className="sb-name">GOMOLAB vMix Control</div>
           {buildNumber && <div className="sb-build">Build {buildNumber}{pid !== null ? ` · PID ${pid}` : ''}</div>}
+          <UpdateChecker />
         </div>
         <button
           className="sb-collapse-btn"

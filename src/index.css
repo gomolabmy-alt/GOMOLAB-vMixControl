@@ -255,6 +255,37 @@ button { user-select: none; -webkit-user-select: none; }
 .sb-wordmark { flex: 1; min-width: 0; }
 .sb-name { font-size: 12px; font-weight: 700; letter-spacing: 0.2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary); }
 .sb-build { font-size: 9px; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sb-update-pill {
+  -webkit-app-region: no-drag;
+  display: inline-block;
+  margin-top: 2px;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.sb-update-pill:hover { color: var(--text-secondary); text-decoration: underline; }
+.sb-update-pill--active { color: var(--accent); }
+.sb-update-pill--active:hover { color: var(--accent-hover); }
+.sb-update-pill--error { color: var(--danger, #e74c3c); }
+.sb-update-progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.sb-update-progress-bar {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
 .sb-collapse-btn {
   flex-shrink: 0;
   width: 22px; height: 22px;

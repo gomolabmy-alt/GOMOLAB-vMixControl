@@ -78,14 +78,18 @@ function playerMergeParts(sampleName: string, sampleJersey: string, samplePositi
     ...PLAYER_STAT_FIELD_DEFS.map(f => ({ key: f.key, label: f.label, sample: PLAYER_STAT_SAMPLES[f.key] })),
   ];
 }
-const RUGBY_UNION_INCS = [
+// Also reused by TournamentManager.tsx's Results/Schedule score-event editor
+// (see RUGBY_ACTION_FULL_LABEL there) so a manually-entered score event picks
+// from the exact same type/points pairs the live scoreboard buttons use,
+// instead of a separately-maintained list that could drift out of sync.
+export const RUGBY_UNION_INCS = [
   { label: 'Try',  value: 5 },
   { label: 'Conv', value: 2 },
   { label: 'Pen',  value: 3 },
   { label: 'Drop', value: 3 },
   { label: 'PTry', value: 7 },
 ];
-const RUGBY_LEAGUE_INCS = [
+export const RUGBY_LEAGUE_INCS = [
   { label: 'Try',  value: 4 },
   { label: 'Conv', value: 2 },
   { label: 'Pen',  value: 2 },
@@ -3539,6 +3543,12 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   <Field label="Auto-sync on change">
                     <input type="checkbox" checked={cfg.vmixAutoSync === true} onChange={e => up({ vmixAutoSync: e.target.checked })} />
                   </Field>
+                  <Field label="Group/Pool Name field">
+                    {renderFieldPicker(cfg.vmixInputKey ?? '', cfg.groupField ?? '', v => up({ groupField: v }), 'Group.Text')}
+                  </Field>
+                  <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '-4px 0 4px' }}>
+                    One value for the whole table (e.g. "Pool A") — not indexed per row like the fields below.
+                  </p>
                   {prefixField('rankPrefix', 'Rank prefix', 'Pick Rank1.Text → auto-prefix')}
                   {prefixField('teamPrefix', 'Team prefix', 'Pick Team1.Text → auto-prefix')}
                   {prefixField('shortTeamPrefix', 'Short Name prefix', 'Pick Short1.Text → auto-prefix')}

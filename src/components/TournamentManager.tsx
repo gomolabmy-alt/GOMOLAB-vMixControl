@@ -21,7 +21,7 @@ import type { Tournament, SportType, TournamentSettings, TournamentGroup, Tourna
 import { SPORT_LABELS, SPORT_POSITIONS, SPORT_DEFAULTS, getRosterPositions } from '../types/tournament';
 import type { Player } from '../types/tournament';
 import { LogoUrlPicker } from './LogoUrlPicker';
-import { InputPickerDropdown } from './WidgetConfigPanel';
+import { InputPickerDropdown, RUGBY_UNION_INCS, RUGBY_LEAGUE_INCS } from './WidgetConfigPanel';
 import { BracketView } from './BracketView';
 import { ConfirmModal } from './ConfirmModal';
 import { ExternalRosterLinkBar, PullPlayersButton } from './ExternalRosterPicker';
@@ -3177,6 +3177,7 @@ function SchedulePanel({ tournament, activeCategory, editMode }: {
                     result={savedResults.find(r => r.sourceScheduleId === m.id)}
                     editMode={editMode}
                     periodsTotal={periodsTotal}
+                    sport={tournament.sport}
                     onUpdateResult={patch => {
                       const existing = savedResults.find(r => r.sourceScheduleId === m.id);
                       if (existing) updateResult(existing.id, patch);
@@ -3568,23 +3569,43 @@ function mergeCountRows(a: Record<string, number>, b: Record<string, number>): {
 type ScoreLogEntry = NonNullable<SavedMatchResult['scoreLog']>[number];
 type CardEntry = NonNullable<SavedMatchResult['cards']>[number];
 
+// Full, unambiguous score-type names for the manual event editor below —
+// same label/points pairs the live scoreboard's increment buttons use
+// (RUGBY_UNION_INCS/RUGBY_LEAGUE_INCS in WidgetConfigPanel.tsx), just
+// spelled out ("Conversion" not "Conv") since this is a considered "pick
+// the right type" context, not a quick tap during a live match. Matters for
+// more than just display: classifyAction (localPlayerStats.ts) buckets a
+// scoreLog entry into tries/conversions/penalties/dropGoals by loosely
+// matching this same string, so picking from a known-good list here (kept
+// in sync with the live buttons) avoids a typo silently dropping a manually
+// -entered score out of a player's stats.
+const RUGBY_ACTION_FULL_LABEL: Record<string, string> = { Try: 'Try', Conv: 'Conversion', Pen: 'Penalty', Drop: 'Drop Goal', PTry: 'Penalty Try' };
+function rugbyScoreTypes(sport: SportType | undefined): { label: string; points: number }[] {
+  const incs = sport === 'rugby_league' ? RUGBY_LEAGUE_INCS : RUGBY_UNION_INCS;
+  return incs.map(inc => ({ label: RUGBY_ACTION_FULL_LABEL[inc.label] ?? inc.label, points: inc.value }));
+}
+
 // Per-event editable list for a result's scoreLog (who scored what, and
 // when) and cards — the aggregate breakdown table above only ever showed
 // counts per action type, never which player actually scored, so this is
 // the only place "who made the score" can be seen or corrected at all.
 // Read-only when editMode is off, matching every other field in these two
 // tabs (Schedule/Results share the same edit-mode convention).
-function ScoreEventsEditor({ r, editMode, onUpdate, periodsTotal }: {
-  r: SavedMatchResult; editMode: boolean; onUpdate: (patch: Partial<SavedMatchResult>) => void; periodsTotal: number;
+function ScoreEventsEditor({ r, editMode, onUpdate, periodsTotal, sport }: {
+  r: SavedMatchResult; editMode: boolean; onUpdate: (patch: Partial<SavedMatchResult>) => void; periodsTotal: number; sport: SportType | undefined;
 }) {
   const scoreLog = r.scoreLog ?? [];
   const cards = r.cards ?? [];
   const teamLabel = (team: 'A' | 'B') => team === 'A' ? (r.teamAShortName || r.teamAName) : (r.teamBShortName || r.teamBName);
   const teamColor = (team: 'A' | 'B') => team === 'A' ? r.teamAColor : r.teamBColor;
+  const scoreTypes = useMemo(() => rugbyScoreTypes(sport), [sport]);
 
   const updateLog = (i: number, patch: Partial<ScoreLogEntry>) =>
     onUpdate({ scoreLog: scoreLog.map((e, idx) => idx === i ? { ...e, ...patch } : e) });
-  const addLog = () => onUpdate({ scoreLog: [...scoreLog, { team: 'A', action: 'Try', points: 5, period: periodsTotal >= 1 ? 1 : undefined }] });
+  const addLog = () => {
+    const first = scoreTypes[0];
+    onUpdate({ scoreLog: [...scoreLog, { team: 'A', action: first?.label ?? 'Try', points: first?.points ?? 5, period: periodsTotal >= 1 ? 1 : undefined }] });
+  };
 
   const updateCard = (i: number, patch: Partial<CardEntry>) =>
     onUpdate({ cards: cards.map((c, idx) => idx === i ? { ...c, ...patch } : c) });
@@ -3601,6 +3622,15 @@ function ScoreEventsEditor({ r, editMode, onUpdate, periodsTotal }: {
     else onUpdate({ cards: cards.filter((_, idx) => idx !== pendingDelete.index) });
     setPendingDelete(null);
   };
+
+  // A score type not on the current sport's canonical list (an older
+  // free-typed action, or a custom one) shows the select as "Custom…" and
+  // reveals a text input to edit/keep it — everything else stays a plain
+  // dropdown so the common case can't drift into a typo. Explicitly forced
+  // open per-row (rather than only inferred from the action text) so
+  // picking "Custom…" doesn't immediately snap back to the last real match.
+  const [customRows, setCustomRows] = useState<Set<number>>(new Set());
+  const isCustom = (i: number, action: string) => customRows.has(i) || !scoreTypes.some(t => t.label === action);
 
   if (!editMode && scoreLog.length === 0 && cards.length === 0) return null;
 
@@ -3621,8 +3651,24 @@ function ScoreEventsEditor({ r, editMode, onUpdate, periodsTotal }: {
                     <option value="A">{r.teamAShortName || r.teamAName}</option>
                     <option value="B">{r.teamBShortName || r.teamBName}</option>
                   </select>
-                  <input className="field-input" style={{ width: 90 }} value={e.action} placeholder="Action"
-                    onChange={ev => updateLog(i, { action: ev.target.value })} />
+                  <select className="field-input" style={{ width: 'auto' }}
+                    value={isCustom(i, e.action) ? '__custom__' : e.action}
+                    onChange={ev => {
+                      if (ev.target.value === '__custom__') {
+                        setCustomRows(prev => new Set(prev).add(i));
+                        return;
+                      }
+                      setCustomRows(prev => { if (!prev.has(i)) return prev; const next = new Set(prev); next.delete(i); return next; });
+                      const type = scoreTypes.find(t => t.label === ev.target.value);
+                      updateLog(i, { action: ev.target.value, ...(type ? { points: type.points } : {}) });
+                    }}>
+                    {scoreTypes.map(t => <option key={t.label} value={t.label}>{t.label}</option>)}
+                    <option value="__custom__">Custom…</option>
+                  </select>
+                  {isCustom(i, e.action) && (
+                    <input className="field-input" style={{ width: 90 }} value={e.action} placeholder="Action" autoFocus
+                      onChange={ev => updateLog(i, { action: ev.target.value })} />
+                  )}
                   <input className="field-input" style={{ width: 48 }} type="number" value={e.points} placeholder="Pts"
                     onChange={ev => updateLog(i, { points: Number(ev.target.value) || 0 })} />
                   <input className="field-input" style={{ width: 130 }} value={e.scorer ?? ''} placeholder="Scorer name"
@@ -3703,8 +3749,8 @@ function ScoreEventsEditor({ r, editMode, onUpdate, periodsTotal }: {
 // empty state). Reuses the scoreboard widget's `.wgt-h2h-table` styling so
 // the "two teams either side of a bordered label column" look stays
 // consistent across the app.
-function ResultDetail({ r, editMode, onUpdate, periodsTotal }: {
-  r: SavedMatchResult; editMode: boolean; onUpdate: (patch: Partial<SavedMatchResult>) => void; periodsTotal: number;
+function ResultDetail({ r, editMode, onUpdate, periodsTotal, sport }: {
+  r: SavedMatchResult; editMode: boolean; onUpdate: (patch: Partial<SavedMatchResult>) => void; periodsTotal: number; sport: SportType | undefined;
 }) {
   const aBreakdown: Record<string, number> = {};
   const bBreakdown: Record<string, number> = {};
@@ -3768,7 +3814,7 @@ function ResultDetail({ r, editMode, onUpdate, periodsTotal }: {
         </table>
       )}
       {(r.lineup?.length ?? 0) > 0 && <LineupSection r={r} />}
-      <ScoreEventsEditor r={r} editMode={editMode} onUpdate={onUpdate} periodsTotal={periodsTotal} />
+      <ScoreEventsEditor r={r} editMode={editMode} onUpdate={onUpdate} periodsTotal={periodsTotal} sport={sport} />
     </div>
   );
 }
@@ -3840,9 +3886,9 @@ function LineupSection({ r }: { r: SavedMatchResult }) {
 // sourceScheduleId and reuses the exact same editable score-events/cards
 // list Results uses, so "who scored" can be corrected from either tab
 // without having to go find the same match in the other one.
-function FixtureDetail({ result, editMode, onUpdateResult, periodsTotal }: {
+function FixtureDetail({ result, editMode, onUpdateResult, periodsTotal, sport }: {
   m: ScheduledMatch; result: SavedMatchResult | undefined; editMode: boolean;
-  onUpdateResult: (patch: Partial<SavedMatchResult>) => void; periodsTotal: number;
+  onUpdateResult: (patch: Partial<SavedMatchResult>) => void; periodsTotal: number; sport: SportType | undefined;
 }) {
   if (!result) {
     return (
@@ -3853,7 +3899,7 @@ function FixtureDetail({ result, editMode, onUpdateResult, periodsTotal }: {
   }
   return (
     <div className="tm-result-detail">
-      <ScoreEventsEditor r={result} editMode={editMode} onUpdate={onUpdateResult} periodsTotal={periodsTotal} />
+      <ScoreEventsEditor r={result} editMode={editMode} onUpdate={onUpdateResult} periodsTotal={periodsTotal} sport={sport} />
     </div>
   );
 }
@@ -4007,7 +4053,7 @@ function ResultsPanel({ tournament }: { tournament: Tournament }) {
 
             {editMode && <button className="tm-sched-del" title="Delete result" onClick={() => setDeleteResultTarget(r)}>×</button>}
           </div>
-          {expandedIds.has(r.id) && <ResultDetail r={r} editMode={editMode} onUpdate={patch => updateResult(r.id, patch)} periodsTotal={periodsTotal} />}
+          {expandedIds.has(r.id) && <ResultDetail r={r} editMode={editMode} onUpdate={patch => updateResult(r.id, patch)} periodsTotal={periodsTotal} sport={tournament.sport} />}
           </div>
         ))}
       </div>

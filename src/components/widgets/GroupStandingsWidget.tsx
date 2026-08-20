@@ -98,6 +98,9 @@ export function GroupStandingsWidget({ widgetId, config }: Props) {
   const sendToVmix = useCallback(() => {
     const c = getClient();
     if (!c || !vmixInputKey || rows.length === 0) return;
+    // One value for the whole table, not per-row like the fields below —
+    // the group/pool name itself (e.g. "Pool A"), not a team's rank in it.
+    if (config.groupField) c.setTextField(vmixInputKey, config.groupField, groupLabel);
     const prefixes = PREFIX_FIELDS.map(f => config[f.key] as string | undefined).concat(config.mergedPrefix);
     rows.forEach((r, i) => {
       const idx = i + 1;
@@ -126,7 +129,7 @@ export function GroupStandingsWidget({ widgetId, config }: Props) {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [getClient, vmixState, vmixInputKey, rows, config]);
+  }, [getClient, vmixState, vmixInputKey, rows, config, groupLabel]);
 
   const dataKey = rows.map(r => `${r.teamId}:${r.played}:${r.won}:${r.drawn}:${r.lost}:${r.pf}:${r.pa}:${r.pts}`).join('|');
   const prevKeyRef = useRef('');
