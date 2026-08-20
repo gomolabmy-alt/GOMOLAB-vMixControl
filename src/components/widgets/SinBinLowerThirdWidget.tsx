@@ -7,7 +7,7 @@ import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useAppSettings } from '../../stores/appSettingsStore';
 import { autoLinkedWidget } from '../../lib/autoLink';
 import { simplifyPlayerName } from '../../lib/simpleName';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -140,7 +140,7 @@ export function SinBinLowerThirdWidget({ widgetId, config }: Props) {
     if (config.fieldName)   client.setTextField(key, config.fieldName,   player.name);
     if (config.fieldTimer)  client.setTextField(key, config.fieldTimer,  formatTime(player.remainingMs, 'mm:ss'));
     if (config.fieldTeam)   client.setTextField(key, config.fieldTeam,   player.teamName);
-    if (config.fieldTeamLogo && player.teamLogo) client.setImageField(key, config.fieldTeamLogo, player.teamLogo);
+    if (config.fieldTeamLogo) client.setImageField(key, config.fieldTeamLogo, player.teamLogo || transparentLogoUrl());
     if (config.mergedPrefix && config.mergedParts?.length) {
       const src: Record<string, string> = {
         jersey: player.jerseyNo, name: player.name, timer: formatTime(player.remainingMs, 'mm:ss'), team: player.teamName,

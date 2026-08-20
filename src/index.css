@@ -11964,6 +11964,16 @@ input.tm-pl-cell--stat {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+.tm-stats-source-bulk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.tm-stats-source-bulk .tm-io-btn { flex: 0 0 auto; }
 .tm-io-btn {
   flex: 1;
   padding: 4px 6px;
@@ -12859,6 +12869,15 @@ input.tm-pl-cell--stat {
   gap: 5px;
   font-size: 13px;
   color: var(--text-primary);
+  margin-bottom: 2px;
+}
+.notif-warn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #f39c12;
   margin-bottom: 2px;
 }
 .notif-jersey {

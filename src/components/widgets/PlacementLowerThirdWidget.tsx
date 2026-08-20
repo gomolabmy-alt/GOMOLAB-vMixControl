@@ -8,7 +8,7 @@ import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import { SPORT_DEFAULTS } from '../../types/tournament';
 import { resolvePlacementTeam, type ResolvedPlacementTeam } from '../../lib/placementResolve';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -80,7 +80,7 @@ export function PlacementLowerThirdWidget({ widgetId, config }: Props) {
     if (!client || !slot?.vmixInputKey) return;
     if (slot.fieldLabel) client.setTextField(slot.vmixInputKey, slot.fieldLabel, slot.label ?? '');
     if (slot.fieldTeam) client.setTextField(slot.vmixInputKey, slot.fieldTeam, team?.name ?? '');
-    if (slot.fieldLogo && team?.logo) client.setImageField(slot.vmixInputKey, slot.fieldLogo, team.logo);
+    if (slot.fieldLogo) client.setImageField(slot.vmixInputKey, slot.fieldLogo, team?.logo || transparentLogoUrl());
     if (slot.mergedPrefix && slot.mergedParts?.length) {
       const merged = slot.mergedParts
         .map(k => k === 'label' ? (slot.label ?? '') : (team?.name ?? ''))

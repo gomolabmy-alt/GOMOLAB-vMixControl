@@ -4,7 +4,7 @@ import { useCanvasStore } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { buildActionSummary } from '../../utils/scoreActions';
 import { autoLinkedWidget } from '../../lib/autoLink';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -66,7 +66,7 @@ export function PlayerLowerThirdWidget({ widgetId, config }: Props) {
     if (config.fieldPosition     && position)     c.setTextField(key, config.fieldPosition,     position);
     if (config.fieldTeam         && teamName)     c.setTextField(key, config.fieldTeam,         teamName);
     if (config.fieldScoreSummary && scoreSummary) c.setTextField(key, config.fieldScoreSummary, scoreSummary);
-    if (config.fieldTeamLogo && teamLogo) c.setImageField(key, config.fieldTeamLogo, teamLogo);
+    if (config.fieldTeamLogo) c.setImageField(key, config.fieldTeamLogo, teamLogo || transparentLogoUrl());
     if (config.mergedPrefix && config.mergedParts?.length) {
       const src: Record<string, string> = { name, jersey, position, team: teamName, scoreSummary };
       c.setTextField(key, config.mergedPrefix, config.mergedParts.map((k: string) => src[k] ?? '').join(config.mergedSeparator ?? ' '));

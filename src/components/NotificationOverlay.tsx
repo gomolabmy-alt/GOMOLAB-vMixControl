@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { CircleDot, Square, ArrowLeftRight, Pause, ArrowRight, ArrowLeft, X } from 'lucide-react';
+import { CircleDot, Square, ArrowLeftRight, Pause, ArrowRight, ArrowLeft, X, AlertTriangle } from 'lucide-react';
 import { useCanvasStore, formatTime } from '../stores/canvasStore';
 import { useAppSettings } from '../stores/appSettingsStore';
 
@@ -55,9 +55,15 @@ function NotifCard({ notif, onDismiss, durationMs }: { notif: Notif; onDismiss: 
     });
   }, [durationMs]);
 
+  // A score logged with no scorer picked (see ScoreboardWidget.tsx's
+  // handleScore — the picker only ever appears when a squad is linked and
+  // loaded for that side) silently doesn't count toward any player's local
+  // stats. Flagged here with a distinct color rather than a separate
+  // notification type, since it's the exact same scoreLog entry either way.
+  const unattributed = notif.type === 'goal' && !notif.scorer && !notif.jerseyNo;
   const accentColor = notif.type === 'card'
     ? CARD_COLORS[notif.cardType!]
-    : notif.type === 'goal' ? '#2ecc71'
+    : notif.type === 'goal' ? (unattributed ? '#f39c12' : '#2ecc71')
     : notif.type === 'sub' ? '#3498db'
     : '#95a5a6';
 
@@ -65,7 +71,7 @@ function NotifCard({ notif, onDismiss, durationMs }: { notif: Notif; onDismiss: 
     <div className="notif-card" style={{ borderLeftColor: accentColor }}>
       <div className="notif-card-inner">
         <div className="notif-icon" style={{ color: accentColor }}>
-          {notif.type === 'goal' && <CircleDot size={16} />}
+          {notif.type === 'goal' && (unattributed ? <AlertTriangle size={16} /> : <CircleDot size={16} />)}
           {notif.type === 'card' && <Square size={14} fill={CARD_COLORS[notif.cardType!]} stroke="none" />}
           {notif.type === 'sub' && <ArrowLeftRight size={16} />}
           {notif.type === 'time-pause' && <Pause size={16} />}
@@ -76,10 +82,14 @@ function NotifCard({ notif, onDismiss, durationMs }: { notif: Notif; onDismiss: 
               <div className="notif-title" style={{ color: accentColor }}>
                 {notif.action ?? 'GOAL!'} — {notif.teamName ?? (notif.team === 'A' ? 'Team A' : 'Team B')}
               </div>
-              {(notif.scorer || notif.jerseyNo) && (
+              {(notif.scorer || notif.jerseyNo) ? (
                 <div className="notif-detail">
                   {notif.jerseyNo && <span className="notif-jersey">#{notif.jerseyNo}</span>}
                   {notif.scorer && <span>{notif.scorer}</span>}
+                </div>
+              ) : (
+                <div className="notif-warn">
+                  <AlertTriangle size={11} strokeWidth={2.5} /> No player attributed — won't count toward local stats
                 </div>
               )}
               {(notif.scoreA !== undefined && notif.scoreB !== undefined) && (

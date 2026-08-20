@@ -6,7 +6,7 @@ import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { findTeamRecord } from '../../lib/teamForm';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 import { getPlayerMatchHistory, summarizeActions } from '../../lib/localPlayerStats';
 import { autoLinkedWidget } from '../../lib/autoLink';
 import { useAppSettings } from '../../stores/appSettingsStore';
@@ -99,7 +99,7 @@ export function PlayerStatsWidget({ widgetId, config }: Props) {
     // Raw stored URL, not resolveImageUrl(teamLogo) — that substitution is
     // only for this app's own webview to reach the local image server;
     // vMix fetches the image itself and needs the real LAN-reachable address.
-    if (config.fieldTeamLogo && teamLogo) c.setImageField(key, config.fieldTeamLogo, teamLogo);
+    if (config.fieldTeamLogo) c.setImageField(key, config.fieldTeamLogo, teamLogo || transparentLogoUrl());
     for (const f of STAT_FIELDS) set(config[`field${f.key.charAt(0).toUpperCase()}${f.key.slice(1)}`], player[f.key]);
     if (config.mergedPrefix && config.mergedParts?.length) {
       set(config.mergedPrefix, config.mergedParts.map((k: PlayerStatsMergeKey) => resolvePlayerStatsMergePart(player, teamName, k, disp)).join(config.mergedSeparator ?? ' '));

@@ -7,7 +7,7 @@ import { useAppSettings } from '../../stores/appSettingsStore';
 import { autoLinkedWidget, autoLinkedWidgetPair } from '../../lib/autoLink';
 import { resolvePlayerListRoster } from '../../lib/playerListSquad';
 import { simplifyPlayerName } from '../../lib/simpleName';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 import type { CanvasWidget } from '../../types/canvas';
 
 interface Props {
@@ -131,7 +131,7 @@ export function ScoreLowerThirdWidget({ widgetId, config }: Props) {
     if (activeInput.fieldJersey) c.setTextField(key, activeInput.fieldJersey, entry.jerseyNo ?? '');
     if (activeInput.fieldAction) c.setTextField(key, activeInput.fieldAction, entry.action ?? '');
     const teamLogo = entry.team === 'A' ? sbCfg.teamALogo : sbCfg.teamBLogo;
-    if (activeInput.fieldTeamLogo && teamLogo) c.setImageField(key, activeInput.fieldTeamLogo, teamLogo);
+    if (activeInput.fieldTeamLogo) c.setImageField(key, activeInput.fieldTeamLogo, teamLogo || transparentLogoUrl());
     if (activeInput.mergedPrefix && activeInput.mergedParts?.length) {
       const src: Record<string, string> = {
         team: entry.teamName ?? '', scorer: entry.scorer ? disp(entry.scorer) : '', jersey: entry.jerseyNo ?? '', action: entry.action ?? '',

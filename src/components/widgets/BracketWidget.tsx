@@ -7,6 +7,7 @@ import { useCanvasStore } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { extractKnockoutStage, knockoutStageSize, findMatchScore, findMatchWinner } from '../TournamentManager';
 import { BracketView } from '../BracketView';
+import { transparentLogoUrl } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -131,8 +132,8 @@ export function BracketWidget({ widgetId, config }: Props) {
         const prefix = config[f.key];
         if (prefix) c.setTextField(vmixInputKey, `${prefix}${idx}.Text`, resolveBracketPart(m, score, winnerSide, f.part));
       }
-      if (config.logoAPrefix && m.teamALogo) c.setImageField(vmixInputKey, `${config.logoAPrefix}${idx}.Source`, m.teamALogo);
-      if (config.logoBPrefix && m.teamBLogo) c.setImageField(vmixInputKey, `${config.logoBPrefix}${idx}.Source`, m.teamBLogo);
+      if (config.logoAPrefix) c.setImageField(vmixInputKey, `${config.logoAPrefix}${idx}.Source`, m.teamALogo || transparentLogoUrl());
+      if (config.logoBPrefix) c.setImageField(vmixInputKey, `${config.logoBPrefix}${idx}.Source`, m.teamBLogo || transparentLogoUrl());
       if (config.mergedPrefix && config.mergedParts?.length) {
         const merged = config.mergedParts.map((p: BracketMergePart) => resolveBracketPart(m, score, winnerSide, p)).join(config.mergedSeparator ?? ' ');
         c.setTextField(vmixInputKey, `${config.mergedPrefix}${idx}.Text`, merged);

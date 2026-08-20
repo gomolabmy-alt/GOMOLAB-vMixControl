@@ -10,7 +10,7 @@ import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { useUndoStore } from '../../stores/undoStore';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 import { LogoUrlPicker } from '../LogoUrlPicker';
 import { TeamPicker } from '../TeamPicker';
 import { TeamMatchHistoryButton } from '../TeamMatchHistoryButton';
@@ -389,8 +389,8 @@ export function ScoreboardWidget({ widgetId, config }: Props) {
       if (!t.inputKey) continue;
       const c = client;
       if (!c) continue;
-      if (t.fieldLogoA && config.teamALogo) c.setImageField(t.inputKey, t.fieldLogoA, config.teamALogo);
-      if (t.fieldLogoB && config.teamBLogo) c.setImageField(t.inputKey, t.fieldLogoB, config.teamBLogo);
+      if (t.fieldLogoA) c.setImageField(t.inputKey, t.fieldLogoA, config.teamALogo || transparentLogoUrl());
+      if (t.fieldLogoB) c.setImageField(t.inputKey, t.fieldLogoB, config.teamBLogo || transparentLogoUrl());
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config.teamALogo, config.teamBLogo, vmixSyncVersion]);

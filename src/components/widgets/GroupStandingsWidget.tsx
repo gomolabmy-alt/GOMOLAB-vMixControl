@@ -10,6 +10,7 @@ import { CanvasActionContext } from '../../lib/canvasContext';
 import { findTeamRecord } from '../../lib/teamForm';
 import { autoLinkedWidget } from '../../lib/autoLink';
 import { computeStandings, isPoolStageResult, normalizeGroups, StandingsTable, type StandingRow } from '../TournamentManager';
+import { transparentLogoUrl } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -108,7 +109,7 @@ export function GroupStandingsWidget({ widgetId, config }: Props) {
         const prefix = config[f.key];
         if (prefix) c.setTextField(vmixInputKey, `${prefix}${idx}.Text`, resolveGroupStandingsPart(r, i, f.part));
       }
-      if (config.logoPrefix && r.logo) c.setImageField(vmixInputKey, `${config.logoPrefix}${idx}.Source`, r.logo);
+      if (config.logoPrefix) c.setImageField(vmixInputKey, `${config.logoPrefix}${idx}.Source`, r.logo || transparentLogoUrl());
       if (config.mergedPrefix && config.mergedParts?.length) {
         const merged = config.mergedParts.map((p: GroupStandingsMergePart) => resolveGroupStandingsPart(r, i, p)).join(config.mergedSeparator ?? ' ');
         c.setTextField(vmixInputKey, `${config.mergedPrefix}${idx}.Text`, merged);

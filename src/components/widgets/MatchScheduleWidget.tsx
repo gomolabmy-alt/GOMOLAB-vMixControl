@@ -5,7 +5,7 @@ import { useMatchScheduleStore, type ScheduledMatch } from '../../stores/matchSc
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { useAppSettings } from '../../stores/appSettingsStore';
 import { useVmixStore } from '../../stores/vmixStore';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, findDuplicateResult, parseScheduledDateTime, formatLate } from '../../utils/scoreboardSnapshot';
 import { useMatchNumbers } from '../../utils/matchNumber';
 import { ConfirmButton } from '../ConfirmButton';
@@ -174,8 +174,8 @@ export function MatchScheduleWidget({ widgetId, config }: Props) {
         if (t.venuePrefix) c.setTextField(t.inputKey, `${t.venuePrefix}${idx}.Text`, m.venue ?? '');
         if (t.groupPrefix) c.setTextField(t.inputKey, `${t.groupPrefix}${idx}.Text`, m.group ?? '');
         if (t.matchIdPrefix) c.setTextField(t.inputKey, `${t.matchIdPrefix}${idx}.Text`, matchNumbers.get(m.id) ?? '');
-        if (t.logoAPrefix && m.teamALogo) c.setImageField(t.inputKey, `${t.logoAPrefix}${idx}.Source`, m.teamALogo);
-        if (t.logoBPrefix && m.teamBLogo) c.setImageField(t.inputKey, `${t.logoBPrefix}${idx}.Source`, m.teamBLogo);
+        if (t.logoAPrefix) c.setImageField(t.inputKey, `${t.logoAPrefix}${idx}.Source`, m.teamALogo || transparentLogoUrl());
+        if (t.logoBPrefix) c.setImageField(t.inputKey, `${t.logoBPrefix}${idx}.Source`, m.teamBLogo || transparentLogoUrl());
         if (t.mergedPrefix && t.mergedParts?.length) {
           const merged = t.mergedParts.map(p => resolveFixturePart(m, p, matchNumbers)).join(t.mergedSeparator ?? ' ');
           c.setTextField(t.inputKey, `${t.mergedPrefix}${idx}.Text`, merged);

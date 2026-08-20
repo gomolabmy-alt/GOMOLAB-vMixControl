@@ -6,7 +6,7 @@ import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { findTeamRecord } from '../../lib/teamForm';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 import { getPlayerMatchHistory, summarizeActions } from '../../lib/localPlayerStats';
 import { autoLinkedWidget } from '../../lib/autoLink';
 import { useAppSettings } from '../../stores/appSettingsStore';
@@ -100,8 +100,8 @@ export function PlayerHeadToHeadWidget({ widgetId, config }: Props) {
       set(config[`field${cap(f.key)}A`], playerA![f.key]);
       set(config[`field${cap(f.key)}B`], playerB![f.key]);
     }
-    if (config.fieldTeamLogoA && dc.teamALogo) c.setImageField(key, config.fieldTeamLogoA, dc.teamALogo);
-    if (config.fieldTeamLogoB && dc.teamBLogo) c.setImageField(key, config.fieldTeamLogoB, dc.teamBLogo);
+    if (config.fieldTeamLogoA) c.setImageField(key, config.fieldTeamLogoA, dc.teamALogo || transparentLogoUrl());
+    if (config.fieldTeamLogoB) c.setImageField(key, config.fieldTeamLogoB, dc.teamBLogo || transparentLogoUrl());
     if (config.mergedAPrefix && config.mergedAParts?.length) {
       set(config.mergedAPrefix, config.mergedAParts.map((k: PlayerMergeKey) => resolvePlayerMergePart(playerA, k, disp)).join(config.mergedASeparator ?? ' '));
     }

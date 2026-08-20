@@ -7,7 +7,7 @@ import { useVmixStore } from '../../stores/vmixStore';
 import { useAppSettings } from '../../stores/appSettingsStore';
 import { autoLinkedWidget, autoLinkedWidgetId } from '../../lib/autoLink';
 import { simplifyPlayerName } from '../../lib/simpleName';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 import type { Player } from '../../types/tournament';
 
 interface Props {
@@ -127,7 +127,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
       if (!t.inputKey) continue;
       getClient()?.setTextField(t.inputKey, t.vmixFieldOut || 'PlayerOff.Text', nameOut);
       getClient()?.setTextField(t.inputKey, t.vmixFieldIn  || 'PlayerOn.Text',  nameIn);
-      if (t.vmixFieldLogo && team?.logo) getClient()?.setImageField(t.inputKey, t.vmixFieldLogo, team.logo);
+      if (t.vmixFieldLogo) getClient()?.setImageField(t.inputKey, t.vmixFieldLogo, team?.logo || transparentLogoUrl());
       if (t.mergedPrefix && t.mergedParts?.length) {
         const src: Record<string, string> = { out: nameOut, in: nameIn };
         getClient()?.setTextField(t.inputKey, t.mergedPrefix, t.mergedParts.map(k => src[k] ?? '').join(t.mergedSeparator ?? ' '));

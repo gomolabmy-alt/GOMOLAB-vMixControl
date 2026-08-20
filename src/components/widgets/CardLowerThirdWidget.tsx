@@ -7,7 +7,7 @@ import { useAppSettings } from '../../stores/appSettingsStore';
 import { autoLinkedWidgetPair } from '../../lib/autoLink';
 import { resolvePlayerListRoster } from '../../lib/playerListSquad';
 import { simplifyPlayerName, type SimpleNameOptions } from '../../lib/simpleName';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 import type { CanvasWidget } from '../../types/canvas';
 import type { SavedTeam } from '../../stores/teamDbStore';
 
@@ -147,7 +147,7 @@ export function CardLowerThirdWidget({ widgetId, config }: Props) {
     if (config.fieldName)     client.setTextField(key, config.fieldName,     player.name);
     if (config.fieldTeam)     client.setTextField(key, config.fieldTeam,     player.teamName);
     if (config.fieldCardType) client.setTextField(key, config.fieldCardType, CARD_LABEL[player.cardType]);
-    if (config.fieldTeamLogo && player.teamLogo) client.setImageField(key, config.fieldTeamLogo, player.teamLogo);
+    if (config.fieldTeamLogo) client.setImageField(key, config.fieldTeamLogo, player.teamLogo || transparentLogoUrl());
     if (config.mergedPrefix && config.mergedParts?.length) {
       client.setTextField(key, config.mergedPrefix, config.mergedParts.map((k: CardMergeKey) => resolveCardMergePart(player, k)).join(config.mergedSeparator ?? ' '));
     }

@@ -7,7 +7,7 @@ import { useAppSettings } from '../../stores/appSettingsStore';
 import { autoLinkedWidgetPair } from '../../lib/autoLink';
 import { resolvePlayerListRoster } from '../../lib/playerListSquad';
 import { simplifyPlayerName } from '../../lib/simpleName';
-import { resolveImageUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -104,8 +104,8 @@ export function CardDisplayWidget({ widgetId, config: cfg }: Props) {
       if (t.vmixFieldSinBinB) c.setTextField(t.inputKey, t.vmixFieldSinBinB, sinbinB);
       if (t.vmixFieldRedA)    c.setTextField(t.inputKey, t.vmixFieldRedA,    redA);
       if (t.vmixFieldRedB)    c.setTextField(t.inputKey, t.vmixFieldRedB,    redB);
-      if (t.vmixFieldLogoA && teamA.logo) c.setImageField(t.inputKey, t.vmixFieldLogoA, teamA.logo);
-      if (t.vmixFieldLogoB && teamB.logo) c.setImageField(t.inputKey, t.vmixFieldLogoB, teamB.logo);
+      if (t.vmixFieldLogoA) c.setImageField(t.inputKey, t.vmixFieldLogoA, teamA.logo || transparentLogoUrl());
+      if (t.vmixFieldLogoB) c.setImageField(t.inputKey, t.vmixFieldLogoB, teamB.logo || transparentLogoUrl());
       if (t.mergedPrefix && t.mergedParts?.length) {
         c.setTextField(t.inputKey, t.mergedPrefix, t.mergedParts.map(k => src[k] ?? '').join(t.mergedSeparator ?? ' '));
       }

@@ -761,19 +761,64 @@ function PlayersPanel({ tournament, activeCategory }: { tournament: Tournament; 
     e.target.value = '';
   };
 
+  // Locally-counted stats (see statsSource below) must never get stomped by
+  // a re-pull/re-import — same protection externalRoster.ts's own periodic
+  // auto-sync already gives the API path; Append needs it too since it goes
+  // through this same merge now.
+  const LOCAL_TRACKABLE_KEYS: readonly string[] = ['tries', 'conversions', 'penalties', 'dropGoals', 'yellowCards', 'redCards'];
+
   const confirmImport = (mode: 'replace' | 'append') => {
     if (!importPreview || !team) return;
     if (mode === 'replace') {
       replaceTeamPlayers(team.id, importPreview.players);
     } else {
-      importPreview.players.forEach(p => addPlayer(team.id, p));
+      // Match by name first — Append used to unconditionally addPlayer for
+      // every row, so re-pulling/re-importing a roster already imported once
+      // (e.g. jersey numbers weren't assigned on the source site yet the
+      // first time) created an exact-duplicate second player instead of
+      // filling in the number on the existing one. Only ever sets a field
+      // the import actually has a real value for — never blanks out a
+      // locally-entered jersey/position/stat just because this row's is empty.
+      const skipStats = team.statsSource === 'local';
+      const byName = new Map(team.players.map(p => [p.name.trim().toLowerCase(), p]));
+      for (const p of importPreview.players) {
+        const existing = byName.get(p.name.trim().toLowerCase());
+        if (existing) {
+          const patch: Partial<Omit<Player, 'id'>> = {};
+          if (p.jerseyNo) patch.jerseyNo = p.jerseyNo;
+          if (p.position) patch.position = p.position;
+          for (const f of PLAYER_STAT_FIELDS) {
+            if (skipStats && LOCAL_TRACKABLE_KEYS.includes(f.key)) continue;
+            if (p[f.key] !== undefined) patch[f.key] = p[f.key];
+          }
+          if (Object.keys(patch).length > 0) updatePlayer(team.id, existing.id, patch);
+        } else {
+          addPlayer(team.id, p);
+        }
+      }
     }
     setImportPreview(null);
+  };
+
+  // Bulk twin of the per-team "Tries/Conv/Pen/Drop/Cards stats from:" picker
+  // below — always applies to every team in this tournament (not just
+  // whatever the category filter currently shows), since re-clicking through
+  // each team one at a time to flip the same setting doesn't scale past a
+  // handful of teams.
+  const setAllStatsSource = (source: 'api' | 'local') => {
+    for (const t of teams) updateTeam(t.id, { statsSource: source });
   };
 
   return (
     <>
     <ExternalRosterLinkBar tournament={tournament} />
+    <div className="tm-stats-source-bulk">
+      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+        Tries/Conv/Pen/Drop/Cards stats for all {teams.length} team{teams.length !== 1 ? 's' : ''} in this tournament:
+      </span>
+      <button className="tm-io-btn" onClick={() => setAllStatsSource('api')}>External API</button>
+      <button className="tm-io-btn" onClick={() => setAllStatsSource('local')}>Counted by this app</button>
+    </div>
     <div className="tm-win-body">
       {/* Left: team list */}
       <div className="tm-win-sidebar">
