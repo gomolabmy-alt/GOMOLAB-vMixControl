@@ -367,6 +367,16 @@ const GROUP_STANDINGS_MERGE_PARTS: MergePart[] = [
   { key: 'diff',   label: 'Diff',           sample: '+15' },
   { key: 'pts',    label: 'Points',         sample: '6' },
 ];
+const BRACKET_MERGE_PARTS: MergePart[] = [
+  { key: 'stage',     label: 'Stage/Round', sample: 'Semifinal' },
+  { key: 'teamA',     label: 'Team A',      sample: 'Chelsea' },
+  { key: 'teamB',     label: 'Team B',      sample: 'Arsenal' },
+  { key: 'fullTeamA', label: 'Full Name A', sample: 'Chelsea FC' },
+  { key: 'fullTeamB', label: 'Full Name B', sample: 'Arsenal FC' },
+  { key: 'scoreA',    label: 'Score A',     sample: '2' },
+  { key: 'scoreB',    label: 'Score B',     sample: '1' },
+  { key: 'winner',    label: 'Winner (A/B)', sample: 'A' },
+];
 
 export function InputPickerDropdown({ currentKey, currentTitle, allInputs, onSelect, filter }: {
   currentKey: string;
@@ -3163,6 +3173,18 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         const filterTournamentId = cfg.filterTournamentId || pageTournamentId;
         const filterTournament = tournaments.find(t => t.id === filterTournamentId);
         const filterCategories: string[] = filterTournament?.categories ?? [];
+        const bracketPrefixField = (key: string, fieldLabel: string, placeholder: string, suffix: 'Text' | 'Source' = 'Text') => (
+          <Field label={fieldLabel}>
+            {renderFieldPicker(
+              cfg.vmixInputKey ?? '',
+              cfg[key] ? `${cfg[key]}1.${suffix}` : '',
+              v => up({ [key]: v.replace(new RegExp(`\\.${suffix}$`, 'i'), '').replace(/\d+$/, '') }),
+              placeholder,
+              suffix === 'Source' ? (n: string) => n.toLowerCase().endsWith('.source') : undefined,
+              allInputs,
+            )}
+          </Field>
+        );
         // Tier ("Cup"/"Plate"/"Bowl"/"Shield"…) has no static list on
         // Tournament the way categories do — derived live from whichever
         // knockout fixtures actually exist for this tournament+category,
@@ -3206,8 +3228,46 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             </Field>
           )}
           <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
-            Read-only — edit bracket arrangement in DB → Bracket. A category must be picked once the tournament has any; same for tier on a Cup/Plate/Bowl/Shield tournament.
+            Read-only display — edit bracket arrangement in DB → Bracket. A category must be picked once the tournament has any; same for tier on a Cup/Plate/Bowl/Shield tournament.
           </div>
+          <CollapsibleSection label="vMix Output">
+            <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
+              One input, one row per match (Stage1.Text, Stage2.Text, ...) in bracket order — earliest round first, 3rd Place Playoff (if any) last. Sent whenever a result changes.
+            </p>
+            <Field label="vMix Input">
+              {renderInputPicker('bracket_input', cfg.vmixInputKey ?? '', cfg.vmixInputTitle,
+                (key, title) => up({ vmixInputKey: key, vmixInputTitle: title }), undefined, allInputs)}
+            </Field>
+            {cfg.vmixInputKey && (
+              <>
+                <Field label="Auto-sync on change">
+                  <input type="checkbox" checked={cfg.vmixAutoSync === true} onChange={e => up({ vmixAutoSync: e.target.checked })} />
+                </Field>
+                {bracketPrefixField('stagePrefix', 'Stage/Round prefix', 'Pick Stage1.Text → auto-prefix')}
+                {bracketPrefixField('teamAPrefix', 'Team A prefix', 'Pick TeamA1.Text → auto-prefix')}
+                {bracketPrefixField('teamBPrefix', 'Team B prefix', 'Pick TeamB1.Text → auto-prefix')}
+                {bracketPrefixField('fullTeamAPrefix', 'Full Name A prefix', 'Pick FullA1.Text → auto-prefix')}
+                {bracketPrefixField('fullTeamBPrefix', 'Full Name B prefix', 'Pick FullB1.Text → auto-prefix')}
+                {bracketPrefixField('scoreAPrefix', 'Score A prefix', 'Pick ScoreA1.Text → auto-prefix')}
+                {bracketPrefixField('scoreBPrefix', 'Score B prefix', 'Pick ScoreB1.Text → auto-prefix')}
+                {bracketPrefixField('winnerPrefix', 'Winner (A/B) prefix', 'Pick Winner1.Text → auto-prefix')}
+                {bracketPrefixField('logoAPrefix', 'Logo A prefix', 'Pick LogoA1.Source → auto-prefix', 'Source')}
+                {bracketPrefixField('logoBPrefix', 'Logo B prefix', 'Pick LogoB1.Source → auto-prefix', 'Source')}
+                <MergeFieldComposer
+                  parts={BRACKET_MERGE_PARTS}
+                  mergedParts={cfg.mergedParts ?? []}
+                  mergedPrefix={cfg.mergedPrefix ?? ''}
+                  mergedSeparator={cfg.mergedSeparator ?? ' '}
+                  onChange={patch => up(patch)}
+                  inputKey={cfg.vmixInputKey}
+                  allInputs={allInputs}
+                  dragKey={`${widget.id}_bracket`}
+                  fieldLabel="Merged field prefix"
+                  indexed
+                />
+              </>
+            )}
+          </CollapsibleSection>
         </>
       );
       }
@@ -3231,6 +3291,26 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
             <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 2px' }}>
               Shows each team's recent results and upcoming fixtures, round by round — same data as the Scoreboard widget's own Head-to-Head panel.
             </div>
+            <CollapsibleSection label="Win / Loss / Draw Style">
+              <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
+                Shared by both teams' Form Indicator fields below — text, a color (vMix SetColor), and/or an image per outcome. Leave any of the three blank to skip that mechanism entirely.
+              </p>
+              {([['formWinText', 'formWinColor', 'formWinImage', 'Win', 'W', '#2ecc71'],
+                 ['formLossText', 'formLossColor', 'formLossImage', 'Loss', 'L', '#e74c3c'],
+                 ['formDrawText', 'formDrawColor', 'formDrawImage', 'Draw', 'D', '#95a5a6']] as const)
+                .map(([textKey, colorKey, imageKey, label, defaultText, defaultColor]) => (
+                <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, color: 'var(--text-secondary)', width: 34, flexShrink: 0 }}>{label}</span>
+                  <input className="field-input" style={{ width: 44 }} maxLength={8} placeholder={defaultText}
+                    value={cfg[textKey] ?? ''} onChange={e => up({ [textKey]: e.target.value })} />
+                  <input type="color" style={{ width: 28, height: 24, flexShrink: 0, padding: 0, border: 'none' }}
+                    value={cfg[colorKey] ?? defaultColor} onChange={e => up({ [colorKey]: e.target.value })} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <LogoUrlPicker value={cfg[imageKey] ?? ''} onChange={url => up({ [imageKey]: url })} placeholder={`${label} image URL (optional)`} />
+                  </div>
+                </div>
+              ))}
+            </CollapsibleSection>
             <CollapsibleSection label={`vMix Output — ${teamAName}`}>
               <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 6px' }}>
                 Each field gets every row for that section joined with " | ", sent whenever the data changes.
@@ -3240,9 +3320,24 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   (key, title) => up({ vmixResultsAInputKey: key, vmixResultsAInputTitle: title }), undefined, allInputs)}
               </Field>
               {cfg.vmixResultsAInputKey && (
-                <Field label="Results Field">
-                  {renderFieldPicker(cfg.vmixResultsAInputKey, cfg.vmixResultsAField ?? '', v => up({ vmixResultsAField: v }), 'Title.Text', undefined, allInputs)}
-                </Field>
+                <>
+                  <Field label="Results Field">
+                    {renderFieldPicker(cfg.vmixResultsAInputKey, cfg.vmixResultsAField ?? '', v => up({ vmixResultsAField: v }), 'Title.Text', undefined, allInputs)}
+                  </Field>
+                  <Field label="Form Text prefix">
+                    {renderFieldPicker(cfg.vmixResultsAInputKey, cfg.formTextPrefixA ? `${cfg.formTextPrefixA}1.Text` : '',
+                      v => up({ formTextPrefixA: v.replace(/\.Text$/i, '').replace(/\d+$/, '') }), 'Pick FormA1.Text → auto-prefix', undefined, allInputs)}
+                  </Field>
+                  <Field label="Form Color layer prefix">
+                    {renderFieldPicker(cfg.vmixResultsAInputKey, cfg.formColorPrefixA ? `${cfg.formColorPrefixA}1` : '',
+                      v => up({ formColorPrefixA: v.replace(/\d+$/, '') }), 'Pick a shape/box layer → auto-prefix', undefined, allInputs)}
+                  </Field>
+                  <Field label="Form Image prefix">
+                    {renderFieldPicker(cfg.vmixResultsAInputKey, cfg.formImagePrefixA ? `${cfg.formImagePrefixA}1.Source` : '',
+                      v => up({ formImagePrefixA: v.replace(/\.Source$/i, '').replace(/\d+$/, '') }), 'Pick FormImgA1.Source → auto-prefix',
+                      (n: string) => n.toLowerCase().endsWith('.source'), allInputs)}
+                  </Field>
+                </>
               )}
               <Field label="Upcoming Input">
                 {renderInputPicker('tf_ua_input', cfg.vmixUpcomingAInputKey ?? '', cfg.vmixUpcomingAInputTitle,
@@ -3260,9 +3355,24 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                   (key, title) => up({ vmixResultsBInputKey: key, vmixResultsBInputTitle: title }), undefined, allInputs)}
               </Field>
               {cfg.vmixResultsBInputKey && (
-                <Field label="Results Field">
-                  {renderFieldPicker(cfg.vmixResultsBInputKey, cfg.vmixResultsBField ?? '', v => up({ vmixResultsBField: v }), 'Title.Text', undefined, allInputs)}
-                </Field>
+                <>
+                  <Field label="Results Field">
+                    {renderFieldPicker(cfg.vmixResultsBInputKey, cfg.vmixResultsBField ?? '', v => up({ vmixResultsBField: v }), 'Title.Text', undefined, allInputs)}
+                  </Field>
+                  <Field label="Form Text prefix">
+                    {renderFieldPicker(cfg.vmixResultsBInputKey, cfg.formTextPrefixB ? `${cfg.formTextPrefixB}1.Text` : '',
+                      v => up({ formTextPrefixB: v.replace(/\.Text$/i, '').replace(/\d+$/, '') }), 'Pick FormB1.Text → auto-prefix', undefined, allInputs)}
+                  </Field>
+                  <Field label="Form Color layer prefix">
+                    {renderFieldPicker(cfg.vmixResultsBInputKey, cfg.formColorPrefixB ? `${cfg.formColorPrefixB}1` : '',
+                      v => up({ formColorPrefixB: v.replace(/\d+$/, '') }), 'Pick a shape/box layer → auto-prefix', undefined, allInputs)}
+                  </Field>
+                  <Field label="Form Image prefix">
+                    {renderFieldPicker(cfg.vmixResultsBInputKey, cfg.formImagePrefixB ? `${cfg.formImagePrefixB}1.Source` : '',
+                      v => up({ formImagePrefixB: v.replace(/\.Source$/i, '').replace(/\d+$/, '') }), 'Pick FormImgB1.Source → auto-prefix',
+                      (n: string) => n.toLowerCase().endsWith('.source'), allInputs)}
+                  </Field>
+                </>
               )}
               <Field label="Upcoming Input">
                 {renderInputPicker('tf_ub_input', cfg.vmixUpcomingBInputKey ?? '', cfg.vmixUpcomingBInputTitle,

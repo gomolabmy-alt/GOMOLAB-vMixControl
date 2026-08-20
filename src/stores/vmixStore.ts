@@ -233,6 +233,9 @@ class RemoteVmixProxy {
   setImageField(inputKey: string, fieldName: string, filePath: string) {
     syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setImageField', args: [inputKey, fieldName, filePath] });
   }
+  setColor(inputKey: string, fieldName: string, color: string) {
+    syncClient.send({ type: 'VMIX_COMMAND', cmd: 'setColorField', args: [inputKey, fieldName, color] });
+  }
   sendFunction(fn: string, params: Record<string, string> = {}) {
     syncClient.send({ type: 'VMIX_COMMAND', cmd: 'sendFunction', args: [fn, params] });
   }
@@ -868,6 +871,7 @@ syncClient.onMessage((msg) => {
       case 'sendFunction':    c.sendFunction(args[0], args[1]); break;
       case 'setTextField':    c.setTextField(args[0], args[1], args[2]); break;
       case 'setImageField':   c.setImageField(args[0], args[1], args[2]); break;
+      case 'setColorField':   c.setColor(args[0], args[1], args[2]); break;
       case 'setPreview':      c.setPreview(args[0]); break;
       case 'setActive':       c.setActive(args[0]); break;
       case 'toggleRecord':    c.toggleRecord(); break;

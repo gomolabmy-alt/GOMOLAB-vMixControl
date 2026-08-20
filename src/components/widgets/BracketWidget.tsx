@@ -1,9 +1,11 @@
-import { useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { Send } from 'lucide-react';
 import { useMatchScheduleStore, type ScheduledMatch } from '../../stores/matchScheduleStore';
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import { useCanvasStore } from '../../stores/canvasStore';
-import { extractKnockoutStage } from '../TournamentManager';
+import { useVmixStore } from '../../stores/vmixStore';
+import { extractKnockoutStage, knockoutStageSize, findMatchScore, findMatchWinner } from '../TournamentManager';
 import { BracketView } from '../BracketView';
 
 interface Props {
@@ -11,6 +13,26 @@ interface Props {
   config: Record<string, any>;
   w: number;
   h: number;
+}
+
+// One match's worth of vMix fields, index-suffixed in bracket order (Stage1.Text,
+// Stage2.Text, ... — earliest round first, same left-to-right order the bracket
+// itself reads in) — same indexed-list convention as Match Schedule/Group
+// Standings, so the same MergeFieldComposer/prefix-field pattern applies here too.
+type BracketMergePart = 'stage' | 'teamA' | 'teamB' | 'fullTeamA' | 'fullTeamB' | 'scoreA' | 'scoreB' | 'winner';
+function resolveBracketPart(
+  m: ScheduledMatch, score: { a: number; b: number } | null, winnerSide: 'A' | 'B' | '', key: BracketMergePart,
+): string {
+  switch (key) {
+    case 'stage':     return m.tier ? `${m.tier} ${extractKnockoutStage(m)}` : (extractKnockoutStage(m) ?? '');
+    case 'teamA':     return m.teamAShortName || m.teamAName;
+    case 'teamB':     return m.teamBName ? (m.teamBShortName || m.teamBName) : 'BYE';
+    case 'fullTeamA': return m.teamAName;
+    case 'fullTeamB': return m.teamBName || 'BYE';
+    case 'scoreA':    return score ? String(score.a) : '';
+    case 'scoreB':    return score ? String(score.b) : '';
+    case 'winner':    return winnerSide;
+  }
 }
 
 // Read-only broadcast display of a tournament's knockout bracket — mirrors
@@ -72,6 +94,82 @@ export function BracketWidget({ widgetId, config }: Props) {
     [allMatches, tournament, category, categories.length, tiers.length, tier]
   );
 
+  // Same stage grouping + size-descending sort BracketView uses to lay the
+  // columns out left to right (earliest round first) — flattened into one
+  // ordered list for the indexed vMix push below, with the 3rd Place
+  // Playoff (not really "next round", fed by the Semifinal losers) tacked
+  // on as the final slot rather than woven into stage order.
+  const orderedMatches: ScheduledMatch[] = useMemo(() => {
+    const byStage = new Map<string, ScheduledMatch[]>();
+    for (const m of matches) {
+      const key = extractKnockoutStage(m)!;
+      if (!byStage.has(key)) byStage.set(key, []);
+      byStage.get(key)!.push(m);
+    }
+    const stages = Array.from(byStage.entries()).sort((a, b) => knockoutStageSize(b[0]) - knockoutStageSize(a[0]));
+    const flat = stages.flatMap(([, ms]) => ms);
+    return thirdPlaceMatch ? [...flat, thirdPlaceMatch] : flat;
+  }, [matches, thirdPlaceMatch]);
+
+  const { getClient, vmixState, vmixSyncVersion } = useVmixStore();
+  const vmixInputKey: string = config.vmixInputKey ?? '';
+  const PREFIX_FIELDS: { key: string; part: BracketMergePart }[] = [
+    { key: 'stagePrefix', part: 'stage' }, { key: 'teamAPrefix', part: 'teamA' }, { key: 'teamBPrefix', part: 'teamB' },
+    { key: 'fullTeamAPrefix', part: 'fullTeamA' }, { key: 'fullTeamBPrefix', part: 'fullTeamB' },
+    { key: 'scoreAPrefix', part: 'scoreA' }, { key: 'scoreBPrefix', part: 'scoreB' }, { key: 'winnerPrefix', part: 'winner' },
+  ];
+
+  const sendToVmix = useCallback(() => {
+    const c = getClient();
+    if (!c || !vmixInputKey || !tournament || orderedMatches.length === 0) return;
+    const prefixes = PREFIX_FIELDS.map(f => config[f.key] as string | undefined).concat(config.mergedPrefix);
+    orderedMatches.forEach((m, i) => {
+      const idx = i + 1;
+      const score = findMatchScore(m, allResults, tournament.id);
+      const winnerSide = findMatchWinner(m, allResults, tournament.id)?.side ?? '';
+      for (const f of PREFIX_FIELDS) {
+        const prefix = config[f.key];
+        if (prefix) c.setTextField(vmixInputKey, `${prefix}${idx}.Text`, resolveBracketPart(m, score, winnerSide, f.part));
+      }
+      if (config.logoAPrefix && m.teamALogo) c.setImageField(vmixInputKey, `${config.logoAPrefix}${idx}.Source`, m.teamALogo);
+      if (config.logoBPrefix && m.teamBLogo) c.setImageField(vmixInputKey, `${config.logoBPrefix}${idx}.Source`, m.teamBLogo);
+      if (config.mergedPrefix && config.mergedParts?.length) {
+        const merged = config.mergedParts.map((p: BracketMergePart) => resolveBracketPart(m, score, winnerSide, p)).join(config.mergedSeparator ?? ' ');
+        c.setTextField(vmixInputKey, `${config.mergedPrefix}${idx}.Text`, merged);
+      }
+    });
+    // Clear any extra same-prefix fields beyond the current match count, e.g.
+    // leftover text from a previous, bigger bracket (a Round of 16 shrinking
+    // to a Quarterfinal-only tier filter).
+    const vmixInput = vmixState?.inputs?.find(inp => inp.key === vmixInputKey);
+    if (vmixInput) {
+      for (const prefix of prefixes) {
+        if (!prefix) continue;
+        const esc = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(`^${esc}(\\d+)\\.Text$`, 'i');
+        for (const field of vmixInput.textFields) {
+          const fm = field.name.match(re);
+          if (fm && parseInt(fm[1]) > orderedMatches.length) c.setTextField(vmixInputKey, field.name, '');
+        }
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getClient, vmixState, vmixInputKey, orderedMatches, tournament, allResults, config]);
+
+  const dataKey = tournament ? orderedMatches.map(m => {
+    const score = findMatchScore(m, allResults, tournament.id);
+    const winnerSide = findMatchWinner(m, allResults, tournament.id)?.side ?? '';
+    return `${m.id}:${m.teamAName}:${m.teamBName}:${score?.a}:${score?.b}:${winnerSide}`;
+  }).join('|') : '';
+  const prevKeyRef = useRef('');
+  useEffect(() => {
+    if (!vmixInputKey || !config.vmixAutoSync) return;
+    if (dataKey === prevKeyRef.current && vmixSyncVersion === 0) return;
+    prevKeyRef.current = dataKey;
+    sendToVmix();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataKey, vmixSyncVersion, config.vmixAutoSync]);
+
   if (!tournament) {
     return <div className="wgt-bracket wgt-bracket--empty">Pick a tournament in widget settings</div>;
   }
@@ -87,6 +185,13 @@ export function BracketWidget({ widgetId, config }: Props) {
 
   return (
     <div className="wgt-bracket">
+      {vmixInputKey && (
+        <div className="wgt-standings-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
+          <button className="wgt-p-stats-send-btn" onClick={sendToVmix} disabled={!getClient()} title="Send this bracket to vMix now">
+            <Send size={12} strokeWidth={2} /> Send
+          </button>
+        </div>
+      )}
       <BracketView
         matches={matches}
         thirdPlaceMatch={thirdPlaceMatch}
