@@ -158,4 +158,5 @@ jobs:
           releaseName: 'GOMOLAB vMix Control ${{ github.ref_name }}'
           releaseDraft: true
           prerelease: false
+          includeUpdaterJson: true
           args: --target ${{ matrix.target }}
