@@ -19,9 +19,6 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             label: mac-arm
-          - platform: macos-13
-            target: x86_64-apple-darwin
-            label: mac-intel
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             label: windows-x64
@@ -96,9 +93,16 @@ jobs:
   # A separate, self-contained build (not the "build" job above) because
   # tauri-action needs to run `tauri build` itself, with the updater signing
   # env vars set, to produce the .sig files + latest.json the in-app updater
-  # (UpdateChecker.tsx) polls for. One release, built up across all three
+  # (UpdateChecker.tsx) polls for. One release, built up across both
   # platforms in this same matrix — tauri-action creates it on the first job
-  # to finish and just appends assets from the other two.
+  # to finish and just appends assets from the other one.
+  #
+  # No Intel Mac (macos-13) target — GitHub's macos-13 runners turned out to
+  # have no available capacity for this repo: three separate release tags
+  # (v1.0.1-v1.0.3) each had their mac-intel job sit in "queued" for hours
+  # (once even 6+) while mac-arm and Windows finished in under a minute on
+  # the exact same run. Apple hasn't sold an Intel Mac since 2023, so this
+  # was judged not worth chasing a working runner label for.
   #
   # Required repo secrets (Settings -> Secrets and variables -> Actions):
   #   TAURI_SIGNING_PRIVATE_KEY          the private half of the updater
@@ -116,8 +120,6 @@ jobs:
         include:
           - platform: macos-latest
             target: aarch64-apple-darwin
-          - platform: macos-13
-            target: x86_64-apple-darwin
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
 
