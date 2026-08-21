@@ -5,7 +5,7 @@ import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { useTournamentStore } from '../../stores/tournamentStore';
 import { useCanvasStore } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
-import { extractKnockoutStage, knockoutStageSize, findMatchScore, findMatchWinner } from '../TournamentManager';
+import { extractKnockoutStage, knockoutStageSize, findMatchScore, findMatchWinner, isPlaceholderTeamName } from '../TournamentManager';
 import { BracketView } from '../BracketView';
 import { transparentLogoUrl, clearStaleLogoSlots } from '../../lib/imageUrl';
 
@@ -21,15 +21,24 @@ interface Props {
 // itself reads in) — same indexed-list convention as Match Schedule/Group
 // Standings, so the same MergeFieldComposer/prefix-field pattern applies here too.
 type BracketMergePart = 'stage' | 'teamA' | 'teamB' | 'fullTeamA' | 'fullTeamB' | 'scoreA' | 'scoreB' | 'winner';
+// A slot that hasn't resolved to a real team yet — still showing "Winner of
+// Quarterfinal 1", "1st Group A", etc. (see isPlaceholderTeamName) — or a
+// genuine bye (no opponent at all) has nothing worth sending to vMix: an
+// operator's graphic template shouldn't ever show that raw placeholder
+// text on air. Team/score/logo fields for that side go out blank instead,
+// same as an unfilled row anywhere else in this app; only once a real team
+// occupies the slot does it actually send.
 function resolveBracketPart(
   m: ScheduledMatch, score: { a: number; b: number } | null, winnerSide: 'A' | 'B' | '', key: BracketMergePart,
 ): string {
+  const aReal = !!m.teamAName && !isPlaceholderTeamName(m.teamAName);
+  const bReal = !!m.teamBName && !isPlaceholderTeamName(m.teamBName);
   switch (key) {
     case 'stage':     return m.tier ? `${m.tier} ${extractKnockoutStage(m)}` : (extractKnockoutStage(m) ?? '');
-    case 'teamA':     return m.teamAShortName || m.teamAName;
-    case 'teamB':     return m.teamBName ? (m.teamBShortName || m.teamBName) : 'BYE';
-    case 'fullTeamA': return m.teamAName;
-    case 'fullTeamB': return m.teamBName || 'BYE';
+    case 'teamA':     return aReal ? (m.teamAShortName || m.teamAName) : '';
+    case 'teamB':     return bReal ? (m.teamBShortName || m.teamBName) : '';
+    case 'fullTeamA': return aReal ? m.teamAName : '';
+    case 'fullTeamB': return bReal ? m.teamBName : '';
     case 'scoreA':    return score ? String(score.a) : '';
     case 'scoreB':    return score ? String(score.b) : '';
     case 'winner':    return winnerSide;
