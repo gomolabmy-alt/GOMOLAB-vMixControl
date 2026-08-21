@@ -5,7 +5,7 @@ import { useMatchScheduleStore, type ScheduledMatch } from '../../stores/matchSc
 import { useMatchResultsStore } from '../../stores/matchResultsStore';
 import { useAppSettings } from '../../stores/appSettingsStore';
 import { useVmixStore } from '../../stores/vmixStore';
-import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
+import { resolveImageUrl, transparentLogoUrl, clearStaleLogoSlots } from '../../lib/imageUrl';
 import { guardScoreboardOverwrite, buildLoadMatchPatch, useLiveFixtureIds, findDuplicateResult, parseScheduledDateTime, formatLate } from '../../utils/scoreboardSnapshot';
 import { useMatchNumbers } from '../../utils/matchNumber';
 import { ConfirmButton } from '../ConfirmButton';
@@ -194,6 +194,8 @@ export function MatchScheduleWidget({ widgetId, config }: Props) {
             if (fm && parseInt(fm[1]) > reservedSlots) c.setTextField(t.inputKey, field.name, '');
           }
         }
+        clearStaleLogoSlots(c, t.inputKey, vmixInput.textFields, t.logoAPrefix, reservedSlots);
+        clearStaleLogoSlots(c, t.inputKey, vmixInput.textFields, t.logoBPrefix, reservedSlots);
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps

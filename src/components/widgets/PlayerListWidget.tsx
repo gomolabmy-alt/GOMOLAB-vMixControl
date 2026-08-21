@@ -15,9 +15,11 @@ import { SPORT_DEFAULTS, DEFAULT_STAFF_ROLES } from '../../types/tournament';
 import type { Player, StaffMember, Tournament } from '../../types/tournament';
 import type { CanvasPage } from '../../types/canvas';
 import { findTeamRecord, resolveNextFixtureTeams } from '../../lib/teamForm';
-import { autoLinkedWidget } from '../../lib/autoLink';
+import { autoLinkedWidget, autoLinkedWidgetPair } from '../../lib/autoLink';
+import { isDualPlayerList } from '../../lib/playerListSquad';
 import { effectiveJerseyNo } from '../../lib/jerseySets';
 import { simplifyPlayerName } from '../../lib/simpleName';
+import { ConfirmModal } from '../ConfirmModal';
 
 interface Props {
   widgetId: string;
@@ -106,7 +108,7 @@ export function PlayerListWidget({ widgetId, config: cfg, nextMatchMode }: Props
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dual, resolvedAId, resolvedBId, cfg.resolvedTeamId, cfg.a_resolvedTeamId, cfg.b_resolvedTeamId, widgetId]);
 
-  const panelShared = { widgetId, cfg, updateWidgetConfig, addTimelineEvent, pages, tournament };
+  const panelShared = { widgetId, cfg, updateWidgetConfig, addTimelineEvent, pages, tournament, nextMatchMode };
 
   if (dual) {
     return (
@@ -130,9 +132,10 @@ interface PanelProps {
   addTimelineEvent: (id: string, event: any) => void;
   pages: CanvasPage[];
   tournament: Tournament | null;
+  nextMatchMode?: boolean;
 }
 
-function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidgetConfig, addTimelineEvent, pages, tournament }: PanelProps) {
+function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidgetConfig, addTimelineEvent, pages, tournament, nextMatchMode }: PanelProps) {
   const { updatePlayer, updateTeam, updateStaffMember, setJerseySetNumber } = useTeamDbStore();
   const { getClient, vmixState, vmixSyncVersion } = useVmixStore();
   // Simple Names (App Settings) — applied to every READ-ONLY name display
@@ -175,6 +178,10 @@ function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidge
   const [pendingSubIn, setPendingSubIn] = useState<string | null>(null);
   // Card picker: which card type is being assigned
   const [cardPicker, setCardPicker] = useState<'yellow' | 'orange' | 'red' | null>(null);
+  // Next Match -> live handoff: which live Player List widget (and its own
+  // keyPrefix) this side's starters/subs would be sent to, staged for
+  // confirmation before actually overwriting it.
+  const [pendingSendLive, setPendingSendLive] = useState<{ liveWidgetId: string; livePrefix: string } | null>(null);
 
   const players: Player[] = team?.players ?? [];
 
@@ -449,28 +456,44 @@ function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidge
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfg[k('vmixInputs')], cfg[k('vmixInputKey')], cfg[k('vmixNamePrefix')], cfg[k('vmixJerseyPrefix')], starterSlots, subSlots, playerById, maxOnField, getClient, vmixState, team, activeJerseySetId, simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker]);
 
-  // vMix staff names sync (MNG → Manager field, HC → Head Coach field)
+  // vMix staff names sync (MNG → Manager field, HC → Head Coach field) —
+  // same resolution the Staff section's own display already uses (see
+  // staffName() below, in the Staff section render): a roster player
+  // tagged with the MNG/HC jersey code wins if one exists, else fall back
+  // to the dedicated Staff name field (team.staff). This used to only ever
+  // check the jersey-coded roster entry, so a Manager/HC typed the normal
+  // way — into the Staff section's own name inputs, with no matching
+  // jersey-coded player — silently never sent.
+  const staffByRole = useCallback((role: string, jerseyCode: string): string => {
+    const p = players.find(pl => pl.jerseyNo?.toUpperCase() === jerseyCode);
+    if (p?.name) return disp(p.name);
+    const stored = team?.staff?.find(s => s.role.toLowerCase() === role.toLowerCase())?.name;
+    return stored ? disp(stored) : '';
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [players, team?.staff, simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker]);
+
   const sendStaffToVmix = useCallback(() => {
     const key = cfg[k('vmixStaffInputKey')];
     if (!key) return;
     const c = getClient();
     if (!c) return;
-    const manager = players.find(p => p.jerseyNo?.toUpperCase() === 'MNG');
-    const hc      = players.find(p => p.jerseyNo?.toUpperCase() === 'HC');
-    if (cfg[k('vmixManagerField')]) c.setTextField(key, cfg[k('vmixManagerField')], manager ? disp(manager.name) : '');
-    if (cfg[k('vmixHCField')])      c.setTextField(key, cfg[k('vmixHCField')],      hc      ? disp(hc.name)      : '');
+    const managerName = staffByRole('Manager', 'MNG');
+    const hcName = staffByRole('Head Coach', 'HC');
+    if (cfg[k('vmixManagerField')]) c.setTextField(key, cfg[k('vmixManagerField')], managerName);
+    if (cfg[k('vmixHCField')])      c.setTextField(key, cfg[k('vmixHCField')],      hcName);
     const mergedParts: string[] | undefined = cfg[k('vmixStaffMergedParts')];
     if (cfg[k('vmixStaffMergedPrefix')] && mergedParts?.length) {
-      const src: Record<string, string> = { manager: manager ? disp(manager.name) : '', headCoach: hc ? disp(hc.name) : '' };
+      const src: Record<string, string> = { manager: managerName, headCoach: hcName };
       c.setTextField(key, cfg[k('vmixStaffMergedPrefix')], mergedParts.map(p => src[p] ?? '').join(cfg[k('vmixStaffMergedSeparator')] ?? ' '));
     }
-  }, [cfg[k('vmixStaffInputKey')], cfg[k('vmixManagerField')], cfg[k('vmixHCField')], cfg[k('vmixStaffMergedPrefix')], cfg[k('vmixStaffMergedParts')], cfg[k('vmixStaffMergedSeparator')], players, getClient, simplifyMuhammadNames, simplifyFirstNameOnly, removeBinMarkers, truncateAtBinMarker]);
+  }, [cfg[k('vmixStaffInputKey')], cfg[k('vmixManagerField')], cfg[k('vmixHCField')], cfg[k('vmixStaffMergedPrefix')], cfg[k('vmixStaffMergedParts')], cfg[k('vmixStaffMergedSeparator')], staffByRole, getClient]);
 
   useEffect(() => {
     if (cfg[k('vmixStaffAutoSync')]) sendStaffToVmix();
   }, [
     players.find(p => p.jerseyNo?.toUpperCase() === 'MNG')?.name,
     players.find(p => p.jerseyNo?.toUpperCase() === 'HC')?.name,
+    team?.staff,
     cfg[k('vmixStaffAutoSync')],
     sendStaffToVmix,
     vmixSyncVersion,
@@ -494,6 +517,60 @@ function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidge
   useEffect(() => {
     if (cfg[k('vmixTeamAutoSync')]) sendTeamToVmix();
   }, [team?.name, team?.shortName, cfg[k('vmixTeamAutoSync')], sendTeamToVmix, vmixSyncVersion]);
+
+  // Next Match -> live handoff: a Next Match Player List has no scoreboard
+  // of its own (it's not tied to one — that's the whole point, it's built
+  // ahead of the match going live), so there's nothing to auto-detect a
+  // target from except matching team identity. Finds whichever live
+  // Scoreboard currently has THIS team loaded (either side — the operator
+  // may not load it onto the same A/B side this widget resolved it as),
+  // then that scoreboard's own paired Player List for that side — same
+  // auto-link pairing every other side-aware widget already resolves
+  // through (Card/Sin Bin/Score Lower Third, Timeline, Rugby Lineup).
+  const findLiveTarget = useCallback((): { liveWidgetId: string; livePrefix: string } | null => {
+    if (!team) return null;
+    const allWidgets = pages.flatMap(p => p.widgets);
+    const scoreboards = allWidgets.filter(w => w.type === 'scoreboard');
+    const teamNameLc = team.name.trim().toLowerCase();
+    for (const sb of scoreboards) {
+      const dc = sb.config;
+      const liveSide: 'A' | 'B' | null =
+        (dc.teamAName ?? '').trim().toLowerCase() === teamNameLc ? 'A'
+        : (dc.teamBName ?? '').trim().toLowerCase() === teamNameLc ? 'B'
+        : null;
+      if (!liveSide) continue;
+      const { a, b } = autoLinkedWidgetPair(pages, sb.id, dc.linkedPlayerListA, dc.linkedPlayerListB, 'player-list');
+      const liveList = liveSide === 'A' ? a : b;
+      if (!liveList) continue;
+      return { liveWidgetId: liveList.id, livePrefix: isDualPlayerList(liveList) ? `${liveSide.toLowerCase()}_` : '' };
+    }
+    return null;
+  }, [team, pages]);
+
+  const requestSendLive = () => {
+    const target = findLiveTarget();
+    if (!target) {
+      alert(team
+        ? `No live scoreboard currently has "${team.name}" loaded (with a linked Player List) — load this match onto a scoreboard first, then send.`
+        : 'No team resolved yet for the next match.');
+      return;
+    }
+    setPendingSendLive(target);
+  };
+
+  // Only the roster selection itself (starters/subs) — never onField/
+  // entries/accumulated/playerCards/sinBinEntries, which are live in-match
+  // session state on the target widget; overwriting those on a re-send
+  // mid-match would erase real playtime/card data already recorded there.
+  const confirmSendLive = () => {
+    if (!pendingSendLive) return;
+    const { liveWidgetId, livePrefix } = pendingSendLive;
+    updateWidgetConfig(liveWidgetId, {
+      [`${livePrefix}starters`]: cfg[k('starters')] ?? [],
+      [`${livePrefix}subs`]: cfg[k('subs')] ?? [],
+    });
+    setPendingSendLive(null);
+  };
 
   // Auto-send full list whenever slots change and any target has auto-sync on
   // (also re-fires on vmixSyncVersion so a reconnect re-pushes the current
@@ -1151,6 +1228,13 @@ function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidge
             onClick={e => { e.stopPropagation(); sendTeamToVmix(); }}
           ><ArrowUpRight size={11} strokeWidth={2} /></button>
         )}
+        {nextMatchMode && team && (
+          <button
+            className="wgt-pl-team-vmix-btn"
+            title={`Send this prepped starters/bench to "${team.name}"'s live Player List, once that match is loaded on a scoreboard`}
+            onClick={e => { e.stopPropagation(); requestSendLive(); }}
+          ><Send size={11} strokeWidth={2} /></button>
+        )}
         {team && teamJerseySets.length > 1 && (
           <button
             className="wgt-pl-team-vmix-btn"
@@ -1525,6 +1609,15 @@ function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidge
             </div>
           )}
         </div>
+      )}
+      {pendingSendLive && (
+        <ConfirmModal
+          title="Send to live Player List?"
+          message={`Replaces "${team?.name ?? 'this team'}"'s current starters and bench on the live Player List with what's prepped here. This can't be undone.`}
+          confirmLabel="Send"
+          onConfirm={confirmSendLive}
+          onCancel={() => setPendingSendLive(null)}
+        />
       )}
     </div>
   );

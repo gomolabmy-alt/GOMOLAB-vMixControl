@@ -10,7 +10,7 @@ import { CanvasActionContext } from '../../lib/canvasContext';
 import { findTeamRecord } from '../../lib/teamForm';
 import { autoLinkedWidget } from '../../lib/autoLink';
 import { computeStandings, isPoolStageResult, normalizeGroups, StandingsTable, type StandingRow } from '../TournamentManager';
-import { transparentLogoUrl } from '../../lib/imageUrl';
+import { transparentLogoUrl, clearStaleLogoSlots } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -128,6 +128,7 @@ export function GroupStandingsWidget({ widgetId, config }: Props) {
           if (fm && parseInt(fm[1]) > rows.length) c.setTextField(vmixInputKey, field.name, '');
         }
       }
+      clearStaleLogoSlots(c, vmixInputKey, vmixInput.textFields, config.logoPrefix, rows.length);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getClient, vmixState, vmixInputKey, rows, config, groupLabel]);

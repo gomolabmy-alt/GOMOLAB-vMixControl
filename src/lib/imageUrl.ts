@@ -37,3 +37,31 @@ export function transparentLogoUrl(): string {
   const port = (typeof window !== 'undefined' && window.location.port) || '9877';
   return `http://localhost:${port}/images/transparent.png`;
 }
+
+/**
+ * Resets any indexed logo (".Source") field beyond the current row/item
+ * count back to the transparent placeholder — the image-field equivalent
+ * of clearing a stale indexed text field (`^prefix(\d+)\.Text$`), which
+ * every per-row vMix push in this app already does for its text fields but
+ * — until this existed — never did for the logo alongside them, since an
+ * image field can't be blanked with an empty string the way text can. E.g.
+ * a Group Standings/Bracket/Match Schedule list shrinking (fewer teams,
+ * fewer matches) used to leave the extra slots showing whichever team's
+ * logo was there from before, forever, even though the matching text
+ * fields at those same indices correctly went blank.
+ */
+export function clearStaleLogoSlots(
+  c: { setImageField: (inputKey: string, field: string, url: string) => void },
+  inputKey: string,
+  textFields: { name: string }[],
+  prefix: string | undefined,
+  currentCount: number,
+): void {
+  if (!prefix) return;
+  const esc = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^${esc}(\\d+)\\.Source$`, 'i');
+  for (const field of textFields) {
+    const m = field.name.match(re);
+    if (m && parseInt(m[1], 10) > currentCount) c.setImageField(inputKey, field.name, transparentLogoUrl());
+  }
+}

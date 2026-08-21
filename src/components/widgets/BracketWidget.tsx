@@ -7,7 +7,7 @@ import { useCanvasStore } from '../../stores/canvasStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { extractKnockoutStage, knockoutStageSize, findMatchScore, findMatchWinner } from '../TournamentManager';
 import { BracketView } from '../BracketView';
-import { transparentLogoUrl } from '../../lib/imageUrl';
+import { transparentLogoUrl, clearStaleLogoSlots } from '../../lib/imageUrl';
 
 interface Props {
   widgetId: string;
@@ -153,6 +153,8 @@ export function BracketWidget({ widgetId, config }: Props) {
           if (fm && parseInt(fm[1]) > orderedMatches.length) c.setTextField(vmixInputKey, field.name, '');
         }
       }
+      clearStaleLogoSlots(c, vmixInputKey, vmixInput.textFields, config.logoAPrefix, orderedMatches.length);
+      clearStaleLogoSlots(c, vmixInputKey, vmixInput.textFields, config.logoBPrefix, orderedMatches.length);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getClient, vmixState, vmixInputKey, orderedMatches, tournament, allResults, config]);
