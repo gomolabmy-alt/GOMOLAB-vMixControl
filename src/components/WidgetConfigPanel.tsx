@@ -19,8 +19,6 @@ import { MergeFieldComposer, type MergePart } from './MergeFieldComposer';
 import type { ActionItem } from '../lib/buttonActions';
 import { HotkeyRecorder } from './HotkeyRecorder';
 import { collectHotkeyBindings } from '../lib/hotkeyBindings';
-import { autoLinkedWidget } from '../lib/autoLink';
-import { isDualPlayerList } from '../lib/playerListSquad';
 
 // Label for a player-list widget in a picker dropdown — shows the linked
 // saved team's name (teamDbStore), falling back to a short widget id.
@@ -4209,33 +4207,43 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
 
       case 'substitution': {
         const allPlayerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
+        const scoreboardWidgetsForSub = pages.flatMap(p => p.widgets.filter(w => w.type === 'scoreboard'));
         const timerWidgets2 = pages.flatMap(p => p.widgets.filter(w => w.type === 'timer'));
         const timelineWidgets2 = pages.flatMap(p => p.widgets.filter(w => w.type === 'timeline'));
         const plLabel2 = (w: { id: string; config: Record<string, any> }) => plWidgetLabel(w, teamDbTeams);
-        // Each Quick Sub widget is single-team — add a second widget for the
-        // other side. Team Side only matters (and only shows) when the
-        // linked Player List widget is itself a side-by-side one covering
-        // both teams under one id; a dedicated single-team widget has
-        // nothing to pick between.
-        const resolvedPl = autoLinkedWidget(pages, widget.id, cfg.linkedPlayerListId, 'player-list');
-        const plIsDual = !!resolvedPl && isDualPlayerList(resolvedPl);
-        const sideTeamName = (s: 'A' | 'B') => resolvedPl ? teamDbTeams.find(t => t.id === resolvedPl.config[`${s.toLowerCase()}_resolvedTeamId`])?.name : undefined;
+        // Each Quick Sub widget is single-team — add a second widget with
+        // the other Team Side for the rest. Same Scoreboard-first pairing
+        // Rugby Lineup uses: linking a Scoreboard resolves the team AND its
+        // Player List automatically; Player List below only matters as a
+        // manual override (or the sole way in, for a standalone widget with
+        // no Scoreboard on the page).
         return (
           <>
-            <Field label="Player List Widget">
+            <Field label="Link Scoreboard">
+              <select className="field-input" value={cfg.linkedScoreboardId ?? ''} onChange={e => up({ linkedScoreboardId: e.target.value })}>
+                <option value="">— none (pick Player List directly below) —</option>
+                {scoreboardWidgetsForSub.map(w => (
+                  <option key={w.id} value={w.id}>{w.config.name || `Scoreboard (${w.config.teamAName || 'A'} vs ${w.config.teamBName || 'B'})`}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Team Side">
+              <select className="field-input" value={cfg.teamSide ?? 'A'} onChange={e => up({ teamSide: e.target.value })}>
+                <option value="A">{cfg.linkedScoreboardId ? (scoreboardWidgetsForSub.find(w => w.id === cfg.linkedScoreboardId)?.config.teamAName || 'Team A') : 'Team A'}</option>
+                <option value="B">{cfg.linkedScoreboardId ? (scoreboardWidgetsForSub.find(w => w.id === cfg.linkedScoreboardId)?.config.teamBName || 'Team B') : 'Team B'}</option>
+              </select>
+            </Field>
+            <span className="field-hint" style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginTop: -4, marginBottom: 4 }}>
+              {cfg.linkedScoreboardId
+                ? 'Team and this side\'s Player List follow the scoreboard automatically. Player List below only matters as a manual override.'
+                : 'No scoreboard linked — pick a Player List directly below.'}
+            </span>
+            <Field label="Player List">
               <select className="field-input" value={cfg.linkedPlayerListId ?? ''} onChange={e => up({ linkedPlayerListId: e.target.value })}>
-                <option value="">— auto —</option>
+                <option value="">— auto (follow scoreboard / page) —</option>
                 {allPlayerListWidgets.map(w => <option key={w.id} value={w.id}>{plLabel2(w)}</option>)}
               </select>
             </Field>
-            {plIsDual && (
-              <Field label="Team Side">
-                <select className="field-input" value={cfg.teamSide ?? 'A'} onChange={e => up({ teamSide: e.target.value })}>
-                  <option value="A">{sideTeamName('A') ?? 'Team A'}</option>
-                  <option value="B">{sideTeamName('B') ?? 'Team B'}</option>
-                </select>
-              </Field>
-            )}
             <Field label="Linked Timer">
               <select className="field-input" value={cfg.linkedTimerWidgetId ?? ''} onChange={e => up({ linkedTimerWidgetId: e.target.value })}>
                 <option value="">— none —</option>

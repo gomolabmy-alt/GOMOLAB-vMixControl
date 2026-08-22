@@ -5,8 +5,9 @@ import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useAppSettings } from '../../stores/appSettingsStore';
-import { autoLinkedWidget, autoLinkedWidgetId } from '../../lib/autoLink';
-import { isDualPlayerList } from '../../lib/playerListSquad';
+import { autoLinkedWidget, autoLinkedWidgetId, autoLinkedWidgetPair } from '../../lib/autoLink';
+import { isDualPlayerList, resolvePlayerListRoster } from '../../lib/playerListSquad';
+import { findTeamRecord } from '../../lib/teamForm';
 import { simplifyPlayerName } from '../../lib/simpleName';
 import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 import type { Player } from '../../types/tournament';
@@ -48,19 +49,44 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [lastSub, setLastSub] = useState<{ out: string; in: string; jerseyOut: string; jerseyIn: string } | null>(null);
 
-  // Falls back to the sole Player List widget on this page when nothing's
-  // been explicitly linked in settings — an explicit pick always wins. Each
-  // Quick Sub widget instance is single-team (add a second widget for the
-  // other side); Team Side (settings-only, see WidgetConfigPanel) picks
-  // which half to read when the linked widget is itself a side-by-side one
-  // covering both teams under a_/b_-prefixed fields.
-  const linkedPl = autoLinkedWidget(pages, widgetId, cfg.linkedPlayerListId, 'player-list');
+  // Follows a linked (or auto-detected) Scoreboard's own Team A/B — the
+  // same team-and-roster source every other side-aware widget in this app
+  // resolves through (Rugby Lineup, Card Display, Score Lower Third, Sin
+  // Bin, Timeline) — rather than requiring a separately hand-picked Player
+  // List widget. Each Quick Sub widget instance is single-team: Team Side
+  // (settings-only) picks which of the scoreboard's two CURRENT teams this
+  // widget serves; add a second widget with the other side for the rest.
   const side: 'A' | 'B' = cfg.teamSide ?? 'A';
-  const activePrefix = linkedPl && isDualPlayerList(linkedPl) ? (side === 'A' ? 'a_' : 'b_') : '';
-  const team = linkedPl ? teamDbTeams.find(t => t.id === linkedPl.config[`${activePrefix}resolvedTeamId`]) : undefined;
+  const linkedScoreboard = autoLinkedWidget(pages, widgetId, cfg.linkedScoreboardId, 'scoreboard');
+  const dc = linkedScoreboard?.config ?? {};
+  // '|| undefined' so a scoreboard whose name field is blank but whose id
+  // IS set doesn't win an empty string over a real resolved name below.
+  const scoreboardTeamId: string | undefined = linkedScoreboard ? (side === 'A' ? dc.teamAId : dc.teamBId) : undefined;
+  const scoreboardTeamName: string | undefined = linkedScoreboard ? ((side === 'A' ? dc.teamAName : dc.teamBName) || undefined) : undefined;
+
+  // Player List: explicit pick wins, else whichever side of the linked
+  // Scoreboard's own paired Player Lists matches this widget's side, else
+  // the sole Player List widget on the page (old single-team behavior, for
+  // a standalone Quick Sub with no Scoreboard linked).
+  const { a: sbPlA, b: sbPlB } = linkedScoreboard
+    ? autoLinkedWidgetPair(pages, linkedScoreboard.id, dc.linkedPlayerListA, dc.linkedPlayerListB, 'player-list')
+    : { a: undefined, b: undefined };
+  const linkedPl = cfg.linkedPlayerListId
+    ? pages.flatMap(p => p.widgets).find(w => w.id === cfg.linkedPlayerListId)
+    : (side === 'A' ? sbPlA : sbPlB) ?? autoLinkedWidget(pages, widgetId, undefined, 'player-list');
+  const roster = resolvePlayerListRoster(linkedPl, side, teamDbTeams);
+
+  // Team: whichever team the linked Player List already resolved for this
+  // side (most authoritative), else the Scoreboard's own team id/name
+  // looked up in the Team DB directly (works with no Player List widget on
+  // the page at all).
+  const team = roster.team
+    ?? (scoreboardTeamId ? teamDbTeams.find(t => t.id === scoreboardTeamId) : undefined)
+    ?? (scoreboardTeamName ? findTeamRecord(teamDbTeams, scoreboardTeamName, dc.category, dc.linkedTournamentId) : undefined);
   const players: Player[] = team?.players ?? [];
 
   const playerListWidget = linkedPl ?? null;
+  const activePrefix = linkedPl && isDualPlayerList(linkedPl) ? (side === 'A' ? 'a_' : 'b_') : '';
   const plCfg = playerListWidget?.config ?? {};
 
   // Falls back to the sole Timer/Timeline widget on this page when nothing's
@@ -79,9 +105,12 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
     [players]
   );
 
-  const starterSlots: string[] = plCfg[`${activePrefix}starters`] ?? [];
-  const subSlots: string[] = plCfg[`${activePrefix}subs`] ?? [];
-  const onField: string[] = plCfg[`${activePrefix}onField`] ?? [];
+  const starterSlots: string[] = roster.starters;
+  const subSlots: string[] = roster.subs;
+  const onField: string[] = roster.onField;
+  // Not part of PlayerListRoster (playtime tracking only, unused by Rugby
+  // Lineup — the other consumer of that shared helper) — read directly with
+  // the same prefix.
   const entries: Record<string, number> = plCfg[`${activePrefix}entries`] ?? {};
   const accumulated: Record<string, number> = plCfg[`${activePrefix}accumulated`] ?? {};
 
@@ -173,7 +202,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
     kickoffIds.forEach(id => { nextEntries[id] = currentMs; });
     nextEntries[inId] = currentMs;
 
-    const subbedOnPlayers: string[] = plCfg[`${activePrefix}subbedOnPlayers`] ?? [];
+    const subbedOnPlayers: string[] = roster.subbedOnPlayers;
     const targetId = playerListWidget ? playerListWidget.id : widgetId;
     updateWidgetConfig(targetId, {
       [`${activePrefix}starters`]: nextStarters,
@@ -235,7 +264,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
       </div>
 
       {!playerListWidget ? (
-        <div className="wgt-sub-empty">Link a Player List widget in settings</div>
+        <div className="wgt-sub-empty">Link a Scoreboard or Player List widget in settings</div>
       ) : !team ? (
         <div className="wgt-sub-empty">No team loaded yet</div>
       ) : confirm ? (

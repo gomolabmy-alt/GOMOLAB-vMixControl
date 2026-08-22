@@ -611,7 +611,17 @@ function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidge
     if (team && nextFixtureId) {
       const starters: string[] = cfg[k('starters')] ?? [];
       const subs: string[] = cfg[k('subs')] ?? [];
-      if (starters.some(id => !!id) || subs.some(id => !!id)) {
+      // Ids must actually belong to THIS team's roster, not just be
+      // non-empty strings — the moment resolveNextFixtureTeams() rotates to
+      // a new fixture, `team` changes but starters/subs still hold whatever
+      // was last written (the PREVIOUS team's player ids, now stale — they
+      // just render as blank slots since playerById can't resolve them
+      // against the new roster). Without this check, that leftover data
+      // gets captured here under the new team's name/fixture id, and the
+      // snapshot that actually needs to fire — the outgoing team's real
+      // prepped roster — gets silently clobbered before it's ever promoted.
+      const rosterIds = new Set(players.map(p => p.id));
+      if (starters.some(id => id && rosterIds.has(id)) || subs.some(id => id && rosterIds.has(id))) {
         preppedRef.current = { fixtureId: nextFixtureId, teamName: team.name, starters, subs };
       }
     }
