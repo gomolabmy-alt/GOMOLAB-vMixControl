@@ -1,11 +1,12 @@
 import { useState, useMemo, useContext } from 'react';
-import { ArrowDown, ArrowUp, ArrowRight, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, ArrowRight, X, Eye, EyeOff } from 'lucide-react';
 import { useCanvasStore, formatTime } from '../../stores/canvasStore';
 import { CanvasActionContext } from '../../lib/canvasContext';
 import { useTeamDbStore } from '../../stores/teamDbStore';
 import { useVmixStore } from '../../stores/vmixStore';
 import { useAppSettings } from '../../stores/appSettingsStore';
 import { autoLinkedWidget, autoLinkedWidgetId } from '../../lib/autoLink';
+import { isDualPlayerList } from '../../lib/playerListSquad';
 import { simplifyPlayerName } from '../../lib/simpleName';
 import { resolveImageUrl, transparentLogoUrl } from '../../lib/imageUrl';
 import type { Player } from '../../types/tournament';
@@ -20,6 +21,8 @@ interface ConfirmState {
   inId: string;
   nameOut: string;
   nameIn: string;
+  jerseyOut: string;
+  jerseyIn: string;
 }
 
 function wallClock(): string {
@@ -33,7 +36,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
   const { pages, addTimelineEvent } = store;
   const updateWidgetConfig = ctx?.updateWidgetConfig ?? store.updateWidgetConfig;
   const { teams: teamDbTeams } = useTeamDbStore();
-  const { getClient } = useVmixStore();
+  const { getClient, vmixState, overlayIn, overlayOut } = useVmixStore();
   // Simple Names (App Settings) — prefills the confirm dialog and every
   // read-only row; the operator can still hand-edit the confirm dialog's
   // text before it's sent, and nothing here writes back to the roster.
@@ -43,22 +46,25 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
   const [selOut, setSelOut] = useState<string | null>(null);
   const [selIn, setSelIn] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
-  const [lastSub, setLastSub] = useState<{ out: string; in: string } | null>(null);
+  const [lastSub, setLastSub] = useState<{ out: string; in: string; jerseyOut: string; jerseyIn: string } | null>(null);
 
+  // Falls back to the sole Player List widget on this page when nothing's
+  // been explicitly linked in settings — an explicit pick always wins. Each
+  // Quick Sub widget instance is single-team (add a second widget for the
+  // other side); Team Side (settings-only, see WidgetConfigPanel) picks
+  // which half to read when the linked widget is itself a side-by-side one
+  // covering both teams under a_/b_-prefixed fields.
+  const linkedPl = autoLinkedWidget(pages, widgetId, cfg.linkedPlayerListId, 'player-list');
   const side: 'A' | 'B' = cfg.teamSide ?? 'A';
-  const team = teamDbTeams.find(t => t.id === cfg.linkedTeamId);
+  const activePrefix = linkedPl && isDualPlayerList(linkedPl) ? (side === 'A' ? 'a_' : 'b_') : '';
+  const team = linkedPl ? teamDbTeams.find(t => t.id === linkedPl.config[`${activePrefix}resolvedTeamId`]) : undefined;
   const players: Player[] = team?.players ?? [];
 
-  const playerListWidget = cfg.linkedPlayerListId
-    ? pages.flatMap(p => p.widgets).find(w => w.id === cfg.linkedPlayerListId)
-    : null;
-  const plCfg = playerListWidget?.config ?? cfg;
+  const playerListWidget = linkedPl ?? null;
+  const plCfg = playerListWidget?.config ?? {};
 
-  // Falls back to the sole Timer widget on this page when nothing's been
-  // explicitly linked in settings — an explicit pick always wins. (Player
-  // List link stays manual-only — an unlinked SubWidget deliberately runs
-  // its own standalone starters/subs state, so auto-linking it to whatever
-  // Player List happens to be on the page would silently switch that.)
+  // Falls back to the sole Timer/Timeline widget on this page when nothing's
+  // been explicitly linked in settings — an explicit pick always wins.
   const timerWidget = autoLinkedWidget(pages, widgetId, cfg.linkedTimerWidgetId, 'timer') ?? null;
   const linkedTimelineId = autoLinkedWidgetId(pages, widgetId, cfg.linkedTimelineId, 'timeline');
   const timerCfg = timerWidget?.config ?? null;
@@ -73,15 +79,21 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
     [players]
   );
 
-  const starterSlots: string[] = plCfg.starters ?? [];
-  const subSlots: string[] = plCfg.subs ?? [];
-  const onField: string[] = plCfg.onField ?? [];
-  const entries: Record<string, number> = plCfg.entries ?? {};
-  const accumulated: Record<string, number> = plCfg.accumulated ?? {};
+  const starterSlots: string[] = plCfg[`${activePrefix}starters`] ?? [];
+  const subSlots: string[] = plCfg[`${activePrefix}subs`] ?? [];
+  const onField: string[] = plCfg[`${activePrefix}onField`] ?? [];
+  const entries: Record<string, number> = plCfg[`${activePrefix}entries`] ?? {};
+  const accumulated: Record<string, number> = plCfg[`${activePrefix}accumulated`] ?? {};
 
+  // Every starter slot is eligible to come off, whether or not "Kickoff"
+  // has been pressed yet on the Player List widget — starters/subs already
+  // stays self-maintaining as slots swap, so gating this on the separate
+  // onField ledger (playtime tracking only, see PlayerListWidget's own
+  // kickoff()) just meant a starter was unreachable here until an operator
+  // remembered to go trigger kickoff on a different widget first.
   const onFieldPlayers = useMemo(() =>
-    starterSlots.filter(id => id && onField.includes(id)).map(id => playerById[id]).filter(Boolean) as Player[],
-    [starterSlots, onField, playerById]
+    starterSlots.filter(id => id && playerById[id]).map(id => playerById[id]) as Player[],
+    [starterSlots, playerById]
   );
 
   const availableSubs = useMemo(() =>
@@ -97,6 +109,8 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
       inId,
       nameOut: playerById[outId] ? disp(playerById[outId].name) : '',
       nameIn: playerById[inId] ? disp(playerById[inId].name) : '',
+      jerseyOut: playerById[outId]?.jerseyNo || '',
+      jerseyIn: playerById[inId]?.jerseyNo || '',
     });
   };
 
@@ -112,24 +126,29 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
     if (selOut) openConfirm(selOut, id);
   };
 
-  const executeSwap = (outId: string, inId: string, nameOut: string, nameIn: string) => {
+  const executeSwap = (outId: string, inId: string, nameOut: string, nameIn: string, jerseyOut: string, jerseyIn: string) => {
     const outgoing = playerById[outId];
     const incoming = playerById[inId];
     if (!outgoing || !incoming) return;
 
-    // Send names to vMix (all linked inputs)
-    const subTargets: Array<{inputKey:string;vmixFieldOut?:string;vmixFieldIn?:string;vmixFieldLogo?:string;mergedPrefix?:string;mergedParts?:string[];mergedSeparator?:string}> = cfg.vmixInputs?.length
+    // Send names + jersey numbers to vMix (all linked inputs) — same
+    // name+jersey pairing every other player-facing widget in this app
+    // sends (Player/Score/Card Lower Third, etc.); this used to only ever
+    // send the name.
+    const subTargets: Array<{inputKey:string;vmixFieldOut?:string;vmixFieldIn?:string;vmixFieldJerseyOut?:string;vmixFieldJerseyIn?:string;vmixFieldLogo?:string;mergedPrefix?:string;mergedParts?:string[];mergedSeparator?:string}> = cfg.vmixInputs?.length
       ? cfg.vmixInputs
       : cfg.vmixInputKey
-        ? [{ inputKey: cfg.vmixInputKey, vmixFieldOut: cfg.vmixFieldOut, vmixFieldIn: cfg.vmixFieldIn, vmixFieldLogo: cfg.vmixFieldLogo }]
+        ? [{ inputKey: cfg.vmixInputKey, vmixFieldOut: cfg.vmixFieldOut, vmixFieldIn: cfg.vmixFieldIn, vmixFieldJerseyOut: cfg.vmixFieldJerseyOut, vmixFieldJerseyIn: cfg.vmixFieldJerseyIn, vmixFieldLogo: cfg.vmixFieldLogo }]
         : [];
     for (const t of subTargets) {
       if (!t.inputKey) continue;
       getClient()?.setTextField(t.inputKey, t.vmixFieldOut || 'PlayerOff.Text', nameOut);
       getClient()?.setTextField(t.inputKey, t.vmixFieldIn  || 'PlayerOn.Text',  nameIn);
+      if (t.vmixFieldJerseyOut) getClient()?.setTextField(t.inputKey, t.vmixFieldJerseyOut, jerseyOut);
+      if (t.vmixFieldJerseyIn)  getClient()?.setTextField(t.inputKey, t.vmixFieldJerseyIn,  jerseyIn);
       if (t.vmixFieldLogo) getClient()?.setImageField(t.inputKey, t.vmixFieldLogo, team?.logo || transparentLogoUrl());
       if (t.mergedPrefix && t.mergedParts?.length) {
-        const src: Record<string, string> = { out: nameOut, in: nameIn };
+        const src: Record<string, string> = { out: nameOut, in: nameIn, jerseyOut, jerseyIn };
         getClient()?.setTextField(t.inputKey, t.mergedPrefix, t.mergedParts.map(k => src[k] ?? '').join(t.mergedSeparator ?? ' '));
       }
     }
@@ -144,15 +163,25 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
     if (starterIdx >= 0) nextStarters[starterIdx] = inId;
     if (subIdx >= 0) nextSubs[subIdx] = outId;
 
-    const subbedOnPlayers: string[] = plCfg.subbedOnPlayers ?? [];
+    // A sub made here can be the very first roster action of the match —
+    // Quick Sub has no Kickoff button of its own, so if the other starters
+    // were never marked on-field yet (PlayerListWidget's kickoff() never
+    // ran), fold that in now: everyone still starting gets their playtime
+    // clock started from this moment, same as a real kickoff would.
+    const kickoffIds = starterSlots.filter(id => id && id !== outId && !onField.includes(id));
+    const nextEntries = { ...entries };
+    kickoffIds.forEach(id => { nextEntries[id] = currentMs; });
+    nextEntries[inId] = currentMs;
+
+    const subbedOnPlayers: string[] = plCfg[`${activePrefix}subbedOnPlayers`] ?? [];
     const targetId = playerListWidget ? playerListWidget.id : widgetId;
     updateWidgetConfig(targetId, {
-      starters: nextStarters,
-      subs: nextSubs,
-      onField: [...onField.filter(id => id !== outId), inId],
-      entries: { ...entries, [inId]: currentMs },
-      accumulated: { ...accumulated, [outId]: timePlayed },
-      subbedOnPlayers: [...new Set([...subbedOnPlayers, inId])],
+      [`${activePrefix}starters`]: nextStarters,
+      [`${activePrefix}subs`]: nextSubs,
+      [`${activePrefix}onField`]: [...new Set([...onField.filter(id => id !== outId), ...kickoffIds, inId])],
+      [`${activePrefix}entries`]: nextEntries,
+      [`${activePrefix}accumulated`]: { ...accumulated, [outId]: timePlayed },
+      [`${activePrefix}subbedOnPlayers`]: [...new Set([...subbedOnPlayers, inId])],
     });
 
     if (linkedTimelineId) {
@@ -166,11 +195,20 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
       });
     }
 
-    setLastSub({ out: nameOut, in: nameIn });
+    setLastSub({ out: nameOut, in: nameIn, jerseyOut, jerseyIn });
     cancelSelection();
   };
 
   const teamColor = team?.color ?? '#3498db';
+
+  // vMix overlay show/hide — same OverlayInput{ch}In/Out convention every
+  // lower-third widget in this app uses (Player/Score/Card Lower Third),
+  // targeting whichever vMix input this widget's Sub Overlay is configured
+  // to push into (the first one, if several are configured).
+  const overlayCh: number = cfg.overlayChannel ?? 1;
+  const primaryInputKey: string | undefined = cfg.vmixInputs?.[0]?.inputKey || cfg.vmixInputKey;
+  const overlay = vmixState?.overlays?.find((o: any) => o.number === overlayCh);
+  const overlayActive = !!(overlay && overlay.key !== '');
 
   return (
     <div className="wgt-sub">
@@ -181,10 +219,25 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
         <span className="wgt-sub-title">Quick Sub</span>
       </div>
 
-      {!team ? (
-        <div className="wgt-sub-empty">Link a team in settings</div>
-      ) : !playerListWidget ? (
+      <div className="wgt-sub-vmix-actions">
+        <button
+          className={`wgt-sub-vmix-btn wgt-sub-vmix-btn--show${overlayActive ? ' wgt-sub-vmix-btn--active' : ''}`}
+          onClick={() => overlayIn(overlayCh, primaryInputKey || undefined)}
+          disabled={!vmixState || !primaryInputKey}
+          title="Show sub overlay on vMix"
+        ><Eye size={12} strokeWidth={2} /> Show</button>
+        <button
+          className={`wgt-sub-vmix-btn wgt-sub-vmix-btn--hide${!overlayActive ? ' wgt-sub-vmix-btn--active' : ''}`}
+          onClick={() => overlayOut(overlayCh)}
+          disabled={!vmixState || !primaryInputKey}
+          title="Hide sub overlay from vMix"
+        ><EyeOff size={12} strokeWidth={2} /> Hide</button>
+      </div>
+
+      {!playerListWidget ? (
         <div className="wgt-sub-empty">Link a Player List widget in settings</div>
+      ) : !team ? (
+        <div className="wgt-sub-empty">No team loaded yet</div>
       ) : confirm ? (
         /* ── Confirmation dialog ── */
         <div className="wgt-sub-confirm">
@@ -192,6 +245,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
 
           <div className="wgt-sub-confirm-row">
             <span className="wgt-sub-confirm-lbl wgt-sub-confirm-lbl--off" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowDown size={12} strokeWidth={2} /> Off</span>
+            {confirm.jerseyOut && <span className="wgt-sub-no">{confirm.jerseyOut}</span>}
             <input
               className="wgt-sub-confirm-inp"
               value={confirm.nameOut}
@@ -201,6 +255,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
 
           <div className="wgt-sub-confirm-row">
             <span className="wgt-sub-confirm-lbl wgt-sub-confirm-lbl--in" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowUp size={12} strokeWidth={2} /> On</span>
+            {confirm.jerseyIn && <span className="wgt-sub-no">{confirm.jerseyIn}</span>}
             <input
               className="wgt-sub-confirm-inp"
               value={confirm.nameIn}
@@ -218,7 +273,7 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
             <button className="wgt-sub-confirm-cancel" onClick={cancelSelection}>Cancel</button>
             <button
               className="wgt-sub-confirm-ok"
-              onClick={() => executeSwap(confirm.outId, confirm.inId, confirm.nameOut, confirm.nameIn)}
+              onClick={() => executeSwap(confirm.outId, confirm.inId, confirm.nameOut, confirm.nameIn, confirm.jerseyOut, confirm.jerseyIn)}
             >
               Confirm Sub
             </button>
@@ -228,15 +283,17 @@ export function SubWidget({ widgetId, config: cfg }: Props) {
         <>
           {(selOut || selIn) && (
             <div className="wgt-sub-pending">
-              {selOut && <span className="wgt-sub-pending-off" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowDown size={12} strokeWidth={2} /> {playerById[selOut] ? disp(playerById[selOut].name) : ''}</span>}
+              {selOut && <span className="wgt-sub-pending-off" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowDown size={12} strokeWidth={2} /> {playerById[selOut] ? `${playerById[selOut].jerseyNo ? `#${playerById[selOut].jerseyNo} ` : ''}${disp(playerById[selOut].name)}` : ''}</span>}
               {selOut && selIn && <span className="wgt-sub-pending-arr"><ArrowRight size={12} strokeWidth={2} /></span>}
-              {selIn && <span className="wgt-sub-pending-in" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowUp size={12} strokeWidth={2} /> {playerById[selIn] ? disp(playerById[selIn].name) : ''}</span>}
+              {selIn && <span className="wgt-sub-pending-in" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><ArrowUp size={12} strokeWidth={2} /> {playerById[selIn] ? `${playerById[selIn].jerseyNo ? `#${playerById[selIn].jerseyNo} ` : ''}${disp(playerById[selIn].name)}` : ''}</span>}
               <button className="wgt-sub-cancel" onClick={cancelSelection}><X size={12} strokeWidth={2} /></button>
             </div>
           )}
 
           {lastSub && !selOut && !selIn && (
-            <div className="wgt-sub-last">Last: {lastSub.out} → {lastSub.in}</div>
+            <div className="wgt-sub-last">
+              Last: {lastSub.jerseyOut && `#${lastSub.jerseyOut} `}{lastSub.out} → {lastSub.jerseyIn && `#${lastSub.jerseyIn} `}{lastSub.in}
+            </div>
           )}
 
           <div className="wgt-sub-cols">

@@ -9552,6 +9552,50 @@ input.wgt-score-mtf::placeholder { color: var(--text-muted); opacity: 0.35; }
 .wgt-sub-team-name { font-weight: 600; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wgt-sub-title { font-size: 10px; opacity: 0.5; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; }
 
+.wgt-sub-vmix-actions {
+  display: flex;
+  gap: 4px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.wgt-sub-vmix-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+}
+.wgt-sub-vmix-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.wgt-sub-vmix-btn--show {
+  background: color-mix(in srgb, #2ecc71 15%, transparent);
+  border-color: color-mix(in srgb, #2ecc71 50%, transparent);
+  color: #2ecc71;
+}
+.wgt-sub-vmix-btn--show:not(:disabled):hover { background: color-mix(in srgb, #2ecc71 28%, transparent); }
+.wgt-sub-vmix-btn--show.wgt-sub-vmix-btn--active {
+  background: color-mix(in srgb, #2ecc71 35%, transparent);
+  border-color: #2ecc71;
+}
+.wgt-sub-vmix-btn--hide {
+  background: color-mix(in srgb, #e74c3c 15%, transparent);
+  border-color: color-mix(in srgb, #e74c3c 50%, transparent);
+  color: #e74c3c;
+}
+.wgt-sub-vmix-btn--hide:not(:disabled):hover { background: color-mix(in srgb, #e74c3c 28%, transparent); }
+.wgt-sub-vmix-btn--hide.wgt-sub-vmix-btn--active {
+  background: color-mix(in srgb, #e74c3c 35%, transparent);
+  border-color: #e74c3c;
+}
+
 .wgt-sub-empty {
   padding: 20px;
   text-align: center;

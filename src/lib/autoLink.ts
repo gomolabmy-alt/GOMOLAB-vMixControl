@@ -1,4 +1,5 @@
 import type { CanvasWidget, CanvasPage, WidgetType } from '../types/canvas';
+import { isDualPlayerList } from './playerListSquad';
 
 /** Finds the CanvasPage that owns a given widget id — the "which page am I
  *  on" lookup most widget components already repeat ad hoc for their own
@@ -55,7 +56,16 @@ export function autoLinkedWidgetPair(
   const allWidgets = pages.flatMap(p => p.widgets);
   const explicitAWidget = explicitA ? allWidgets.find(w => w.id === explicitA && w.type === targetType) : undefined;
   const explicitBWidget = explicitB ? allWidgets.find(w => w.id === explicitB && w.type === targetType) : undefined;
-  if (explicitAWidget || explicitBWidget) return { a: explicitAWidget, b: explicitBWidget };
+  if (explicitAWidget || explicitBWidget) {
+    // One side explicitly picked, the other left on auto (common for a
+    // config from before a widget supported both sides at once): if the
+    // explicit side is itself a side-by-side widget — already covering
+    // BOTH teams under one id via its own a_/b_ prefixes — the unset side
+    // defaults to that same widget instead of staying unresolved forever.
+    if (explicitAWidget && !explicitBWidget && isDualPlayerList(explicitAWidget)) return { a: explicitAWidget, b: explicitAWidget };
+    if (explicitBWidget && !explicitAWidget && isDualPlayerList(explicitBWidget)) return { a: explicitBWidget, b: explicitBWidget };
+    return { a: explicitAWidget, b: explicitBWidget };
+  }
 
   const page = findOwningPage(pages, ownWidgetId);
   if (!page) return {};

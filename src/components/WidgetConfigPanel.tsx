@@ -19,6 +19,8 @@ import { MergeFieldComposer, type MergePart } from './MergeFieldComposer';
 import type { ActionItem } from '../lib/buttonActions';
 import { HotkeyRecorder } from './HotkeyRecorder';
 import { collectHotkeyBindings } from '../lib/hotkeyBindings';
+import { autoLinkedWidget } from '../lib/autoLink';
+import { isDualPlayerList } from '../lib/playerListSquad';
 
 // Label for a player-list widget in a picker dropdown — shows the linked
 // saved team's name (teamDbStore), falling back to a short widget id.
@@ -4209,36 +4211,30 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
         const allPlayerListWidgets = pages.flatMap(p => p.widgets.filter(w => w.type === 'player-list'));
         const timerWidgets2 = pages.flatMap(p => p.widgets.filter(w => w.type === 'timer'));
         const timelineWidgets2 = pages.flatMap(p => p.widgets.filter(w => w.type === 'timeline'));
-        const effLinkedTournamentId2 = cfg.linkedTournamentId || pageTournamentId;
-        const scopedTeams2 = effLinkedTournamentId2
-          ? teamDbTeams.filter(t => t.tournamentId === effLinkedTournamentId2)
-          : teamDbTeams;
+        const plLabel2 = (w: { id: string; config: Record<string, any> }) => plWidgetLabel(w, teamDbTeams);
+        // Each Quick Sub widget is single-team — add a second widget for the
+        // other side. Team Side only matters (and only shows) when the
+        // linked Player List widget is itself a side-by-side one covering
+        // both teams under one id; a dedicated single-team widget has
+        // nothing to pick between.
+        const resolvedPl = autoLinkedWidget(pages, widget.id, cfg.linkedPlayerListId, 'player-list');
+        const plIsDual = !!resolvedPl && isDualPlayerList(resolvedPl);
+        const sideTeamName = (s: 'A' | 'B') => resolvedPl ? teamDbTeams.find(t => t.id === resolvedPl.config[`${s.toLowerCase()}_resolvedTeamId`])?.name : undefined;
         return (
           <>
             <Field label="Player List Widget">
-              <select className="field-input" value={cfg.linkedPlayerListId ?? ''} onChange={e => {
-                const plw = allPlayerListWidgets.find(w => w.id === e.target.value);
-                up({ linkedPlayerListId: e.target.value, linkedTournamentId: plw?.config.linkedTournamentId ?? cfg.linkedTournamentId, linkedTeamId: plw?.config.linkedTeamId ?? cfg.linkedTeamId });
-              }}>
-                <option value="">— select widget —</option>
-                {allPlayerListWidgets.map(w => <option key={w.id} value={w.id}>{plWidgetLabel(w, teamDbTeams)}</option>)}
+              <select className="field-input" value={cfg.linkedPlayerListId ?? ''} onChange={e => up({ linkedPlayerListId: e.target.value })}>
+                <option value="">— auto —</option>
+                {allPlayerListWidgets.map(w => <option key={w.id} value={w.id}>{plLabel2(w)}</option>)}
               </select>
             </Field>
-            {!cfg.linkedPlayerListId && (
-              <>
-                <Field label="Tournament">
-                  <select className="field-input" value={cfg.linkedTournamentId ?? ''} onChange={e => up({ linkedTournamentId: e.target.value })}>
-                    <option value="">{pageTournament ? `— Auto: ${pageTournament.name} (this canvas) —` : '— select tournament (for periods/settings) —'}</option>
-                    {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                  </select>
-                </Field>
-                <Field label="Team">
-                  <select className="field-input" value={cfg.linkedTeamId ?? ''} onChange={e => up({ linkedTeamId: e.target.value })}>
-                    <option value="">— select team —</option>
-                    {scopedTeams2.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-                  </select>
-                </Field>
-              </>
+            {plIsDual && (
+              <Field label="Team Side">
+                <select className="field-input" value={cfg.teamSide ?? 'A'} onChange={e => up({ teamSide: e.target.value })}>
+                  <option value="A">{sideTeamName('A') ?? 'Team A'}</option>
+                  <option value="B">{sideTeamName('B') ?? 'Team B'}</option>
+                </select>
+              </Field>
             )}
             <Field label="Linked Timer">
               <select className="field-input" value={cfg.linkedTimerWidgetId ?? ''} onChange={e => up({ linkedTimerWidgetId: e.target.value })}>
@@ -4253,8 +4249,13 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
               </select>
             </Field>
             <CollapsibleSection label="vMix Sub Overlay">
+              <Field label="Overlay Channel">
+                <select className="field-input" value={cfg.overlayChannel ?? 1} onChange={e => up({ overlayChannel: Number(e.target.value) })}>
+                  {[1, 2, 3, 4].map(n => <option key={n} value={n}>Overlay {n}</option>)}
+                </select>
+              </Field>
             {(() => {
-              type SubInput = { id: string; inputKey: string; inputTitle?: string; vmixFieldOut: string; vmixFieldIn: string; vmixFieldLogo?: string; mergedPrefix?: string; mergedParts?: string[]; mergedSeparator?: string };
+              type SubInput = { id: string; inputKey: string; inputTitle?: string; vmixFieldOut: string; vmixFieldIn: string; vmixFieldJerseyOut?: string; vmixFieldJerseyIn?: string; vmixFieldLogo?: string; mergedPrefix?: string; mergedParts?: string[]; mergedSeparator?: string };
               const subInputs: SubInput[] = cfg.vmixInputs?.length
                 ? cfg.vmixInputs
                 : cfg.vmixInputKey
@@ -4287,8 +4288,14 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                           <Field label="Player Off field">
                             {renderFieldPicker(inp.inputKey, inp.vmixFieldOut, v => updateSub(idx, { vmixFieldOut: v }), 'Title.Text', undefined, allInputs)}
                           </Field>
+                          <Field label="Player Off jersey field">
+                            {renderFieldPicker(inp.inputKey, inp.vmixFieldJerseyOut ?? '', v => updateSub(idx, { vmixFieldJerseyOut: v }), 'JerseyOff.Text', undefined, allInputs)}
+                          </Field>
                           <Field label="Player On field">
                             {renderFieldPicker(inp.inputKey, inp.vmixFieldIn, v => updateSub(idx, { vmixFieldIn: v }), 'Title.Text', undefined, allInputs)}
+                          </Field>
+                          <Field label="Player On jersey field">
+                            {renderFieldPicker(inp.inputKey, inp.vmixFieldJerseyIn ?? '', v => updateSub(idx, { vmixFieldJerseyIn: v }), 'JerseyOn.Text', undefined, allInputs)}
                           </Field>
                           <Field label="Team Logo field">
                             {renderFieldPicker(inp.inputKey, inp.vmixFieldLogo ?? '', v => updateSub(idx, { vmixFieldLogo: v }), 'Team.Source', n => n.toLowerCase().endsWith('.source'), allInputs)}
@@ -4297,6 +4304,8 @@ export function WidgetConfigPanel({ widget, onClose, pagesOverride, actionsOverr
                             parts={[
                               { key: 'out', label: 'Player Off', sample: 'John Smith' },
                               { key: 'in', label: 'Player On', sample: 'Mike Jones' },
+                              { key: 'jerseyOut', label: 'Jersey Off', sample: '7' },
+                              { key: 'jerseyIn', label: 'Jersey On', sample: '14' },
                             ]}
                             mergedParts={inp.mergedParts ?? []}
                             mergedPrefix={inp.mergedPrefix ?? ''}

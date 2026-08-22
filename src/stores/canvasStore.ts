@@ -2187,23 +2187,29 @@ export const useCanvasStore = create<CanvasStore>()(
           }
         },
 
-        // Clears both teams' name/short name/logo — for starting a fresh
+        // Clears both teams' name/short name/logo/id — for starting a fresh
         // manual matchup from blank rather than editing over whatever was
         // there before. Logo is set to a transparent placeholder rather than
         // '' so the vMix push below actually clears the on-air image instead
         // of leaving the previous team's logo showing (an empty string is
         // falsy, so a plain clear wouldn't trigger the image field push).
+        // teamAId/teamBId must be cleared alongside the name — leaving the
+        // old id behind while blanking the name it went with is exactly the
+        // "id set, name blank" state every id-then-name team lookup in this
+        // app (Player List, Rugby Lineup, etc.) has to treat as a genuine,
+        // resolvable team, so a stale id here silently un-does the reset for
+        // any widget that resolves its team that way.
         resetWidgetTeams: async (widgetId) => {
           const config = findWidgetConfig(widgetId);
           if (!config) return;
           const before = {
-            teamAName: config.teamAName, teamAShortName: config.teamAShortName, teamALogo: config.teamALogo,
-            teamBName: config.teamBName, teamBShortName: config.teamBShortName, teamBLogo: config.teamBLogo,
+            teamAId: config.teamAId, teamAName: config.teamAName, teamAShortName: config.teamAShortName, teamALogo: config.teamALogo,
+            teamBId: config.teamBId, teamBName: config.teamBName, teamBShortName: config.teamBShortName, teamBLogo: config.teamBLogo,
           };
           const blankLogo = transparentLogoUrl();
           updateWidgetConfig(widgetId, {
-            teamAName: '', teamAShortName: '', teamALogo: blankLogo,
-            teamBName: '', teamBShortName: '', teamBLogo: blankLogo,
+            teamAId: undefined, teamAName: '', teamAShortName: '', teamALogo: blankLogo,
+            teamBId: undefined, teamBName: '', teamBShortName: '', teamBLogo: blankLogo,
           });
           useUndoStore.getState().pushUndo('Reset teams', () => updateWidgetConfig(widgetId, before));
           {

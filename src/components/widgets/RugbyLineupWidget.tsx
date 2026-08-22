@@ -204,7 +204,12 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h, nextMatchMode }
   // isn't a live one yet, that's the whole point.
   const linkedScoreboard = nextMatchMode ? undefined : autoLinkedWidget(pages, widgetId, cfg.linkedScoreboardId, 'scoreboard');
   const dc = linkedScoreboard?.config ?? {};
-  const scoreboardTeamName: string | undefined = linkedScoreboard ? (side === 'A' ? dc.teamAName : dc.teamBName) : undefined;
+  // '|| undefined' (not just the raw field) so a scoreboard whose name field
+  // is blank but whose id IS set (e.g. loaded from a fixture whose own name
+  // field was empty) doesn't win an empty string over a real resolved name
+  // further down every ?? chain these two feed into.
+  const scoreboardTeamId: string | undefined = linkedScoreboard ? (side === 'A' ? dc.teamAId : dc.teamBId) : undefined;
+  const scoreboardTeamName: string | undefined = linkedScoreboard ? ((side === 'A' ? dc.teamAName : dc.teamBName) || undefined) : undefined;
   const scoreboardTeamColor: string | undefined = linkedScoreboard ? (side === 'A' ? dc.teamAColor : dc.teamBColor) : undefined;
 
   // Player List link: explicit pick wins, else whichever side of the linked
@@ -231,7 +236,9 @@ export function RugbyLineupWidget({ widgetId, config: cfg, w, h, nextMatchMode }
   const tournamentIdForLookup: string | undefined = dc.linkedTournamentId || owningPage?.tournamentId;
   const linkedTeam = cfg.linkedTeamId
     ? teamDbTeams.find(t => t.id === cfg.linkedTeamId)
-    : roster.team ?? (scoreboardTeamName ? findTeamRecord(teamDbTeams, scoreboardTeamName, dc.category, tournamentIdForLookup) : undefined);
+    : roster.team
+      ?? (scoreboardTeamId ? teamDbTeams.find(t => t.id === scoreboardTeamId) : undefined)
+      ?? (scoreboardTeamName ? findTeamRecord(teamDbTeams, scoreboardTeamName, dc.category, tournamentIdForLookup) : undefined);
   const teamName: string = scoreboardTeamName ?? linkedTeam?.name ?? cfg.teamName ?? 'Team Name';
   const teamColor: string = cfg.teamColor ?? scoreboardTeamColor ?? '#3498db';
 

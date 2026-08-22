@@ -69,6 +69,12 @@ export function PlayerListWidget({ widgetId, config: cfg, nextMatchMode }: Props
   let teamA: SavedTeam | undefined;
   let teamB: SavedTeam | undefined;
   let dual = false;
+  // Identifies WHICH fixture teamA/teamB came from, independent of team
+  // identity — needed because a round-robin team can face the "next" slot
+  // again later, and by keyPrefix + this id (not just team id) the auto
+  // Next Match -> Live promotion below can tell that rematch apart from
+  // the fixture it already promoted.
+  let nextFixtureId: string | undefined;
 
   if (nextMatchMode) {
     dual = true;
@@ -77,14 +83,21 @@ export function PlayerListWidget({ widgetId, config: cfg, nextMatchMode }: Props
     });
     teamA = next?.teamA;
     teamB = next?.teamB;
+    nextFixtureId = next?.match.id;
   } else if (cfg.layout === 'side-by-side' && dc) {
     dual = true;
-    teamA = findTeamRecord(teamDbTeams, dc.teamAName ?? '', dc.category, dc.linkedTournamentId);
-    teamB = findTeamRecord(teamDbTeams, dc.teamBName ?? '', dc.category, dc.linkedTournamentId);
+    // Id first, name as a fallback for a scoreboard that was never linked to
+    // a real Team DB entry (manual/typed team, or data from before teamAId/
+    // teamBId existed) — a scoreboard can end up with the id set but its own
+    // name fields blank (e.g. loaded from a fixture whose own name field
+    // was empty), which a name-only lookup can never recover from.
+    teamA = (dc.teamAId && teamDbTeams.find(t => t.id === dc.teamAId)) || findTeamRecord(teamDbTeams, dc.teamAName ?? '', dc.category, dc.linkedTournamentId);
+    teamB = (dc.teamBId && teamDbTeams.find(t => t.id === dc.teamBId)) || findTeamRecord(teamDbTeams, dc.teamBName ?? '', dc.category, dc.linkedTournamentId);
   } else if (dc) {
     const side: 'A' | 'B' = cfg.teamSide ?? 'A';
     const name = side === 'A' ? dc.teamAName : dc.teamBName;
-    teamA = findTeamRecord(teamDbTeams, name ?? '', dc.category, dc.linkedTournamentId);
+    const id = side === 'A' ? dc.teamAId : dc.teamBId;
+    teamA = (id && teamDbTeams.find(t => t.id === id)) || findTeamRecord(teamDbTeams, name ?? '', dc.category, dc.linkedTournamentId);
   } else {
     teamA = teamDbTeams.find(t => t.id === cfg.linkedTeamId);
   }
@@ -108,7 +121,7 @@ export function PlayerListWidget({ widgetId, config: cfg, nextMatchMode }: Props
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dual, resolvedAId, resolvedBId, cfg.resolvedTeamId, cfg.a_resolvedTeamId, cfg.b_resolvedTeamId, widgetId]);
 
-  const panelShared = { widgetId, cfg, updateWidgetConfig, addTimelineEvent, pages, tournament, nextMatchMode };
+  const panelShared = { widgetId, cfg, updateWidgetConfig, addTimelineEvent, pages, tournament, nextMatchMode, nextFixtureId };
 
   if (dual) {
     return (
@@ -133,9 +146,10 @@ interface PanelProps {
   pages: CanvasPage[];
   tournament: Tournament | null;
   nextMatchMode?: boolean;
+  nextFixtureId?: string;
 }
 
-function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidgetConfig, addTimelineEvent, pages, tournament, nextMatchMode }: PanelProps) {
+function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidgetConfig, addTimelineEvent, pages, tournament, nextMatchMode, nextFixtureId }: PanelProps) {
   const { updatePlayer, updateTeam, updateStaffMember, setJerseySetNumber } = useTeamDbStore();
   const { getClient, vmixState, vmixSyncVersion } = useVmixStore();
   // Simple Names (App Settings) — applied to every READ-ONLY name display
@@ -527,11 +541,12 @@ function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidge
   // then that scoreboard's own paired Player List for that side — same
   // auto-link pairing every other side-aware widget already resolves
   // through (Card/Sin Bin/Score Lower Third, Timeline, Rugby Lineup).
-  const findLiveTarget = useCallback((): { liveWidgetId: string; livePrefix: string } | null => {
-    if (!team) return null;
+  const findLiveTarget = useCallback((forTeamName?: string): { liveWidgetId: string; livePrefix: string } | null => {
+    const name = forTeamName ?? team?.name;
+    if (!name) return null;
     const allWidgets = pages.flatMap(p => p.widgets);
     const scoreboards = allWidgets.filter(w => w.type === 'scoreboard');
-    const teamNameLc = team.name.trim().toLowerCase();
+    const teamNameLc = name.trim().toLowerCase();
     for (const sb of scoreboards) {
       const dc = sb.config;
       const liveSide: 'A' | 'B' | null =
@@ -571,6 +586,56 @@ function PlayerListTeamPanel({ widgetId, cfg, keyPrefix, side, team, updateWidge
     });
     setPendingSendLive(null);
   };
+
+  // ── Auto-promote: Next Match -> Live, no button needed ──────────────
+  // The moment this side's prepped fixture is loaded onto a live scoreboard
+  // (operator action, e.g. via the schedule picker), silently copy its
+  // starters/subs onto that scoreboard's own Player List — same payload
+  // confirmSendLive() sends manually, just fired automatically. This also
+  // covers a Rugby Lineup "Next Match" widget: it has no squad state of its
+  // own, it only ever writes through to whichever player-list-next widget
+  // it's linked to (see RugbyLineupWidget.tsx), so promoting it here is
+  // enough for both widget types.
+  //
+  // `team` can't be compared directly at the moment it goes live: loading a
+  // match marks it sentAt in the same store update that sets the
+  // scoreboard's name fields, so resolveNextFixtureTeams() has already
+  // advanced `team` to the fixture after next by the time this effect sees
+  // the scoreboard go live. So the last-prepped roster is remembered in a
+  // ref, keyed by fixture id (not team id, so a round-robin rematch on the
+  // same court is treated as a new promotion, not a repeat).
+  const preppedRef = useRef<{ fixtureId: string; teamName: string; starters: string[]; subs: string[] } | null>(null);
+  const autoSentRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!nextMatchMode) return;
+    if (team && nextFixtureId) {
+      const starters: string[] = cfg[k('starters')] ?? [];
+      const subs: string[] = cfg[k('subs')] ?? [];
+      if (starters.some(id => !!id) || subs.some(id => !!id)) {
+        preppedRef.current = { fixtureId: nextFixtureId, teamName: team.name, starters, subs };
+      }
+    }
+    const snap = preppedRef.current;
+    if (!snap) return;
+    const target = findLiveTarget(snap.teamName);
+    if (!target) return;
+    const sentKey = `${snap.fixtureId}:${target.liveWidgetId}:${target.livePrefix}`;
+    if (autoSentRef.current.has(sentKey)) return;
+    autoSentRef.current.add(sentKey);
+    const liveCfg = pages.flatMap(p => p.widgets).find(w => w.id === target.liveWidgetId)?.config ?? {};
+    const targetHasSquad =
+      (liveCfg[`${target.livePrefix}starters`] ?? []).some((id: string) => !!id) ||
+      (liveCfg[`${target.livePrefix}subs`] ?? []).some((id: string) => !!id);
+    // Never overwrite a squad the operator already set directly on the live
+    // widget — same guardrail confirmSendLive relies on the confirmation
+    // modal for, just automatic here since there's no modal to ask.
+    if (targetHasSquad) return;
+    updateWidgetConfig(target.liveWidgetId, {
+      [`${target.livePrefix}starters`]: snap.starters,
+      [`${target.livePrefix}subs`]: snap.subs,
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nextMatchMode, team?.id, nextFixtureId, cfg[k('starters')], cfg[k('subs')], pages]);
 
   // Auto-send full list whenever slots change and any target has auto-sync on
   // (also re-fires on vmixSyncVersion so a reconnect re-pushes the current
